@@ -1,0 +1,12 @@
+dsh-deepseek-web-login
+Copyright 2026 cv-superding (Ding Li)
+
+This product is an unofficial, independent plugin for the DeepSeek Harness
+plugin ecosystem. It is NOT affiliated with, endorsed by, or sponsored by
+DeepSeek. "DeepSeek" is a trademark of its respective owner.
+
+The implementation is original work. It was informed by publicly documented
+behaviour of the chat.deepseek.com web client as described by prior
+open-source projects (see the Acknowledgements section of README.md); no
+source code from those projects, and no code extracted from any packaged
+application, is included in this distribution.

@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+*.tgz
+
+# ⛔ 参考资料：内含从打包应用提取的文件与第三方项目源码，禁止入库
+.ref/
+ref/
+
+# 本地凭证（插件把凭证写在 DSH_HOME 下，这里仅作防御性忽略）
+web-login/
+deepseek-auth.json
+.env
+.env.*
+
+# 开发副本（scripts/make-dev-copy.mjs 生成）
+dsh-deepseek-web-login-*/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

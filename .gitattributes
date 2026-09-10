@@ -1,0 +1,7 @@
+# 统一换行：仓库内一律 LF，检出时按平台自动转换
+* text=auto eol=lf
+
+# 二进制 / 构建产物不做换行转换
+*.png binary
+*.ico binary
+*.tgz binary

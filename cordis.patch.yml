@@ -1,0 +1,6 @@
+# DSH bundle 装配层：走官方装配（dsh plugin add / dev_install_package）时插入本插件。
+# 运行时注入（dev_inject_plugin）不读本文件。
+- insert:
+    - id: dsh-deepseek-web-login
+      name: dsh-deepseek-web-login
+      config: {}
