@@ -463,39 +463,58 @@ async function* iterateLines(body: any): AsyncGenerator<string> {
   if (buffer.length > 0) yield buffer.replace(/\r$/, '')
 }
 
-/** 网页端 completion 负载的解析状态机（可单测：handle 返回待 yield 的事件）。 */
+/**
+ * 网页端 completion 负载的解析状态机（可单测：handle 返回待 yield 的事件）。
+ *
+ * ⚠️ 正确性模型（2026-09 事故修复）：
+ *   真实事故：模型回答了完整一段，DSH 里只显示「，」「不上」「了一圈」这类 1~3 字碎片，
+ *   并伴随 EMPTY_RESPONSE 重试。根因是旧实现用「只增不减的 emitted 计数器」做去重，
+ *   而快照会把派生文本重置为更短的内容 —— 计数器被撑大后保持高位，后续只在文本长度
+ *   超过它时才吐字，于是前面的全丢、只剩余数的尾巴；余数为空又触发重试。
+ *
+ *   现在的规则：
+ *     ① **增量事件驱动发射**（fragment APPEND / -1/content / thinking_content / content / 裸 v）
+ *     ② **快照只做对账**：仅当候选文本是「已发射内容的严格延伸」时补差；
+ *        更短（过期快照）或分歧（服务端重排/回退）一律忽略，绝不重置已发射内容
+ *     ③ 快照永远不会让已发射内容变小 → 不会丢字、不会因此触发假 EMPTY_RESPONSE
+ */
 export function createSseState() {
   const fragments: Fragment[] = []
-  // 增量累加器：正文/思考各一条逻辑流（fragments 与直连两种格式共用）
+  /** fragments 派生文本（仅用于快照对账候选）。 */
   let fragmentsText = ''
   let fragmentsThinking = ''
+  /** 直连格式的派生文本（仅用于快照对账候选）。 */
   let directText = ''
   let directThinking = ''
-  // 已发射长度（按逻辑流去重 → 快照重放不会重复吐字）
-  let emittedText = 0
-  let emittedThinking = 0
+  /** 已发射的规范流（只增不减）。 */
+  let outText = ''
+  let outThinking = ''
+  let divergences = 0
   let sink: 'fragments' | 'thinking' | 'content' | null = null
   let pendingFinish: string | undefined
   let sawData = false
 
-  const fullText = (): string => (fragments.length > 0 ? fragmentsText : directText)
-  const fullThinking = (): string => (fragments.length > 0 ? fragmentsThinking : directThinking)
-
-  /** 计算两条逻辑流的增量（快照重放/交错格式下都只吐新增部分）。 */
-  const emitDiffs = (out: WebStreamEvent[]): void => {
-    const thinking = fullThinking()
-    if (thinking.length > emittedThinking) {
-      const delta = thinking.slice(emittedThinking)
-      emittedThinking = thinking.length
-      if (delta) out.push({ kind: 'thinking', text: delta })
-    }
-    const text = fullText()
-    if (text.length > emittedText) {
-      const delta = text.slice(emittedText)
-      emittedText = text.length
-      if (delta) out.push({ kind: 'text', text: delta })
-    }
+  const emit = (out: WebStreamEvent[], kind: 'text' | 'thinking', delta: string): void => {
+    if (!delta) return
+    if (kind === 'text') outText += delta
+    else outThinking += delta
+    out.push({ kind, text: delta })
   }
+  const emitText = (out: WebStreamEvent[], delta: string): void => emit(out, 'text', delta)
+  const emitThinking = (out: WebStreamEvent[], delta: string): void => emit(out, 'thinking', delta)
+
+  /** 快照对账：只在候选是严格延伸时补差；过期/分歧忽略（宁可漏一次快照，也不吐乱码或丢字）。 */
+  const reconcile = (out: WebStreamEvent[], kind: 'text' | 'thinking', candidate: string): void => {
+    const current = kind === 'text' ? outText : outThinking
+    if (!candidate || candidate === current) return
+    if (candidate.startsWith(current)) {
+      emit(out, kind, candidate.slice(current.length))
+      return
+    }
+    if (current.startsWith(candidate)) return // 过期（更短）快照
+    divergences += 1 // 分歧：忽略
+  }
+
   /** 重建 fragments 派生文本（快照覆盖时用）。 */
   const rebuildFragmentText = (): void => {
     fragmentsText = ''
@@ -505,36 +524,66 @@ export function createSseState() {
       else fragmentsText += fragment.content
     }
   }
-  const pushFragments = (incoming: any): void => {
-    const list = Array.isArray(incoming) ? incoming : incoming !== undefined ? [incoming] : []
+  /** 快照：整表替换 + 对账（不直接发射）。 */
+  const replaceFragments = (list: any[]): void => {
+    fragments.length = 0
     for (const f of list) {
       if (f && typeof f === 'object' && typeof f.content === 'string') {
-        const fragment: Fragment = { type: String(f.type ?? 'RESPONSE'), content: f.content, emitted: 0 }
-        fragments.push(fragment)
-        if (isReasoningType(fragment.type)) fragmentsThinking += fragment.content
-        else fragmentsText += fragment.content
+        fragments.push({ type: String(f.type ?? 'RESPONSE'), content: f.content, emitted: 0 })
+      }
+    }
+    rebuildFragmentText()
+    sink = fragments.length > 0 ? 'fragments' : null
+  }
+  /** 增量：追加 fragment（其 content 属于新内容 → 直接发射）。 */
+  const appendFragments = (incoming: any, out: WebStreamEvent[]): void => {
+    const list = Array.isArray(incoming) ? incoming : incoming !== undefined ? [incoming] : []
+    for (const f of list) {
+      if (!f || typeof f !== 'object' || typeof f.content !== 'string') continue
+      const fragment: Fragment = { type: String(f.type ?? 'RESPONSE'), content: f.content, emitted: 0 }
+      fragments.push(fragment)
+      if (isReasoningType(fragment.type)) {
+        fragmentsThinking += fragment.content
+        emitThinking(out, fragment.content)
+      } else {
+        fragmentsText += fragment.content
+        emitText(out, fragment.content)
       }
     }
     sink = fragments.length > 0 ? 'fragments' : null
   }
-  const appendToFragment = (fragment: Fragment, text: string): void => {
+  /** 增量：续写最后一个 fragment。 */
+  const appendToLastFragment = (text: string, out: WebStreamEvent[]): void => {
+    const fragment = fragments[fragments.length - 1]
+    if (!fragment) {
+      directText += text
+      emitText(out, text)
+      return
+    }
     fragment.content += text
-    if (isReasoningType(fragment.type)) fragmentsThinking += text
-    else fragmentsText += text
+    if (isReasoningType(fragment.type)) {
+      fragmentsThinking += text
+      emitThinking(out, text)
+    } else {
+      fragmentsText += text
+      emitText(out, text)
+    }
   }
-  const appendSink = (text: string): void => {
+  /** 增量：裸续段按当前 sink 归属。 */
+  const appendSink = (text: string, out: WebStreamEvent[]): void => {
     if (sink === 'thinking') {
       directThinking += text
+      emitThinking(out, text)
     } else if (sink === 'content') {
       directText += text
+      emitText(out, text)
     } else if (sink === 'fragments') {
-      const fragment = fragments[fragments.length - 1]
-      if (fragment) appendToFragment(fragment, text)
+      appendToLastFragment(text, out)
     }
   }
 
   return {
-    /** 负载处理（只改状态，返回即时事件；文本增量由外层 handle 统一发射）。 */
+    /** 负载处理（增量直接发射；快照只对账）。 */
     handlePayload(d: any, eventName?: string): WebStreamEvent[] {
       const out: WebStreamEvent[] = []
       sawData = true
@@ -542,18 +591,17 @@ export function createSseState() {
       if (d && typeof d === 'object' && d.v && typeof d.v === 'object' && d.v.response && typeof d.v.response === 'object') {
         const response = d.v.response
         if (Array.isArray(response.fragments)) {
-          fragments.length = 0
-          for (const f of response.fragments) {
-            if (f && typeof f === 'object' && typeof f.content === 'string') {
-              fragments.push({ type: String(f.type ?? 'RESPONSE'), content: f.content, emitted: 0 })
-            }
+          replaceFragments(response.fragments)
+          // fragments 存在时以它为准；否则用 content
+          if (fragments.length > 0) {
+            reconcile(out, 'thinking', fragmentsThinking)
+            reconcile(out, 'text', fragmentsText)
           }
-          rebuildFragmentText()
-          sink = fragments.length > 0 ? 'fragments' : null
         }
         if (typeof response.content === 'string') {
           directText = response.content
           sink = 'content'
+          if (fragments.length === 0) reconcile(out, 'text', directText)
         }
         if (response.finish_reason !== undefined && response.finish_reason !== null) {
           pendingFinish = String(response.finish_reason)
@@ -583,13 +631,11 @@ export function createSseState() {
       if (typeof path === 'string') {
         switch (path) {
           case 'response/fragments':
-            pushFragments(value)
+            appendFragments(value, out)
             return out
           case 'response/fragments/-1/content': {
             if (typeof value === 'string') {
-              const fragment = fragments[fragments.length - 1]
-              if (fragment) appendToFragment(fragment, value)
-              else directText += value // 未见 fragment 前的裸内容：当作正文直连
+              appendToLastFragment(value, out)
               sink = 'fragments'
             }
             return out
@@ -597,12 +643,14 @@ export function createSseState() {
           case 'response/thinking_content':
             if (typeof value === 'string') {
               directThinking += value
+              emitThinking(out, value)
               sink = 'thinking'
             }
             return out
           case 'response/content':
             if (typeof value === 'string') {
               directText += value
+              emitText(out, value)
               sink = 'content'
             }
             return out
@@ -619,7 +667,7 @@ export function createSseState() {
             if (Array.isArray(value)) {
               for (const op of value) {
                 if (op && typeof op === 'object' && op.p === 'fragments' && op.o === 'APPEND' && op.v !== undefined) {
-                  pushFragments(op.v)
+                  appendFragments(op.v, out)
                 }
               }
             }
@@ -630,18 +678,20 @@ export function createSseState() {
         }
       }
       // 5) 无 path 的续段：承接当前 sink
-      if (typeof value === 'string' && value.length > 0) appendSink(value)
+      if (typeof value === 'string' && value.length > 0) appendSink(value, out)
       return out
     },
-    /** 对外入口：先跑负载逻辑，再把两条逻辑流的增量吐出来（快照重放不重复）。 */
+    /** 对外入口（负载已直接发射增量，这里只做兜底对账）。 */
     handle(d: any, eventName?: string): WebStreamEvent[] {
-      const out = this.handlePayload(d, eventName)
-      emitDiffs(out)
-      return out
+      return this.handlePayload(d, eventName)
     },
     /** 流结束：产出 finish（若确实收到过数据）。 */
     finish(): WebStreamEvent[] {
       return sawData ? [{ kind: 'finish', reason: pendingFinish }] : []
+    },
+    /** 诊断：已发射正文/思考长度与快照分歧次数（单测与排查用）。 */
+    stats(): { text: string; thinking: string; divergences: number } {
+      return { text: outText, thinking: outThinking, divergences }
     },
   }
 }

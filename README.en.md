@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#models)
-[![Tests](https://img.shields.io/badge/tests-35%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
+[![Tests](https://img.shields.io/badge/tests-40%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#disclaimer)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#contributing)
@@ -50,7 +50,7 @@ free web quota.
 
 ```bash
 # A: from the release tarball (recommended, no build step)
-dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.0.tgz
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.1.tgz
 
 # B: git install (requires github.com reachability)
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
@@ -102,7 +102,7 @@ Context: the server declares `normal_history_and_file_token_limit = 890880` (1M 
 ## Testing
 
 ```bash
-node tests/logic-test.mjs            # 35 pure-logic assertions
+node tests/logic-test.mjs            # 40 pure-logic assertions
 node tests/probe-live.mjs            # raw SSE event stream + timings (--big=N for long prompts)
 node tests/probe-xml-live.mjs        # XML-marker scenario against the live model
 node tests/probe-vision.mjs          # image channel (generates a red/blue PNG, uploads it, asks)

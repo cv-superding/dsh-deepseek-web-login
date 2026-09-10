@@ -420,6 +420,71 @@ test('filter: 样本#2 不再把工具调用泄漏成正文', () => {
   assert.ok(!text.includes('tool_calls'), `正文泄漏：${text}`)
 })
 
+// ── SSE 增量/快照对账（2026-09 事故回归）────────────────────────
+// 现场：模型「找了一圈，结论是…」在 DSH 里只显示「了一圈」，并伴随 EMPTY_RESPONSE 重试。
+// 根因：旧实现用只增不减的「已发射计数器」去重，而快照会把派生文本重置得更短 →
+// 计数器保持高位，只在文本长度超过它时才吐字，于是前面全丢、只剩余数尾巴。
+test('sse 回归: 缩水快照后继续增量，不得丢字', () => {
+  const state = createSseState()
+  const events = []
+  events.push(...state.handle({ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '抱歉，我把生态找' } }))
+  // 一份「只含思考、丢掉正文」的缩水快照（现场就是这种）
+  events.push(...state.handle({ v: { response: { fragments: [{ type: 'THINK', content: '让我想想' }] } } }))
+  events.push(...state.handle({ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '了一圈，结论是…' } }))
+  events.push(...state.handle({ p: 'response/fragments/-1/content', v: '没有现成插件。' }))
+  events.push(...state.finish())
+
+  const text = events.filter((e) => e.kind === 'text').map((e) => e.text).join('')
+  assert.equal(text, '抱歉，我把生态找了一圈，结论是…没有现成插件。', `实际=${JSON.stringify(text)}`)
+  assert.ok(!/^了一圈/.test(text), '不得只吐出「了一圈」这类尾巴')
+  assert.ok(state.stats().text.endsWith('没有现成插件。'))
+})
+
+test('sse 回归: 缩水快照不得造成假空回复（否则触发 EMPTY_RESPONSE 重试）', () => {
+  const state = createSseState()
+  const events = []
+  events.push(...state.handle({ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '完整回答' } }))
+  events.push(...state.handle({ v: { response: { fragments: [] } } }))
+  const text = events.filter((e) => e.kind === 'text').map((e) => e.text).join('')
+  assert.equal(text, '完整回答', `实际=${JSON.stringify(text)}`)
+  assert.equal(state.stats().text, '完整回答')
+})
+
+test('sse 回归: 快照严格延伸时只补差（不重复吐字）', () => {
+  const state = createSseState()
+  const events = []
+  events.push(...state.handle({ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '前半' } }))
+  events.push(...state.handle({ v: { response: { fragments: [{ type: 'RESPONSE', content: '前半后半' }] } } }))
+  const text = events.filter((e) => e.kind === 'text').map((e) => e.text).join('')
+  assert.equal(text, '前半后半', `实际=${JSON.stringify(text)}`)
+  const again = state.handle({ v: { response: { fragments: [{ type: 'RESPONSE', content: '前半后半' }] } } })
+  assert.equal(again.filter((e) => e.kind === 'text').length, 0, '同样的快照不应重复发射')
+  assert.equal(state.stats().divergences, 0)
+})
+
+test('sse 回归: 快照分歧（服务端回退/重排）被忽略而非吐乱码', () => {
+  const state = createSseState()
+  const events = []
+  events.push(...state.handle({ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: 'ABCDEF' } }))
+  const divergent = state.handle({ v: { response: { fragments: [{ type: 'RESPONSE', content: 'XYZ' }] } } })
+  assert.equal(divergent.filter((e) => e.kind === 'text').length, 0, '分歧快照不应发射')
+  assert.equal(state.stats().divergences, 1)
+  assert.equal(state.stats().text, 'ABCDEF')
+})
+
+test('sse 回归: 直连格式在快照穿插下也不丢字', () => {
+  const state = createSseState()
+  const events = []
+  events.push(...state.handle({ p: 'response/thinking_content', v: '推理A' }))
+  events.push(...state.handle({ p: 'response/content', v: '正文1' }))
+  events.push(...state.handle({ v: { response: { content: '正文1正文2' } } }))
+  events.push(...state.handle({ o: 'APPEND', v: '正文3' }))
+  const text = events.filter((e) => e.kind === 'text').map((e) => e.text).join('')
+  const thinking = events.filter((e) => e.kind === 'thinking').map((e) => e.text).join('')
+  assert.equal(text, '正文1正文2正文3', `实际=${JSON.stringify(text)}`)
+  assert.equal(thinking, '推理A')
+})
+
 console.log(`\n通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项：` : '，全部通过 ✅'}`)
 if (failures.length) {
   for (const failure of failures) console.log(failure)

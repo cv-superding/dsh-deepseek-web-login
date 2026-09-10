@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-web-login",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial DSH plugin: use chat.deepseek.com web models as a DSH LLM provider (browser login capture + PoW solving + SSE streaming + prompting-based tool calls), provider route deepseek-web",
   "private": true,
   "type": "module",
@@ -24,7 +24,8 @@
     "README.en.md",
     "docs/assets",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "CHANGELOG.md"
   ],
   "license": "Apache-2.0",
   "author": "cv-superding (Ding Li)",
