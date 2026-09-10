@@ -21,6 +21,8 @@
     "scripts/prepare.mjs",
     "scripts/make-dev-copy.mjs",
     "README.md",
+    "README.en.md",
+    "docs/assets",
     "LICENSE",
     "NOTICE"
   ],

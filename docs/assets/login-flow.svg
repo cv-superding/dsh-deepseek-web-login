@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="286" viewBox="0 0 1040 286" role="img" aria-label="登录与凭证捕获流程">
+  <defs>
+    <marker id="a3" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7 z" fill="#4f46e5"/>
+    </marker>
+    <style>
+      .t{font:600 14px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
+      .x{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#475569}
+      .m{font:11.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
+      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5}
+      .flow{stroke:#4f46e5;stroke-width:2;fill:none;marker-end:url(#a3)}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1040" height="286" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="24" y="34" class="t">登录：浏览器窗口登录一次，插件旁路捕获（不接触你的密码）</text>
+
+  <rect class="card" x="24" y="60" width="176" height="92" rx="12"/>
+  <text x="40" y="84" class="t">① 点「浏览器</text>
+  <text x="40" y="104" class="t">窗口登录」</text>
+  <text x="40" y="128" class="m">设置页 → host API</text>
+
+  <rect class="card" x="230" y="60" width="188" height="92" rx="12"/>
+  <text x="246" y="84" class="t">② Electron 窗口</text>
+  <text x="246" y="104" class="m">persist:dsh-</text>
+  <text x="246" y="122" class="m">deepseek-web-login</text>
+
+  <rect class="card" x="448" y="60" width="188" height="92" rx="12"/>
+  <text x="464" y="84" class="t">③ 你正常登录</text>
+  <text x="464" y="104" class="x">手机号 / 邮箱 / 验证码</text>
+  <text x="464" y="124" class="x">插件不读取密码</text>
+
+  <rect class="card" x="666" y="60" width="350" height="92" rx="12"/>
+  <text x="682" y="84" class="t">④ 旁路捕获（webRequest 钩子）</text>
+  <text x="682" y="106" class="m">Authorization: Bearer …（权威）</text>
+  <text x="682" y="124" class="m">cookie · x-hif-* · localStorage.userToken</text>
+  <text x="682" y="142" class="x">⚠ userToken 是 AppKit 包装 JSON，需解包；未登录时是游客 token</text>
+
+  <rect class="card" x="24" y="176" width="240" height="86" rx="12"/>
+  <text x="40" y="200" class="t">⑤ 服务端校验</text>
+  <text x="40" y="222" class="m">GET /api/v0/users/current</text>
+  <text x="40" y="244" class="x">失败也先落盘（fail-open）</text>
+
+  <rect class="card" x="294" y="176" width="252" height="86" rx="12"/>
+  <text x="310" y="200" class="t">⑥ 凭证落盘（本机）</text>
+  <text x="310" y="222" class="m">~/.dsh/web-login/deepseek-auth.json</text>
+  <text x="310" y="244" class="x">不在仓库内；面板可一键退出登录清除</text>
+
+  <rect class="card" x="576" y="176" width="440" height="86" rx="12"/>
+  <text x="592" y="200" class="t">⑦ 救援通道：从已登录窗口恢复</text>
+  <text x="592" y="222" class="x">凭证文件丢失 / 校验端点不配合时，复用上次登录的持久化分区直接取回登录态</text>
+  <text x="592" y="244" class="x">（实测：无需重新登录即可恢复，并完成服务端校验）</text>
+
+  <path class="flow" d="M200 106 H222"/>
+  <path class="flow" d="M418 106 H440"/>
+  <path class="flow" d="M636 106 H658"/>
+  <path class="flow" d="M720 152 V168 H144 V176"/>
+  <path class="flow" d="M264 219 H286"/>
+  <path class="flow" d="M546 219 H568"/>
+</svg>

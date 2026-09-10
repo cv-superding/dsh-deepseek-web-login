@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="470" viewBox="0 0 1040 470" role="img" aria-label="架构与数据流">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowIndigo" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7 z" fill="#4f46e5"/>
+    </marker>
+    <style>
+      .bg{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5;rx:12}
+      .title{font:600 15px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
+      .sub{font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
+      .tiny{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#64748b}
+      .flow{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arrow)}
+      .flowBack{stroke:#94a3b8;stroke-width:1.4;fill:none;stroke-dasharray:5 4;marker-end:url(#arrow)}
+      .flowMain{stroke:#4f46e5;stroke-width:2;fill:none;marker-end:url(#arrowIndigo)}
+      .pill{font:600 11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1040" height="470" rx="16"/>
+
+  <text x="24" y="34" class="title">数据流：DSH agent loop → 网页端模型 → 工具调用回灌</text>
+
+  <!-- 1. DSH side -->
+  <rect class="card" x="24" y="58" width="232" height="150" rx="12"/>
+  <text x="42" y="84" class="title">DSH agent loop</text>
+  <text x="42" y="108" class="sub">messages / system / tools</text>
+  <text x="42" y="130" class="sub">tool-call 块 ← 执行结果</text>
+  <text x="42" y="152" class="sub">压缩 · 会话日志 · 重试</text>
+  <rect x="42" y="168" width="196" height="26" rx="13" fill="#eef2ff"/>
+  <text x="56" y="186" class="pill" fill="#4338ca">ctx.llm.registerAdapter()</text>
+
+  <!-- 2. adapter -->
+  <rect class="card" x="300" y="58" width="286" height="270" rx="12"/>
+  <text x="318" y="84" class="title">deepseek-web 适配器</text>
+  <rect x="318" y="98" width="250" height="34" rx="9" fill="#f1f5f9"/>
+  <text x="330" y="120" class="sub">① PoW：sha3 WASM wasm_solve</text>
+  <rect x="318" y="140" width="250" height="34" rx="9" fill="#f1f5f9"/>
+  <text x="330" y="162" class="sub">② 消息 → 单段 prompt 转写</text>
+  <rect x="318" y="182" width="250" height="34" rx="9" fill="#f1f5f9"/>
+  <text x="330" y="204" class="sub">③ SSE → StreamChunk 流</text>
+  <rect x="318" y="224" width="250" height="34" rx="9" fill="#f1f5f9"/>
+  <text x="330" y="246" class="sub">④ 工具协议桥 ⇄ tool-call 块</text>
+  <rect x="318" y="266" width="250" height="34" rx="9" fill="#f1f5f9"/>
+  <text x="330" y="288" class="sub">⑤ 图片上传 → ref_file_ids</text>
+
+  <!-- 3. remote -->
+  <rect class="card" x="646" y="58" width="370" height="270" rx="12"/>
+  <text x="664" y="84" class="title">chat.deepseek.com（网页端私有接口）</text>
+  <text x="664" y="112" class="sub">POST /api/v0/chat/create_pow_challenge</text>
+  <text x="664" y="138" class="sub">POST /api/v0/chat_session/create</text>
+  <text x="664" y="164" class="sub">POST /api/v0/chat/completion → SSE</text>
+  <text x="664" y="190" class="sub">POST /api/v0/chat_session/delete</text>
+  <text x="664" y="216" class="sub">POST /api/v0/file/upload_file</text>
+  <text x="664" y="242" class="sub">GET  /api/v0/users/current</text>
+  <rect x="664" y="262" width="336" height="50" rx="9" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="676" y="282" class="tiny">每次调用新建临时会话，结束时尽力删除</text>
+  <text x="676" y="300" class="tiny">→ 不污染你的网页端聊天列表（实测前后一致）</text>
+
+  <!-- auth -->
+  <rect class="card" x="24" y="238" width="232" height="90" rx="12"/>
+  <text x="42" y="264" class="title">凭证（本机）</text>
+  <text x="42" y="288" class="sub">~/.dsh/web-login/</text>
+  <text x="42" y="310" class="sub">token · cookie · 指纹头</text>
+
+  <rect class="card" x="24" y="348" width="232" height="90" rx="12"/>
+  <text x="42" y="374" class="title">Electron 登录窗口</text>
+  <text x="42" y="398" class="sub">persist 分区 · 旁路捕获</text>
+  <text x="42" y="420" class="sub">面板：登录 / 恢复 / 测试</text>
+
+  <!-- flows -->
+  <path class="flowMain" d="M256 120 H292"/>
+  <text x="258" y="112" class="tiny">stream()</text>
+  <path class="flowMain" d="M586 120 H638"/>
+  <text x="590" y="112" class="tiny">HTTPS</text>
+  <path class="flowBack" d="M638 168 H586"/>
+  <text x="590" y="186" class="tiny">SSE patch 流</text>
+
+  <path class="flow" d="M280 283 H310 V204"/>
+  <text x="286" y="276" class="tiny">读凭证</text>
+  <path class="flow" d="M140 348 V334"/>
+  <text x="148" y="344" class="tiny">登录后落盘</text>
+  <path class="flowBack" d="M120 238 V200 H46 V212"/>
+  <text x="46" y="196" class="tiny">失败诊断 → 面板</text>
+
+  <!-- legend -->
+  <g transform="translate(646 356)">
+    <rect x="0" y="0" width="370" height="82" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+    <text x="16" y="24" class="tiny">实线 = 请求链路　虚线 = 流式返回 / 诊断回传</text>
+    <text x="16" y="46" class="tiny">模型档位：快速模式（thinking 开关两档预设）</text>
+    <text x="16" y="68" class="tiny">工具调用：提示词 JSON 协议（非原生 function calling）</text>
+  </g>
+</svg>

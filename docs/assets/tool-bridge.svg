@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="330" viewBox="0 0 1040 330" role="img" aria-label="工具调用协议桥">
+  <defs>
+    <marker id="a2" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7 z" fill="#475569"/>
+    </marker>
+    <style>
+      .t{font:600 14px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
+      .s{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
+      .x{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#64748b}
+      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5}
+      .flow{stroke:#475569;stroke-width:1.6;fill:none;marker-end:url(#a2)}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1040" height="330" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="24" y="34" class="t">工具调用协议桥：网页端没有原生 function calling，靠「约定 + 双格式容错」实现</text>
+
+  <rect class="card" x="24" y="56" width="212" height="112" rx="12"/>
+  <text x="40" y="80" class="t">模型流式输出</text>
+  <text x="40" y="104" class="s">{"tool_calls":[…]}</text>
+  <text x="40" y="126" class="s">&lt;tool_calls&gt;&lt;invoke&gt;…</text>
+  <text x="40" y="148" class="x">偶发格式漂移（XML / DSML）</text>
+
+  <rect class="card" x="278" y="56" width="228" height="112" rx="12"/>
+  <text x="294" y="80" class="t">① 指令层劝阻</text>
+  <text x="294" y="104" class="x">显式禁止 XML/DSML 标记</text>
+  <text x="294" y="124" class="x">说明「标记会被当坏输出展示」</text>
+  <text x="294" y="144" class="x">实测模型会主动拒绝该格式</text>
+
+  <rect class="card" x="548" y="56" width="228" height="112" rx="12"/>
+  <text x="564" y="80" class="t">② 流式过滤器</text>
+  <text x="564" y="104" class="x">跨包标记 hold-back（&lt;tool_ca + lls&gt;）</text>
+  <text x="564" y="124" class="x">围栏 / 多调用 / 假阳性回退</text>
+  <text x="564" y="144" class="x">JSON 与 XML 两族都认</text>
+
+  <rect class="card" x="818" y="56" width="198" height="112" rx="12"/>
+  <text x="834" y="80" class="t">③ 合成 tool-call 块</text>
+  <text x="834" y="104" class="x">block-start / delta / block-end</text>
+  <text x="834" y="124" class="x">finish: tool-calls</text>
+  <text x="834" y="144" class="x">→ DSH 执行真实工具</text>
+
+  <path class="flow" d="M236 112 H270"/>
+  <path class="flow" d="M506 112 H540"/>
+  <path class="flow" d="M776 112 H810"/>
+
+  <rect class="card" x="278" y="192" width="498" height="112" rx="12"/>
+  <text x="294" y="216" class="t">非法 JSON 宽容修复（实测踩坑）</text>
+  <text x="294" y="240" class="s">"F:\AdobeAll\...\resources\app.asar"   ← 单反斜杠</text>
+  <text x="294" y="262" class="x">\A 是非法转义；而 \r 合法却会把 \resources 静默变成回车 → 路径被改坏</text>
+  <text x="294" y="284" class="x">多候选修复链：整串按字面还原 + 路径尾反斜杠启发式，逐字还原路径</text>
+
+  <rect class="card" x="818" y="192" width="198" height="112" rx="12"/>
+  <text x="834" y="216" class="t">解析不出时</text>
+  <text x="834" y="240" class="x">降级为普通正文</text>
+  <text x="834" y="260" class="x">绝不静默丢内容</text>
+  <text x="834" y="284" class="x">（用户可见、可反馈）</text>
+  <path class="flow" d="M594 248 H810"/>
+  <path class="flow" d="M776 112 V180 H692 V192"/>
+</svg>

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="660" viewBox="0 0 900 660" role="img" aria-label="设置面板示意">
+  <defs>
+    <style>
+      .panel{fill:#151922;stroke:#2a2f3a;stroke-width:1.4}
+      .h{font:600 13.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#e8edf5}
+      .b{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#cbd5e1}
+      .k{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#8b93a3}
+      .btn{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#ffffff}
+      .ghost{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#cbd5e1}
+      .hint{font:11.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#8b93a3}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="900" height="660" rx="14" fill="#0f1115" stroke="#2a2f3a" stroke-width="1.6"/>
+  <text x="24" y="34" class="h" font-size="14">DeepSeek 网页登录（免费模型）</text>
+  <text x="24" y="56" class="hint">用 chat.deepseek.com 网页版登录态驱动 DSH agent —— 不需要 API Key。provider 路由：deepseek-web</text>
+
+  <!-- 登录状态卡 -->
+  <rect class="panel" x="24" y="74" width="852" height="212" rx="10"/>
+  <text x="42" y="100" class="h">登录状态</text>
+  <rect x="126" y="88" width="52" height="17" rx="8.5" fill="#1d3a2a" stroke="#2ecc71"/>
+  <text x="136" y="100.5" font-family="system-ui,sans-serif" font-size="11" fill="#2ecc71">已登录</text>
+
+  <text x="42" y="128" class="k">适配器注册</text><text x="180" y="128" class="b">✅ deepseek-web 已注册到 llm</text>
+  <text x="42" y="150" class="k">账号</text><text x="180" y="150" class="b">use***@example.com</text>
+  <text x="42" y="172" class="k">捕获时间</text><text x="180" y="172" class="b">2026/09/10 21:14:03</text>
+  <text x="42" y="194" class="k">Cookie</text><text x="180" y="194" class="b">已捕获</text>
+  <text x="42" y="216" class="k">指纹头</text><text x="180" y="216" class="b">已捕获</text>
+  <text x="42" y="238" class="k">PoW WASM</text><text x="180" y="238" class="b">fe-static.deepseek.com</text>
+  <text x="42" y="260" class="k">服务端校验</text><text x="180" y="260" class="b">通过</text>
+
+  <rect x="596" y="118" width="128" height="32" rx="6" fill="#4a9eff"/>
+  <text x="614" y="139" class="btn">浏览器窗口登录</text>
+  <rect x="734" y="118" width="128" height="32" rx="6" fill="none" stroke="#444c5c"/>
+  <text x="742" y="139" class="ghost">从已登录窗口恢复</text>
+  <rect x="734" y="160" width="88" height="30" rx="6" fill="none" stroke="#444c5c"/>
+  <text x="758" y="180" class="ghost">刷新状态</text>
+  <text x="600" y="216" class="hint">「从已登录窗口恢复」= 复用上次登录过的</text>
+  <text x="600" y="232" class="hint">窗口分区直接取凭证（免重新登录）</text>
+  <text x="600" y="256" class="hint">凭证存于 ~/.dsh/web-login/（不入仓库）</text>
+
+  <!-- 手动 token -->
+  <rect class="panel" x="24" y="302" width="852" height="150" rx="10"/>
+  <text x="42" y="328" class="h">手动粘贴 Token（可选路径）</text>
+  <text x="42" y="352" class="hint">在浏览器打开 chat.deepseek.com 并登录 → F12 控制台执行下面一行 → 粘贴结果：</text>
+  <rect x="42" y="362" width="470" height="26" rx="5" fill="#0f1115" stroke="#333a47"/>
+  <text x="54" y="380" class="b">JSON.parse(localStorage.getItem('userToken')).value</text>
+  <rect x="42" y="398" width="816" height="34" rx="6" fill="#0f1115" stroke="#333a47"/>
+  <text x="54" y="420" class="k">粘贴 token（包装 JSON 或裸 token 都行；可选：下一行粘贴 Cookie）</text>
+
+  <!-- 测试 -->
+  <rect class="panel" x="24" y="468" width="852" height="86" rx="10"/>
+  <text x="42" y="494" class="h">连通性测试</text>
+  <text x="42" y="516" class="hint">直接经适配器发一次最小请求（会消耗一点网页端额度）：</text>
+  <rect x="42" y="524" width="240" height="26" rx="6" fill="#0f1115" stroke="#333a47"/>
+  <text x="54" y="542" class="b">DeepSeek 网页 · 快速模式（不思考）</text>
+  <rect x="296" y="522" width="96" height="30" rx="6" fill="#4a9eff"/>
+  <text x="320" y="543" class="btn">发送测试</text>
+
+  <!-- 模型 -->
+  <rect class="panel" x="24" y="570" width="852" height="70" rx="10"/>
+  <text x="42" y="596" class="h">可用模型（网页免费）</text>
+  <text x="42" y="618" class="b">deepseek-chat · thinking 关 · 上下文 0.8M　|　deepseek-reasoner · thinking 开 · 上下文 0.8M</text>
+  <text x="42" y="634" class="hint">两条是同一个「快速模式」的思考开关两档预设；图片输入直接可用（走网页端文件上传通道）</text>
+</svg>
