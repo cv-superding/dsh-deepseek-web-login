@@ -485,6 +485,61 @@ test('sse 回归: 直连格式在快照穿插下也不丢字', () => {
   assert.equal(thinking, '推理A')
 })
 
+// ── 跨包标记 hold-back（2026-09 事故 #3：合法 JSON 也被泄漏）──────────────
+// 现场（会话日志中的真实分块）：标记被切成 `{"tool` + `_calls":[{"name":"find_dsh` …
+// 旧实现的 hold-back 前缀比较多拼了一个引号 → 半截标记被当正文吐出 → 后半个拼不回完整标记。
+// 关键：前面的正文必须超过 hold-back 窗口（24 字符）才会暴露此 bug。
+const LIVE_CHUNKS = [
+  "I'll check what plugins exist",
+  ' for this in the DSH ecosystem',
+  ', and also look at the current',
+  " GUI's capabilities.\n\n{\"tool",
+  '_calls":[{"name":"find_dsh',
+  '_plugin","arguments":{"query',
+  '":"open file explorer folder',
+  ' reveal in system file manager',
+  '","limit":15,"lang":"zh"}}',
+  ']}',
+]
+
+test('filter: 真实分块序列（长正文 + 拆成两半的标记）不得泄漏 JSON', () => {
+  const filter = new ToolCallStreamFilter(new Set(['find_dsh_plugin']))
+  let text = ''
+  const calls = []
+  for (const chunk of LIVE_CHUNKS) {
+    const out = filter.push(chunk)
+    text += out.text
+    calls.push(...out.calls)
+  }
+  const tail = filter.flush()
+  text += tail.text
+  calls.push(...tail.calls)
+  assert.equal(calls.length, 1, `calls=${JSON.stringify(calls)} text=${JSON.stringify(text)}`)
+  assert.equal(calls[0].name, 'find_dsh_plugin')
+  assert.deepEqual(JSON.parse(calls[0].arguments), { query: 'open file explorer folder reveal in system file manager', limit: 15, lang: 'zh' })
+  assert.ok(!text.includes('tool_calls'), `正文泄漏：${JSON.stringify(text)}`)
+  assert.ok(text.includes("I'll check what plugins exist"), '正文应保留')
+})
+
+test('filter: 长正文 + 拆成两半的 XML 标记同样不得泄漏', () => {
+  const filter = new ToolCallStreamFilter(new Set(['read']))
+  const prefix = '先说明一下背景，这段正文要足够长以超过 hold-back 窗口，否则测不出问题。'.repeat(2)
+  let text = ''
+  const calls = []
+  const chunks = [prefix + '\n<tool', '_calls><invoke name="read"><para', 'meter name="file_path">a.txt</parameter></invoke></tool_calls>']
+  for (const chunk of chunks) {
+    const out = filter.push(chunk)
+    text += out.text
+    calls.push(...out.calls)
+  }
+  const tail = filter.flush()
+  text += tail.text
+  calls.push(...tail.calls)
+  assert.equal(calls.length, 1, `calls=${JSON.stringify(calls)}`)
+  assert.equal(calls[0].name, 'read')
+  assert.ok(!/<tool|_calls/.test(text), `正文泄漏：${JSON.stringify(text.slice(-120))}`)
+})
+
 console.log(`\n通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项：` : '，全部通过 ✅'}`)
 if (failures.length) {
   for (const failure of failures) console.log(failure)

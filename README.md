@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#模型档位)
-[![Tests](https://img.shields.io/badge/tests-40%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![Tests](https://img.shields.io/badge/tests-42%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#免责声明)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#贡献)
@@ -74,7 +74,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 
 ```bash
 # 方式 A：从 Release 的 tgz 装配（推荐，免构建；版本号以最新 Release 为准）
-dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.1.tgz
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.2.tgz
 
 # 方式 B：git 装配（本机需可访问 github.com）
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
@@ -145,7 +145,7 @@ prompt 字符上限默认 1,200,000（可配）。
 ## 测试与验证
 
 ```bash
-node tests/logic-test.mjs            # 40 项纯逻辑断言（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/logic-test.mjs            # 42 项纯逻辑断言（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
 node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
 node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
 node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）

@@ -233,33 +233,46 @@ function normalizeDsml(text: string): string {
     .replace(/<\/\s*dsml-/gi, '</')
 }
 
-/** 判断 tail 末尾是否是（可能的）标记前缀 —— 决定是否 hold back。 */
+/**
+ * JSON 调用标记前缀（用于跨包 hold-back 判断）。
+ * ⚠️ 2026-09 事故：真实分块会把标记切成 `{"tool` + `_calls":[{"name":…` 两半。
+ * 旧实现比较时多拼了一个引号（`{'{"' + body}`，而 body 已含前引号 → `{""tool`），
+ * 于是「末尾是潜在前缀」永远判 false → 半截标记被当正文吐出去、后半个再也拼不回完整标记
+ * → 整个 JSON 泄漏成正文。修复见 partialMarkerSuffixLength。
+ */
+const JSON_MARKER_STARTERS = ['{"tool_calls"', '{"tool_call"']
+
+/** XML 标记前缀（用于跨包 hold-back 判断）。 */
+const XML_MARKER_STARTERS = ['<tool_calls', '<tool_call', '<function_calls', '<invoke', '<|dsml|tool_calls', '<|dsml|invoke', '<dsml-tool_calls', '<dsml-invoke']
+
+/**
+ * 判断 text 末尾是否是（可能的）标记前缀 —— 决定是否 hold back。
+ * @returns 需要保留在缓冲区里的尾部字符数（0 = 无需保留）
+ */
 function partialMarkerSuffixLength(text: string): number {
   const LIMIT = 32
   const from = Math.max(0, text.length - LIMIT)
-  const tail = normalizeDsml(text.slice(from))
-  // 找最后一个可能的起点（{ 或 <）
-  const braceAt = tail.lastIndexOf('{')
-  const angleAt = tail.lastIndexOf('<')
+  const raw = text.slice(from)
+  // 候选起点：最后一个 `{` 或 `<`（在**原始**切片上定位，保证 held 长度与原文对齐）
+  const braceAt = raw.lastIndexOf('{')
+  const angleAt = raw.lastIndexOf('<')
   const startAt = Math.max(braceAt, angleAt)
   if (startAt === -1) return 0
-  const rest = tail.slice(startAt)
-  const offsetFromTail = tail.length - rest.length
-  const consumed = text.length - from - offsetFromTail
+  const held = raw.length - startAt
+  const normalized = normalizeDsml(raw.slice(startAt))
 
-  const JSON_STARTERS = ['{"tool_calls"', '{"tool_call"']
-  if (rest.startsWith('{')) {
-    const body = rest.replace(/^\{\s*/, '')
-    const ok = JSON_STARTERS.some((starter) => starter.startsWith(`{"${body}`))
-    return ok ? consumed : 0
+  if (normalized.startsWith('{')) {
+    if (MARKER_RE.test(normalized)) return 0 // 已是完整标记，交给捕获逻辑
+    const body = normalized.replace(/^\{\s*/, '').replace(/\s+/g, '')
+    // body 已含前引号（如 `"tool`）→ 与 starter 比较时应拼 `{` + body
+    const ok = JSON_MARKER_STARTERS.some((starter) => starter.startsWith(`{${body}`))
+    return ok ? held : 0
   }
-  // XML：`<` 后面尚未构成完整标记时 hold back
-  if (rest.startsWith('<')) {
-    if (XML_STARTER_RE.test(rest)) return 0 // 已经是完整标记，由调用方处理
-    const XML_PREFIXES = ['<tool_calls', '<tool_call', '<function_calls', '<invoke', '<|dsml|', '<｜dsml｜', '<dsml-']
-    const lower = rest.toLowerCase()
-    const ok = XML_PREFIXES.some((prefix) => prefix.startsWith(lower) || lower.startsWith(prefix.slice(0, lower.length)))
-    return ok ? consumed : 0
+  if (normalized.startsWith('<')) {
+    if (XML_STARTER_RE.test(normalized)) return 0 // 已是完整标记
+    const lower = normalized.toLowerCase().replace(/\s+/g, '')
+    const ok = XML_MARKER_STARTERS.some((starter) => starter.startsWith(lower))
+    return ok ? held : 0
   }
   return 0
 }
