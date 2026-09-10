@@ -25,6 +25,14 @@ export interface ToolCallRequest {
 export interface FilterOutput {
   text: string
   calls: ToolCallRequest[]
+  /**
+   * 捕获到的协议块**无法解析**（raw = 原文，mode = 标记家族）。
+   * ⚠️ 这个字段的意义：绝不再把这种残留当正文吐出去 —— 它既不是模型想说的话，
+   * 又会被 Web GUI 的 markdown 渲染器当成垃圾（实测 2026-09：泄漏文本里的
+   * `$ErrorActionPreference='…'` 被渲染成 KaTeX 行内公式 → 用户看到「一个字符一行 +
+   * 弯引号」的乱码）。调用方据此决定「重试」或「给一句人话提示」。
+   */
+  rejected?: { raw: string; mode: 'json' | 'xml' }
 }
 
 const MAX_DESCRIPTION_CHARS = 400
@@ -44,7 +52,7 @@ Rules:
 2. Stop immediately after that JSON object. The runner executes the call(s) and returns the results to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
-5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable.
+5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
 6. Do NOT use XML/HTML-like markup such as <tool_calls>, <invoke>, <parameter>, <|DSML|>, or any fenced variant of them. The JSON object above is the ONLY accepted format; markup text would be shown to the user as broken output instead of running the tool.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).`
 
@@ -346,10 +354,100 @@ export function parseJsonLenient(text: string): unknown {
  */
 export function* jsonRepairCandidates(text: string): Generator<string> {
   const pathTail = (value: string): string => value.replace(/([A-Za-z]:[^"]*?)\\"(?=[,}\]\s])/g, '$1\\\\"')
-  yield repairJsonText(pathTail(text), { mode: 'smart' })
-  yield repairJsonText(text, { mode: 'smart' })
-  yield repairJsonText(pathTail(text), { mode: 'conservative' })
-  yield repairJsonText(text, { mode: 'conservative' })
+  // 先跑转义修复（便宜、覆盖两个实测样本）；再跑结构性修复（少写闭合括号）。
+  for (const base of [text, ...structuralRepairCandidates(text)]) {
+    yield repairJsonText(pathTail(base), { mode: 'smart' })
+    yield repairJsonText(base, { mode: 'smart' })
+    yield repairJsonText(pathTail(base), { mode: 'conservative' })
+    yield repairJsonText(base, { mode: 'conservative' })
+  }
+}
+
+/**
+ * 结构性修复候选：模型偶尔**漏写调用对象的闭合括号**。
+ *
+ * 实测（2026-09，deepseek-reasoner 一次批量 3 个调用）：每个 tool_call 都少写一个 `}`
+ * （只闭合了 `arguments`，没闭合调用对象自己）。JSON.parse 报
+ * `Expected double-quoted property name`，于是整段调用被降级成正文 → 泄漏。
+ *
+ * 做法：按元素边界切开 `tool_calls` 数组，给每个元素补齐它自身缺的 `}`。
+ * 边界判定不能靠「嵌套深度回到 0」—— 恰恰因为元素没闭合，深度回不到 0；
+ * 只能靠形状：逗号后紧跟 `{"name":`。
+ * **只补括号，绝不改写内容**（不猜测引号语义，避免把命令改坏）。
+ *
+ * ⚠️ **安全闸门**：只修补「数组已经闭合」（以 `]` 收尾）的文本 —— 那是模型**写完了**的信号
+ * （实测样本以 `]}` 收尾）。若连 `]` 都没有，多半是流被服务端 60s 上限截断/中断，
+ * 此时补括号会得到一条**被截断的命令**并真的执行它；宁可拒绝（→ 重试），也不执行半条命令。
+ */
+export function* structuralRepairCandidates(text: string): Generator<string> {
+  const marker = /^\s*\{\s*"tool_calls?"\s*:\s*\[/.exec(text)
+  if (!marker) return
+  const scanned = splitToolCallArray(text, marker[0].length)
+  if (!scanned) return
+  // 安全闸门：只修补「数组已闭合」的文本（详见上方 JSDoc）
+  if (!/^\][\s}\]`]*$/.test(scanned.tail)) return
+  const deficits = scanned.chunks.map(braceDeficit)
+  if (deficits.every((value) => value === 0)) return
+  const fixed = scanned.chunks.map((chunk, index) =>
+    deficits[index] > 0 ? `${chunk.replace(/[\s,]+$/, '')}${'}'.repeat(deficits[index])}` : chunk,
+  )
+  yield `${marker[0]}${fixed.join(',')}${scanned.tail}`
+}
+
+/** 按 `,{"name":` 形状把数组内容切成若干个调用元素（字符串感知）。 */
+function splitToolCallArray(text: string, start: number): { chunks: string[]; tail: string } | null {
+  const chunks: string[] = []
+  let current = ''
+  let inString = false
+  let escape = false
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      current += ch
+      if (escape) escape = false
+      else if (ch === '\\') escape = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      current += ch
+      continue
+    }
+    if (ch === ']') {
+      chunks.push(current)
+      return { chunks, tail: text.slice(i) }
+    }
+    if (ch === ',' && /^\s*\{\s*"name"\s*:/.test(text.slice(i + 1))) {
+      chunks.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (!current.trim()) return null
+  chunks.push(current)
+  return { chunks, tail: '' }
+}
+
+/** 一个片段自身的括号亏空（字符串感知）：> 0 表示缺这么多闭合括号。 */
+function braceDeficit(chunk: string): number {
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = 0; i < chunk.length; i++) {
+    const ch = chunk[i]
+    if (inString) {
+      if (escape) escape = false
+      else if (ch === '\\') escape = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{' || ch === '[') depth += 1
+    else if (ch === '}' || ch === ']') depth -= 1
+  }
+  return depth
 }
 
 /**
@@ -616,6 +714,7 @@ export function findXmlToolCallEnd(buffer: string): number {
 export class ToolCallStreamFilter {
   private pending = ''
   private capture: { mode: 'json' | 'xml'; buffer: string } | null = null
+  private abandoned: { raw: string; mode: 'json' | 'xml' } | null = null
   private readonly knownTools?: ReadonlySet<string>
 
   constructor(knownTools?: ReadonlySet<string>) {
@@ -635,15 +734,17 @@ export class ToolCallStreamFilter {
   flush(): FilterOutput {
     const out: FilterOutput = { text: '', calls: [] }
     if (this.capture) {
-      // 流结束时未收全：尝试宽容解析，失败则原样吐出（不丢内容）
+      // 流结束时仍未收全：先尝试宽容解析（转义修复 + 结构性补括号）。
       const captured = this.capture
       const calls = captured.mode === 'xml' ? parseXmlToolCalls(captured.buffer) : parseToolCallJson(captured.buffer.replace(FENCE_HEAD_RE, ''))
       if (calls) out.calls.push(...calls)
-      else out.text += captured.buffer
+      else if (captured.mode === 'json') this.abandoned ??= { raw: captured.buffer, mode: 'json' }
+      else out.text += captured.buffer // XML 兜底仍按正文透出（`<invoke>` 也可能只是正文里的一句话）
       this.capture = null
     }
     out.text += this.pending
     this.pending = ''
+    if (this.abandoned) out.rejected = this.abandoned
     return out
   }
 
@@ -672,7 +773,8 @@ export class ToolCallStreamFilter {
         const balanced = extractBalancedJson(captured.buffer)
         if (!balanced) {
           if (captured.buffer.length > MAX_CAPTURE_CHARS) {
-            out.text += captured.buffer
+            // 超过上限仍没配平：放弃，但**不吐成正文**（那是乱码，不是回答）
+            this.abandoned ??= { raw: captured.buffer, mode: 'json' }
             this.capture = null
             continue
           }

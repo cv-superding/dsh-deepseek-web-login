@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#models)
-[![Tests](https://img.shields.io/badge/tests-42%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
+[![Tests](https://img.shields.io/badge/tests-46%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#disclaimer)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#contributing)
@@ -50,7 +50,7 @@ free web quota.
 
 ```bash
 # A: from the release tarball (recommended, no build step)
-dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.2.tgz
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
 
 # B: git install (requires github.com reachability)
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
@@ -102,7 +102,7 @@ Context: the server declares `normal_history_and_file_token_limit = 890880` (1M 
 ## Testing
 
 ```bash
-node tests/logic-test.mjs            # 42 pure-logic assertions
+node tests/logic-test.mjs            # 46 pure-logic assertions
 node tests/probe-live.mjs            # raw SSE event stream + timings (--big=N for long prompts)
 node tests/probe-xml-live.mjs        # XML-marker scenario against the live model
 node tests/probe-vision.mjs          # image channel (generates a red/blue PNG, uploads it, asks)
@@ -111,6 +111,12 @@ node tests/check-bundle.mjs          # verify every fix made it into lib/
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed
 to parse and leaked into the answer as text. It must now parse, with the path restored verbatim.
+
+Another real incident: the model omitted the closing brace of each call object in a batch of three, so the
+whole `{"tool_calls":[…]}` block leaked into the answer. The filter now closes such braces structurally —
+but only when the array itself is closed (a truncated stream must never be repaired into a half command) —
+and an unparsable protocol block is never emitted as answer text again: with no other text in the step it
+reports a retryable `EMPTY_RESPONSE`, otherwise it appends a one-line notice and logs the raw block.
 
 ## Disclaimer
 

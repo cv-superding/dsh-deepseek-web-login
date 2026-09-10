@@ -540,6 +540,60 @@ test('filter: 长正文 + 拆成两半的 XML 标记同样不得泄漏', () => {
   assert.ok(!/<tool|_calls/.test(text), `正文泄漏：${JSON.stringify(text.slice(-120))}`)
 })
 
+// ── 结构性修复（2026-09 事故 #4：模型漏写调用对象的闭合括号）──────────────
+// 原文从会话日志 4c5e1e59 逐字节导出（deepseek-reasoner，一次批量 3 个 pwsh 调用）：
+// 每个调用对象都少写了一个右花括号（只闭合了自己的 arguments）→ JSON.parse 报
+// 「Expected double-quoted property name in JSON at position 519」→ 旧实现解析失败 →
+// 整段 JSON 被当正文吐出 → Web GUI 又把命令里的美元变量当 KaTeX 行内公式渲染
+// → 用户看到的是「一个字符一行 + 弯引号」的乱码。
+const SAMPLE_LEAK_JSON = "{\"tool_calls\":[{\"name\":\"pwsh\",\"arguments\":{\"command\":\"$ErrorActionPreference='SilentlyContinue'; foreach($p in @(\\\"$env:APPDATA\\\\DSH Desktop\\\",\\\"$env:LOCALAPPDATA\\\\DSH Desktop\\\",\\\"$env:APPDATA\\\\dsh-desktop\\\",\\\"$env:APPDATA\\\\dsh\\\")){ if(Test-Path $p){ Write-Output \\\"### $p\\\"; Get-ChildItem $p -Recurse -File | Select-Object FullName,Length,LastWriteTime | Sort-Object LastWriteTime -Descending | Select-Object -First 25 | Format-Table -AutoSize | Out-String -Width 200 } }\",\"description\":\"Locate DSH Desktop app logs\"},{\"name\":\"pwsh\",\"arguments\":{\"command\":\"Get-Content \\\"$env:USERPROFILE\\\\.dsh\\\\super-injector\\\\self-heal.log\\\" -Raw; Write-Output '--- super-injector dir ---'; Get-ChildItem \\\"$env:USERPROFILE\\\\.dsh\\\\super-injector\\\" -Recurse | Select-Object FullName,Length,LastWriteTime | Format-Table -AutoSize | Out-String -Width 200\",\"description\":\"Read injector self-heal log and dir\"},{\"name\":\"pwsh\",\"arguments\":{\"command\":\"$ErrorActionPreference='Continue'; try { $r=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43120/api/client-modules' -Headers @{Origin='http://127.0.0.1:43120'; Referer='http://127.0.0.1:43120/'} -TimeoutSec 10; Write-Output \\\"status=$($r.StatusCode) len=$($r.Content.Length)\\\" } catch { Write-Output \\\"ERR: $($_.Exception.Message)\\\" }; try { $r2=Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43120/' -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36' -TimeoutSec 10; Write-Output \\\"root status=$($r2.StatusCode) len=$($r2.Content.Length)\\\" } catch { Write-Output \\\"root ERR: $($_.Exception.Message)\\\" }\",\"description\":\"Probe DSH webserver HTTP endpoints\"}]}"
+
+test('structural: 真实泄漏样本（每个调用对象少一个 }）修复为 3 个调用', () => {
+  assert.throws(() => JSON.parse(SAMPLE_LEAK_JSON), '前提：原文确实是非法的 JSON')
+  const calls = parseToolCallJson(SAMPLE_LEAK_JSON)
+  assert.ok(calls && calls.length === 3, 'calls=' + JSON.stringify(calls))
+  assert.deepEqual(calls.map((c) => c.name), ['pwsh', 'pwsh', 'pwsh'])
+  const args = calls.map((c) => JSON.parse(c.arguments))
+  assert.deepEqual(args.map((a) => a.description), [
+    'Locate DSH Desktop app logs',
+    'Read injector self-heal log and dir',
+    'Probe DSH webserver HTTP endpoints',
+  ])
+  // 补括号不得改写内容：命令要逐字保留
+  assert.ok(args[0].command.startsWith("$ErrorActionPreference='SilentlyContinue'; foreach($p in @("), args[0].command)
+  assert.ok(args[1].command.includes('$env:USERPROFILE\\.dsh\\super-injector\\self-heal.log'), args[1].command)
+  assert.ok(!args[1].command.includes('\r'), '路径里不应出现回车')
+})
+
+test('structural: 没有闭合方括号的调用（疑似被截断）绝不修补执行', () => {
+  // 安全闸门：流被服务端 60s 上限截断时，补括号会造出一条被截断的命令并真的执行它
+  const truncated = '{"tool_calls":[{"name":"pwsh","arguments":{"command":"Remove-Item F:\\\\Code'
+  assert.equal(parseToolCallJson(truncated), null, '没有闭合方括号就不该修补')
+})
+
+test('filter: 真实泄漏样本 → 3 个调用、正文零泄漏、不触发 rejected', () => {
+  const filter = new ToolCallStreamFilter(new Set(['pwsh']))
+  const out = filter.push(SAMPLE_LEAK_JSON)
+  const tail = filter.flush()
+  const calls = [...out.calls, ...tail.calls]
+  const text = out.text + tail.text
+  assert.equal(calls.length, 3, 'calls=' + calls.length + ' text=' + JSON.stringify(text.slice(0, 80)))
+  assert.equal(text, '', '不得有任何正文泄漏：' + JSON.stringify(text.slice(0, 120)))
+  assert.equal(tail.rejected, undefined)
+})
+
+test('filter: 修不好的协议块 → rejected（绝不吐成正文）', () => {
+  const filter = new ToolCallStreamFilter(new Set(['pwsh']))
+  const broken = '{"tool_calls":[{"name":"pwsh","arguments":{"command":"echo $env:US'
+  const out = filter.push(broken)
+  const tail = filter.flush()
+  assert.equal(out.text + tail.text, '', '坏掉的协议块不得进入正文')
+  assert.equal(out.calls.length + tail.calls.length, 0)
+  assert.ok(tail.rejected, 'rejected 必须置位，供上层决定重试')
+  assert.equal(tail.rejected.raw, broken, '原文要留给日志')
+})
+
+
 console.log(`\n通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项：` : '，全部通过 ✅'}`)
 if (failures.length) {
   for (const failure of failures) console.log(failure)

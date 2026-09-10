@@ -183,6 +183,14 @@ function resolveThinking(options: any, spec: ModelSpec): { thinkingEnabled: bool
 }
 
 /**
+ * 协议块解析失败、但本轮正文已经发出去时补的提示。
+ * 为什么不原样吐出 JSON：Web GUI 的 markdown 会把 `$…$` 当行内公式渲染
+ * （实测 2026-09：泄漏的命令行 `$ErrorActionPreference='…'` 被渲染成 KaTeX，
+ * 用户看到的是一个字符一行 + 弯引号的乱码），而且那段 JSON 对用户没有任何意义。
+ */
+const UNPARSED_TOOL_CALL_NOTICE = '\n\n> ⚠️ 模型本次的工具调用格式无法解析（漏写括号或引号），已忽略，未执行任何工具。'
+
+/**
  * 网页端 finish 归一。
  * 实测：正常完成必定带 `response/status: FINISHED`；若流在没有该标记的情况下结束，
  * 说明被服务端上限打断（`completion_request_timeout_ms = 60000`，网页端靠
@@ -311,6 +319,7 @@ export function createAdapter(deps: AdapterDeps) {
     let reasoningStarted = false
     let toolCallCount = 0
     let finishReason: string | undefined
+    let rejectedProtocol = ''
 
     const openText = (): { index: number; text: string } => {
       if (!textBlock) textBlock = { index: nextIndex++, text: '' }
@@ -398,6 +407,14 @@ export function createAdapter(deps: AdapterDeps) {
         yield { type: 'text-delta', index: block.index, text: tail.text }
       }
       if (tail.calls.length > 0) yield* emitCalls(tail.calls)
+      if (tail.rejected) {
+        // 协议块解析失败：**绝不**把原始 JSON 当正文（Web GUI 会把里面的 `$…$` 渲染成
+        // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
+        rejectedProtocol = tail.rejected.raw
+        logger?.warn?.(
+          `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败，已丢弃 ${tail.rejected.raw.length} 字符：${tail.rejected.raw.slice(0, 400)}`,
+        )
+      }
     } catch (error: any) {
       if (error instanceof AdapterLlmError) throw error
       if (options?.signal?.aborted) throw new AdapterLlmError('deepseek-web 请求被调用方取消', 'ABORTED', { cause: error })
@@ -425,6 +442,29 @@ export function createAdapter(deps: AdapterDeps) {
     if (toolCallCount > 0) {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
+    }
+    const hasVisibleText = (textBlock?.text?.length ?? 0) > 0
+    if (rejectedProtocol && !hasVisibleText) {
+      // 模型这一轮只输出了坏掉的调用 JSON，没有别的正文可给用户。
+      // 用 EMPTY_RESPONSE 报错：它在 dsh-llm-retry 的默认可重试集合里 → 会自动重发这一步；
+      // 重试仍失败时用户看到的是下面这句人话，而不是一段渲染成乱码的 JSON。
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            message: 'DeepSeek 网页端返回的工具调用 JSON 无法解析（模型漏写括号或引号），本次调用已丢弃。',
+            code: 'EMPTY_RESPONSE',
+          },
+        },
+      }
+      return
+    }
+    if (rejectedProtocol && hasVisibleText) {
+      // 正文已经发给用户了：补一句人话提示收尾，绝不把 JSON 混进答案。
+      const block = openText()
+      block.text += UNPARSED_TOOL_CALL_NOTICE
+      yield { type: 'text-delta', index: block.index, text: UNPARSED_TOOL_CALL_NOTICE }
     }
     const hasVisible = outputChars > 0
     if (!hasVisible) {

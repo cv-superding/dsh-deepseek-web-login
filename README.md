@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#模型档位)
-[![Tests](https://img.shields.io/badge/tests-42%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![Tests](https://img.shields.io/badge/tests-46%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#免责声明)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#贡献)
@@ -74,7 +74,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 
 ```bash
 # 方式 A：从 Release 的 tgz 装配（推荐，免构建；版本号以最新 Release 为准）
-dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.2.tgz
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
 
 # 方式 B：git 装配（本机需可访问 github.com）
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
@@ -145,7 +145,7 @@ prompt 字符上限默认 1,200,000（可配）。
 ## 测试与验证
 
 ```bash
-node tests/logic-test.mjs            # 42 项纯逻辑断言（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/logic-test.mjs            # 46 项纯逻辑断言（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
 node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
 node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
 node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）
@@ -158,6 +158,10 @@ node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 - 工具调用里含未转义 Windows 路径，曾导致解析失败、标记泄漏成正文 → 现在必须解析成功且**路径逐字还原**
 - SSE 去重模型错误，曾把完整回答丢成「，」「不上」「了一圈」这类 1~3 字碎片（并触发 EMPTY_RESPONSE 重试）
   → 现在「缩水快照」与「分歧快照」都必须被忽略，回答**一字不丢**（见 CHANGELOG.md 0.1.1）
+- 跨包工具调用标记的 hold-back 判断失效，曾让**合法 JSON** 泄漏成正文（分块把 `{"tool` 与 `_calls":…` 切开时）
+  → 现在用**真实会话日志的分块序列**回归（见 `CHANGELOG.md` 0.1.2）
+- 模型漏写调用对象的闭合括号（批量调用时每个少一个 `}`），曾让整段调用 JSON 泄漏成正文
+  → 现在结构性补括号（**仅当数组已闭合**，被截断的流绝不补）+ 解析失败不再吐成正文（见 `CHANGELOG.md` 0.1.3）
 
 ## 故障排查
 
@@ -168,7 +172,7 @@ node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 | `MISSING_CREDENTIAL` | 凭证文件不存在（`~/.dsh/web-login/`） |
 | `EMPTY_RESPONSE` | 可能触发频控或长上下文截断，属于默认可重试码 |
 | `RATE_LIMIT` | 免费额度频控，稍后重试 |
-| 回复里出现 `{"tool_calls":…}` 或 `<tool_calls>` 标记 | 模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时按设计原样显示，不会静默丢内容） |
+| 回复里出现 `{"tool_calls":…}` 或 `<tool_calls>` 标记 | 模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时不再把 JSON 吐进正文：本轮无其他正文则自动重试，已有正文则给一句提示） |
 | 工具调用不触发 | 换说法或换 `deepseek-reasoner`；也可用面板「发送测试」确认链路 |
 
 ### 诊断工具：`tools/inspect-session.mjs`
