@@ -25,7 +25,8 @@
     "docs/assets",
     "LICENSE",
     "NOTICE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "tools"
   ],
   "license": "Apache-2.0",
   "author": "cv-superding (Ding Li)",

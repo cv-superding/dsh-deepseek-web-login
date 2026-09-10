@@ -171,6 +171,36 @@ node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 | 回复里出现 `{"tool_calls":…}` 或 `<tool_calls>` 标记 | 模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时按设计原样显示，不会静默丢内容） |
 | 工具调用不触发 | 换说法或换 `deepseek-reasoner`；也可用面板「发送测试」确认链路 |
 
+### 诊断工具：`tools/inspect-session.mjs`
+
+怀疑「回复不对」时，不用猜 —— 直接读 DSH 的会话日志，看**每一轮的原始事实**：
+用了哪个模型、内容块的真实长度与首尾、结束原因、以及流式分块的类型与字节数。
+
+```bash
+node tools/inspect-session.mjs                  # 列出会话（时间 / 大小 / 事件数 / 标题）
+node tools/inspect-session.mjs <会话ID前缀>      # 诊断该会话的每一轮
+node tools/inspect-session.mjs --search "关键词" # 按关键词找会话
+```
+
+它只读本机会话日志（不联网、不上传）。典型输出：
+
+```text
+[14:04:01] 模型: deepseek-web/deepseek-chat  ctx=890880
+[14:04:01] 分块原文(文本): ["I'll check what plugins exist"," for this in the DSH ecosystem",
+                           ", and also look at the current"," GUI's capabilities.\n\n{\"tool",
+                           "_calls\":[{\"name\":\"find_dsh", ...]
+[14:04:03] 助手消息（1 块）: text(len=257) head="..." tail="...\"lang\":\"zh\"}}]}"
+```
+
+三条经验判据：
+
+- 文本长度 **远小于** 分块字节数 → 解析层丢字
+- 文本里出现 `{"tool_calls":…}` / `<tool_calls>` → 工具调用没被接住（格式漂移或 hold-back 失效）
+- 同一 step 出现 **多次** `usage` / `finish` → 触发了重试（通常是空响应）
+
+> **报 bug 时请附这段输出**（它不含凭证；如有敏感内容请先自行删减）。
+> 上面三个真实事故（工具调用 JSON 泄漏、回答丢成碎片、合法 JSON 泄漏）都是靠它定位的。
+
 ## 开发
 
 ```bash
