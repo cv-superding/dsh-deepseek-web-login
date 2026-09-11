@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
-import { collectImageRefs, serializePrompt, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, serializePrompt, stripSystemMarkers, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -228,12 +228,42 @@ function resolveThinking(options: any, spec: ModelSpec): { thinkingEnabled: bool
  * 说明被服务端上限打断（`completion_request_timeout_ms = 60000`，网页端靠
  * sse_auto_resume 续接，本适配器不实现续接）→ 报 max-tokens 而不是假装 stop，
  * 让上层知道回答被截断。
+ *
+ * 2026-09-11 补充：还有一种形态 —— 服务端**发了 FINISHED 但正文在句中被截**
+ * （实测：60s 内以 FINISHED 收笔、最后一个字符是句中汉字/字母/`**` 标记）。
+ * 此时也按 max-tensors 报（让 UI 提示「可能被截断」），启发式判据见 looksMidSentence。
  */
-function mapFinish(reason: string | undefined): { kind: 'stop' } | { kind: 'max-tokens' } {
+function mapFinish(reason: string | undefined, finalText?: string): { kind: 'stop' } | { kind: 'max-tokens' } {
   if (reason === undefined) return { kind: 'max-tokens' }
   const text = String(reason).toUpperCase()
   if (text.includes('LENGTH') || text.includes('MAX_TOKEN')) return { kind: 'max-tokens' }
+  if (finalText !== undefined && looksMidSentence(finalText)) return { kind: 'max-tokens' }
   return { kind: 'stop' }
+}
+
+/**
+ * 启发式：正文是否「在句中被截」。
+ * 判据（尾部最后一个非空白字符）：
+ *  - 是 CJK 汉字/字母/数字（没有任何标点收尾）→ 大概率被截；
+ *  - 是 markdown 强调标记（`**` / `__`）→ 被截在标记中间；
+ *  - 是逗号/顿号/冒号/开引号/开括号 → 明显未完。
+ *  正常结束的正文几乎总以句号/问号/感叹号/右引号/右括号/代码块收尾/表格行结尾出现。
+ */
+function looksMidSentence(text: string): boolean {
+  const trimmed = text.trimEnd()
+  if (trimmed.length === 0) return false
+  const last = trimmed[trimmed.length - 1]
+  if ('。，？！；：,?!;:…）】》」』"\'`*_#~'.includes(last)) {
+    // 标点收尾 → 但 `` ` `` 和 `*` `_` `#` `~` 可能是 markdown 标记被截，单独判
+    if (last === '*' || last === '_' || last === '#' || last === '~' || last === '`') {
+      // `**` 结尾 = 粗体标记没闭合 → 被截
+      return trimmed.endsWith('**') || trimmed.endsWith('__')
+    }
+    // 逗号/冒号/分号 → 未完
+    return '，：,;：：'.includes(last) || last === '，' || last === ',' || last === ':' || last === '：' || last === ';'
+  }
+  // 字母/数字/汉字/其他非标点字符收尾 → 大概率被截
+  return /[a-zA-Z0-9\u4e00-\u9fff\u3040-\u30ff]/.test(last)
 }
 
 /** 构造 deepseek-web 适配器（鸭子类型满足 LlmAdapter 契约，无需继承）。 */
@@ -373,6 +403,7 @@ export function createAdapter(deps: AdapterDeps) {
     let rejectedProtocol = ''
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
     let echoedTranscript = false
+    let systemMarkersStripped = false
 
     const openText = (): { index: number; text: string } => {
       if (!textBlock) textBlock = { index: nextIndex++, text: '' }
@@ -423,14 +454,21 @@ export function createAdapter(deps: AdapterDeps) {
           const out = filter.push(event.text)
           const guarded = echoGuard.push(out.text)
           if (guarded.echoed) echoedTranscript = true
-          if (guarded.text) {
+          // 第三道网：模型偶尔吐出成串的伪系统标记（<ds_system>…</ds_system> / <system>…</system>），
+          // 实测一条消息里出现过 13 个编造调用 ID 的 <ds_system>Tool result…，全是垃圾，必须剥掉
+          const cleaned = stripSystemMarkers(guarded.text)
+          if (cleaned.stripped) {
+            systemMarkersStripped = true
+            logger?.debug?.('deepseek-web: 已剥离伪系统标记（<ds_system>/<system>）')
+          }
+          if (cleaned.text) {
             const block = openText()
             if (!textStarted) {
               textStarted = true
               yield { type: 'block-start', index: block.index, blockType: 'text' }
             }
-            block.text += guarded.text
-            yield { type: 'text-delta', index: block.index, text: guarded.text }
+            block.text += cleaned.text
+            yield { type: 'text-delta', index: block.index, text: cleaned.text }
           }
           if (out.calls.length > 0) yield* emitCalls(out.calls)
           continue
@@ -576,7 +614,7 @@ export function createAdapter(deps: AdapterDeps) {
       }
       return
     }
-    yield { type: 'finish', reason: mapFinish(finishReason) }
+    yield { type: 'finish', reason: mapFinish(finishReason, textBlock?.text) }
   }
 
   return adapter

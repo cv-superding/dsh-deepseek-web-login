@@ -1091,6 +1091,58 @@ export class ToolCallStreamFilter {
 // ── 转写回声守卫 ──────────────────────────────────────────
 
 /**
+ * 剥离模型模仿的「系统标记」（`<ds_system>…</ds_system>` / `<system>…</system>`）。
+ *
+ * 实测（2026-09-11，deepseek-web）：模型会在正文里吐出成串的伪系统标记——
+ * 最严重的一现场是一条消息里 13 个 `<ds_system>Tool result for call_1a2b3c</ds_system>`，
+ * 调用 ID 还是字母递增编造的（1a2b3c→4d5e6f→7a8b9c…）。这与「转写回声」是同一类问题
+ * （模型在模仿协议格式），但形态是 XML 标签而不是 `[Tool Result]` 行，
+ * 所以单独一层处理。围栏代码块内不剥（正常回答可能讨论这些标记）。
+ *
+ * @returns 剥离后的文本；`stripped` = 是否剥掉了至少一个标记（用于日志/告警）。
+ */
+export function stripSystemMarkers(text: string): { text: string; stripped: boolean } {
+  if (!text.includes('<ds_system') && !text.includes('<system>') && !text.includes('<system ')) {
+    return { text, stripped: false }
+  }
+  let out = ''
+  let inFence = false
+  let stripped = false
+  let i = 0
+  while (i < text.length) {
+    const lineEnd = text.indexOf('\n', i)
+    const line = lineEnd === -1 ? text.slice(i) : text.slice(i, lineEnd + 1)
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) inFence = !inFence
+    if (!inFence) {
+      const cleaned = line
+        .replace(/<ds_system\b[^>]*>[\s\S]*?<\/ds_system>/g, () => {
+          stripped = true
+          return ''
+        })
+        .replace(/<ds_system\b[^>]*>[\s\S]*$/g, () => {
+          // 流在标记中间被截断：半截标记同样是垃圾
+          stripped = true
+          return ''
+        })
+        .replace(/<system\b[^>]*>[\s\S]*?<\/system>/g, () => {
+          stripped = true
+          return ''
+        })
+        .replace(/<system\b[^>]*>[\s\S]*$/g, () => {
+          stripped = true
+          return ''
+        })
+      out += cleaned
+    } else {
+      out += line
+    }
+    i = lineEnd === -1 ? text.length : lineEnd + 1
+  }
+  return { text: out, stripped }
+}
+
+/**
  * 转写格式标记 —— 也就是 `serializePrompt` 写进 prompt 的那套行首标记。
  *
  * 模型会**照着 prompt 里的转写格式模仿**，把工具结果 / 系统标记当回答吐出来。
