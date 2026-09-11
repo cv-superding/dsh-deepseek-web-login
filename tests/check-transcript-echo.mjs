@@ -133,6 +133,38 @@ test('行未完成时不上屏', () => {
   assert.equal(rest.text, '')
 })
 
+// ⑦ 2026-09-11 新形态：给回声行加 `Assistant: ` 前缀（转写标记不在行首）
+// 现场（install-plugin 工作区会话 54628c96，模型原样输出）：
+const REAL_PREFIXED_ECHO =
+  '\n\nAssistant: [Tool Result for call_7b1a7d39a2e54bc0b8f1]\ndirect ERR fetch failed\n\n\ntablished\n\nAssistant: '
+
+test('带头像前缀的回声（`Assistant: [Tool Result …]`）也必须整段拦下', () => {
+  const { text, echoed } = run([REAL_PREFIXED_ECHO])
+  assert.equal(echoed, true, '必须判定为回声')
+  assert.ok(!text.includes('Tool Result'), `回声漏出去了：${JSON.stringify(text)}`)
+  assert.ok(!text.includes('fetch failed'), `回声正文也漏了：${JSON.stringify(text)}`)
+  assert.ok(!text.includes('tablished'), `回声尾巴漏了：${JSON.stringify(text)}`)
+  assert.equal(text, '\n\n', `只应保留回声之前的空行：${JSON.stringify(text)}`)
+})
+
+test('分块到达时同样拦得住（转写标记被切开）', () => {
+  const chunks = [
+    '\n\nAssistant: [Tool Resu',
+    'lt for call_7b1a7d39a2e54bc0b8f1]\ndirect ERR fetch fai',
+    'led\n\n\ntablished\n\nAssistant: ',
+  ]
+  const { text, echoed } = run(chunks)
+  assert.equal(echoed, true)
+  assert.ok(!text.includes('Tool Result'), `分块时漏了：${JSON.stringify(text)}`)
+  assert.equal(text, '\n\n')
+})
+
+test('裸的 `Assistant:`（冒号后无内容）视为起一行假转写 → 拦下', () => {
+  const { text, echoed } = run(['正常回答。\n', 'Assistant: '])
+  assert.equal(echoed, true, '光秃秃的 Assistant: 不是正常回答')
+  assert.equal(text, '正常回答。\n', `实际：${JSON.stringify(text)}`)
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
 if (failures.length) process.exitCode = 1

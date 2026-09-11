@@ -2,6 +2,29 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.15 — 2026-09-11
+
+### 修复
+
+- **转写回声换了个前缀就绕过了守卫**（用户实测 17:07，install-plugin 工作区）：
+  模型输出的不再是以 `[Tool Result` 开头的行，而是
+  ```
+  Assistant: [Tool Result for call_7b1a7d39a2e54bc0b8f1]
+  direct ERR fetch failed
+  ```
+  加了 `Assistant: ` 前缀后，行首不再匹配回声特征 → 被当成「正文里偶尔出现的
+  `User:` 字样」放行，还把后面那行也一起带出来。
+  - 新增 **行内任意位置** 的转写特征判据（`ECHO_INLINE_SIGNATURES`）：
+    `[Tool Result` / `[status:` / `[Truncated]` / `[System]` / `[Assistant]`
+    —— 只要一行里含有这些标记就判回声，不再要求行首。
+  - 光秃秃的 `Assistant:` / `User:`（冒号后没有内容）视为模型在起一行假转写，直接拦下
+    （以前它会被扣住，然后在 flush 时当作正文放行）。
+
+### 测试
+
+- `check-transcript-echo` 10 → **13 项**：带头像前缀的回声（整段 / 分块到达）、
+  裸 `Assistant:`、以及原有判据不回归。
+
 ## 0.1.14 — 2026-09-11
 
 ### 修复

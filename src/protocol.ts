@@ -1262,6 +1262,8 @@ export class BoilerplateFilter {
  * 实测（2026-09-10，deepseek-web / deepseek-reasoner）可见正文里出现：
  *   `[Tool Result for call_xxx]` + 真实工具输出 + `[status: running]`
  * 以及成串的 `User: …` / `Assistant: …` 转写行。
+ * 2026-09-11 补：还有一种更隐蔽的形态 —— 给回声行加 `Assistant: ` 前缀
+ * （`Assistant: [Tool Result for call_xxx]`），必须按「行内含转写标记」判，见 ECHO_INLINE_SIGNATURES。
  */
 const ECHO_SIGNATURES: readonly RegExp[] = [
   /^\[\s*Tool Result\b/i,
@@ -1270,6 +1272,26 @@ const ECHO_SIGNATURES: readonly RegExp[] = [
 ]
 /** 转写轮次行：单行可能只是正文，成串出现才是回声。 */
 const ECHO_TURN_RE = /^(?:User|Assistant)\s*:/
+
+/**
+ * 转写特征出现在**行内任意位置**（不要求行首）。
+ *
+ * 实测（2026-09-11 17:07，install-plugin 工作区）：模型输出的回声长这样 ——
+ *   `Assistant: [Tool Result for call_7b1a7d39a2e54bc0b8f1]`
+ *   `direct ERR fetch failed`
+ * 它给回声加了 `Assistant: ` 前缀，于是行首不再匹配 ECHO_SIGNATURES，
+ * 被当成「正文里偶尔出现的 User: 字样」放行（还顺带把后面那行也带了出来）。
+ * 所以只要一行里**含有**这些标记，就当回声处理。
+ */
+const ECHO_INLINE_SIGNATURES: readonly RegExp[] = [
+  /\[\s*Tool Result\b/i,
+  /\[\s*status\s*:/i,
+  /\[\s*Truncated\s*\]/i,
+  /\[\s*(?:System|Assistant)\s*\]/i,
+]
+
+/** 光秃秃的 `Assistant:` / `User:`（冒号后没有内容）—— 模型正在起一行假转写。 */
+const ECHO_BARE_TURN_RE = /^(?:User|Assistant)\s*:\s*$/
 
 /** 回声标记的**半截前缀**（流在行中间被截断时出现）——同样是垃圾，不能上屏。 */
 const ECHO_PREFIXES = ['[tool result', '[status:', '[system]', '[assistant]']
@@ -1361,6 +1383,10 @@ export class TranscriptEchoGuard {
     }
     if (this.inFence) return 'plain'
     for (const re of ECHO_SIGNATURES) if (re.test(t)) return 'echo'
+    // 加了 `Assistant: ` 前缀的回声：标记不在行首，但确实是转写回放
+    for (const re of ECHO_INLINE_SIGNATURES) if (re.test(t)) return 'echo'
+    // 冒号后没内容的 `Assistant:` —— 真回答里几乎不会出现，放过它就等着看回放
+    if (ECHO_BARE_TURN_RE.test(t)) return 'echo'
     if (ECHO_TURN_RE.test(t)) return 'turn'
     return 'plain'
   }
