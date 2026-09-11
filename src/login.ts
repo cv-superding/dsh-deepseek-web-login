@@ -20,6 +20,130 @@ import { DS_BASE, DEFAULT_WASM_URL, FALLBACK_UA, validateAuth } from './webapi.t
 const PARTITION = 'persist:dsh-deepseek-web-login'
 const LOGIN_URL = `${DS_BASE}/`
 
+// ── 浏览器指纹伪装 ────────────────────────────────────────
+// 事故（2026-09-11 用户实测）：点「浏览器窗口登录」后网页端直接显示
+//   「使用环境异常 —— 当前页面的使用环境可能存在数据和隐私泄露风险，为保障安全，
+//     建议您使用我们的官方产品。」
+// 原因：Electron 的默认 UA 里带应用名与 `Electron/<版本>` 字样，网页端一眼识别出
+// 「这不是普通浏览器」就拒绝服务。所以登录窗口必须报**干净的 Chrome UA**。
+// 顺带一个好处：捕获到的 UA 会用于后续 API 请求（auth.userAgent），干净的 UA 与网页端一致。
+
+/** 当前运行环境对应的平台串（与 Chromium 的取值一致）。 */
+function platformToken(): string {
+  if (process.platform === 'win32') return 'Windows NT 10.0; Win64; x64'
+  if (process.platform === 'darwin') return 'Macintosh; Intel Mac OS X 10_15_7'
+  return 'X11; Linux x86_64'
+}
+
+/**
+ * 构造干净的 Chrome UA（剔除 Electron/应用名）。
+ * Chromium 大版本取当前运行时真实版本，避免出现「UA 版本与能力不符」这类更明显的矛盾。
+ */
+export function buildLoginUserAgent(chromiumVersion = process.versions.chrome): string {
+  const major = String(chromiumVersion ?? '').split('.')[0] || '131'
+  return `Mozilla/5.0 (${platformToken()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
+}
+
+/**
+ * 清掉 UA-CH（Sec-CH-UA*）里的 Electron/应用品牌 —— 只改 UA 字符串是不够的：
+ * Chromium 还会通过 client hints 把品牌列表发出去，里面同样带着非浏览器品牌。
+ * 纯函数，便于单测。
+ */
+export function sanitizeClientHints(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = { ...headers }
+  for (const key of Object.keys(out)) {
+    const lower = key.toLowerCase()
+    if (lower !== 'sec-ch-ua' && lower !== 'sec-ch-ua-full-version-list' && lower !== 'user-agent') continue
+    const value = String(out[key])
+    if (lower === 'user-agent') {
+      // UA 里出现 Electron / 应用名 → 换成干净 Chrome UA
+      if (/electron/i.test(value)) out[key] = buildLoginUserAgent()
+      continue
+    }
+    // 品牌列表：只保留 Chromium（丢弃 Electron 等非浏览器品牌）
+    const brands = value
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part && !/electron/i.test(part))
+    out[key] = brands.length > 0 ? brands.join(', ') : '"Chromium";v="131", "Not_A Brand";v="24"'
+  }
+  return out
+}
+
+/** 把干净指纹应用到分区与窗口（session 管网络，webContents 管页面里的 navigator.userAgent）。 */
+function applyBrowserFingerprint(ses: any, win: any): void {
+  const ua = buildLoginUserAgent()
+  try {
+    ses.setUserAgent(ua)
+  } catch {}
+  try {
+    win.webContents.setUserAgent(ua)
+  } catch {}
+}
+
+/**
+ * 页面内归一化 + 回读「网页端实际看到的指纹」。
+ *
+ * 为什么要回读：服务端对两种 UA 返回的 HTML 完全一样（实测 2026-09-11 探针），
+ * 说明「使用环境异常」是**页面内 JS**判定的。既然如此，就必须能看到**页面到底看到了什么**，
+ * 否则永远只能猜（UA 改没改对、品牌列表脏不脏、webdriver 是不是 true）。
+ *
+ * 归一化只动「非浏览器品牌」与 webdriver 这两个明确属于自动化痕迹的字段；
+ * 没有 Electron 痕迹时不做任何改写。
+ */
+function observePageFingerprint(win: any, report: { pageUa?: string; pageBrands?: string[]; pageWebdriver?: boolean }): void {
+  const script = `(() => {
+    const bad = /electron|dsh|deepseek-harness/i
+    let patchedBrands = null
+    try {
+      const data = navigator.userAgentData
+      if (data && Array.isArray(data.brands)) {
+        const dirty = data.brands.filter((b) => bad.test(String(b.brand)))
+        if (dirty.length > 0) {
+          const clean = data.brands.filter((b) => !bad.test(String(b.brand)))
+          try {
+            Object.defineProperty(Object.getPrototypeOf(data), 'brands', { get: () => clean, configurable: true })
+          } catch {}
+        }
+      }
+    } catch {}
+    try {
+      if (navigator.webdriver) {
+        Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', { get: () => false, configurable: true })
+      }
+    } catch {}
+    try {
+      const data = navigator.userAgentData
+      patchedBrands = data && Array.isArray(data.brands) ? data.brands.map((b) => b.brand + '/' + b.version) : null
+    } catch {}
+    return JSON.stringify({
+      ua: navigator.userAgent,
+      brands: patchedBrands,
+      webdriver: !!navigator.webdriver,
+    })
+  })()`
+  const read = (): void => {
+    try {
+      const promise = win.webContents.executeJavaScript(script, true)
+      void Promise.resolve(promise)
+        .then((raw: any) => {
+          try {
+            const info = JSON.parse(String(raw))
+            report.pageUa = String(info.ua ?? '')
+            report.pageBrands = Array.isArray(info.brands) ? info.brands.map(String) : undefined
+            report.pageWebdriver = !!info.webdriver
+            fingerprintReport = { ...(fingerprintReport ?? { at: new Date().toISOString(), url: LOGIN_URL, stripped: [] }), ...report }
+          } catch {}
+        })
+        .catch(() => {})
+    } catch {}
+  }
+  try {
+    win.webContents.on('dom-ready', read)
+    win.webContents.on('did-finish-load', read)
+  } catch {}
+}
+
 let loginWindow: any = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -34,6 +158,50 @@ export interface LoginProgress {
 
 let progress: LoginProgress = { open: false }
 let lastResult: { ok: boolean; message: string; at: string } | undefined
+
+/**
+ * 最近一次「剔除 Electron 指纹」的记录。
+ * 留这个是为了让面板能如实展示「到底改了哪些头、页面实际看到了什么」——
+ * 否则用户没法判断环境异常是已经被处理掉了，还是压根没生效。
+ */
+export interface FingerprintReport {
+  at: string
+  url: string
+  /** 被改写的请求头名（空数组 = 本次没发现 Electron 痕迹） */
+  stripped: string[]
+  /** 页面里回读到的 UA —— 网页端实际看到的就是它 */
+  pageUa?: string
+  /** 页面里回读到的品牌列表（navigator.userAgentData.brands） */
+  pageBrands?: string[]
+  /** 页面里的 navigator.webdriver（自动化痕迹，正常浏览器为 false） */
+  pageWebdriver?: boolean
+}
+
+let fingerprintReport: FingerprintReport | undefined
+
+export function getFingerprintReport(): FingerprintReport | undefined {
+  return fingerprintReport
+}
+
+/**
+ * 用**系统默认浏览器**打开 chat.deepseek.com（兜底路径）。
+ *
+ * 适用场景：网页端连「干净指纹的 Electron 窗口」也拦，或者用户就是想用自己的日常浏览器。
+ * 注意：外部浏览器里的登录态插件抓不到（没有 webRequest 钩子），
+ * 所以这条路径要和「手动粘贴 token」配合 —— 面板里给了现成的控制台命令。
+ */
+export async function openExternalLogin(): Promise<{ ok: boolean; url: string; message?: string }> {
+  if (!electronAvailable()) {
+    return { ok: false, url: LOGIN_URL, message: '当前不是 Electron 桌面端：请手动在浏览器打开 chat.deepseek.com' }
+  }
+  try {
+    const electron = createRequire(import.meta.url)('electron')
+    await electron.shell.openExternal(LOGIN_URL)
+    return { ok: true, url: LOGIN_URL }
+  } catch (error: any) {
+    return { ok: false, url: LOGIN_URL, message: error?.message ?? String(error) }
+  }
+}
 
 export function getLoginProgress(): LoginProgress {
   return progress
@@ -223,27 +391,43 @@ async function readPage(win: any, buffer: CaptureBuffer): Promise<void> {
   }
 }
 
-/** 在 session 上挂请求头捕获钩子。 */
-function hookHeaders(ses: any, buffer: CaptureBuffer): void {
+/**
+ * 在 session 上挂请求头捕获钩子（同时负责剔除 Electron 指纹）。
+ * ⚠️ 一个 session 只能注册一个 onBeforeSendHeaders 处理器（后注册会覆盖先注册），
+ * 所以「清理指纹」必须合并在同一个回调里，不能另开一个。
+ */
+function hookHeaders(ses: any, buffer: CaptureBuffer, onRewrite?: (info: { url: string; stripped: string[] }) => void): void {
   ses.webRequest.onBeforeSendHeaders({ urls: ['https://chat.deepseek.com/*', 'https://*.deepseek.com/*'] }, (details: any, callback: any) => {
     const headers = { ...(details?.requestHeaders ?? {}) }
     const lower: Record<string, string> = {}
     for (const [key, value] of Object.entries(headers)) lower[key.toLowerCase()] = String(value)
+    // 先剔除 Electron 品牌（UA 字符串 + UA-CH）；否则网页端会判定「使用环境异常」
+    const sanitized = sanitizeClientHints(headers)
+    const stripped: string[] = []
+    for (const key of Object.keys(headers)) {
+      if (String(headers[key]) !== String(sanitized[key])) stripped.push(key.toLowerCase())
+    }
+    for (const key of Object.keys(headers)) delete headers[key]
+    Object.assign(headers, sanitized)
+    if (stripped.length > 0) onRewrite?.({ url: String(details?.url ?? ''), stripped })
+    // 捕获用**清理后**的头（捕获到的 UA 之后会用于 API 请求，必须是干净的那个）
+    const cleanLower: Record<string, string> = {}
+    for (const [key, value] of Object.entries(headers)) cleanLower[key.toLowerCase()] = String(value)
     if (String(details?.url ?? '').includes('/api/')) {
-      if (!buffer.userAgent && lower['user-agent']) buffer.userAgent = lower['user-agent']
-      const authHeader = lower['authorization']
+      if (!buffer.userAgent && cleanLower['user-agent']) buffer.userAgent = cleanLower['user-agent']
+      const authHeader = cleanLower['authorization']
       if (authHeader?.toLowerCase().startsWith('bearer ')) buffer.headerToken = authHeader.slice(7).trim()
-      if (lower['cookie']) buffer.cookie = lower['cookie']
-      if (lower['x-hif-dliq']) buffer.hifDliq = lower['x-hif-dliq']
-      if (lower['x-hif-leim']) buffer.hifLeim = lower['x-hif-leim']
+      if (cleanLower['cookie']) buffer.cookie = cleanLower['cookie']
+      if (cleanLower['x-hif-dliq']) buffer.hifDliq = cleanLower['x-hif-dliq']
+      if (cleanLower['x-hif-leim']) buffer.hifLeim = cleanLower['x-hif-leim']
       if (!buffer.extraHeaders['x-client-version']) {
         const snapshot: Record<string, string> = {}
-        for (const [key, value] of Object.entries(lower)) {
+        for (const [key, value] of Object.entries(cleanLower)) {
           if (!/^x-/.test(key)) continue
           if (key === 'x-ds-pow-response' || key === 'x-hif-dliq' || key === 'x-hif-leim') continue
           snapshot[key] = value
         }
-        if (lower['accept-language']) snapshot['accept-language'] = lower['accept-language']
+        if (cleanLower['accept-language']) snapshot['accept-language'] = cleanLower['accept-language']
         buffer.extraHeaders = snapshot
       }
     }
@@ -267,11 +451,20 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
   const { BrowserWindow, session } = electron
 
   const buffer = newBuffer()
+  fingerprintReport = undefined
   progress = { open: true, startedAt: new Date().toISOString(), captured: progressFrom(buffer) }
   const ses = session.fromPartition(PARTITION)
 
   try {
-    hookHeaders(ses, buffer)
+    hookHeaders(ses, buffer, (info) => {
+      // 只记第一次命中（避免刷屏），但要保留后面回读到的页面指纹
+      if (!fingerprintReport) {
+        fingerprintReport = { at: new Date().toISOString(), url: info.url, stripped: info.stripped }
+        logger?.info?.(`deepseek-web login: 已剔除 Electron 指纹头 [${info.stripped.join(', ')}]`)
+      } else {
+        fingerprintReport = { ...fingerprintReport, stripped: info.stripped }
+      }
+    })
   } catch (error: any) {
     logger?.warn?.(`deepseek-web login: header capture unavailable: ${error?.message ?? error}`)
   }
@@ -285,6 +478,10 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
   })
   loginWindow = win
   win.on('closed', () => cleanup())
+  // ⚠️ 必须在 loadURL 之前应用：网页端第一次请求就带 UA，晚一步就来不及了
+  applyBrowserFingerprint(ses, win)
+  // 页面加载后回读「网页端实际看到的指纹」，并顺手抹掉 JS 侧的品牌/webdriver 痕迹
+  observePageFingerprint(win, {})
 
   try {
     await win.loadURL(LOGIN_URL)

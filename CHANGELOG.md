@@ -2,6 +2,41 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.6 — 2026-09-11
+
+### 修复
+
+- **点「浏览器窗口登录」被网页端判为「使用环境异常」**（严重，本次用户实测）
+  - 现象：登录窗口里显示
+    「使用环境异常 —— 当前页面的使用环境可能存在数据和隐私泄露风险，为保障安全，
+      建议您使用我们的官方产品。」
+  - 根因：Electron 的默认 UA 里带**应用名与 `Electron/<版本>`** 字样，网页端一眼识别出
+    「这不是普通浏览器」就拒绝服务。
+    （探针证实：服务端对 Electron UA 与干净 Chrome UA 返回**完全相同的 HTML**，
+    说明判定发生在**页面内 JS**，所以两处都要清。）
+  - 修复：
+    1. 登录窗口报**干净 Chrome UA**（`buildLoginUserAgent`，Chromium 大版本取运行时真实值），
+       在 `session.setUserAgent` 与 `webContents.setUserAgent` 上同时设置，且**必须在 loadURL 之前**；
+    2. 清 **UA-CH**（`sec-ch-ua` / `sec-ch-ua-full-version-list`）里的非浏览器品牌 ——
+       只改 UA 字符串不够，Chromium 还会通过 client hints 把品牌列表发出去；
+    3. 页面主世界里抹掉 `navigator.userAgentData.brands` 的非浏览器品牌与 `navigator.webdriver`；
+    4. 捕获到的 UA 现在也是干净的（它会用于后续 API 请求，与网页端保持一致）。
+
+### 新增
+
+- **「用我的默认浏览器登录」兜底入口**（`POST /login/external`）
+  - 网页端连干净指纹的 Electron 窗口也拦、或者用户就是想用自己的日常浏览器时用它：
+    用系统默认浏览器打开 chat.deepseek.com，配合已有的「手动粘贴 Token」卡完成登录。
+  - 说明：外部浏览器里的登录态插件抓不到（没有 webRequest 钩子），所以这条路径必须配合手动 token。
+- **指纹可观测**：面板新增「指纹清理 / 页面看到 UA / 页面品牌 / webdriver」四项。
+  服务端不区分 UA，判定在页面内 —— 看不到「页面实际看到了什么」就只能靠猜，所以把它读出来展示。
+
+### 测试
+
+- 新增 `tests/check-login-fingerprint.mjs`（7 项）：UA 不得含 Electron/应用名、版本取自运行时、
+  缺版本不崩、UA-CH 品牌清理、干净 UA 原样保留、品牌被清空时的兜底、无关头不被改动。
+- 断言总数 89 → **96**；产物核对 34 → **38** 项。
+
 ## 0.1.5 — 2026-09-11
 
 ### 新增

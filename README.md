@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#模型档位)
-[![Tests](https://img.shields.io/badge/tests-89%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![Tests](https://img.shields.io/badge/tests-96%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
 [![CI](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg)](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#免责声明)
@@ -87,6 +87,8 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 ### 2. 登录一次
 
 **设置 → DeepSeek 网页登录 → 浏览器窗口登录**，在弹出的窗口里正常登录（手机号 / 邮箱 / 验证码均可）。
+登录窗口报的是**干净 Chrome UA**（不含 Electron 字样，UA-CH 品牌也清过）—— 否则网页端会判定
+「使用环境异常」直接拒绝服务；若仍被拦，用同一行的 **用我的默认浏览器登录**，按提示用 F12 取 token 粘贴。
 捕获成功后窗口自动关闭，面板显示**已登录**。
 
 - 凭证只存在本机 `~/.dsh/web-login/deepseek-auth.json`，**不在仓库里**；面板「当前账号 → 退出当前账号」一键清除（同时清掉浏览器分区里的登录态，保证真退出、可换号）
@@ -153,7 +155,7 @@ prompt 字符上限默认 1,200,000（可配）。
 ## 测试与验证
 
 ```bash
-node tests/logic-test.mjs            # 89 项断言（6 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/logic-test.mjs            # 96 项断言（7 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
 node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
 node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
 node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）

@@ -11,7 +11,7 @@
  */
 import { readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
-import { closeLoginWindow, electronAvailable, captureFromPartition, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openLoginWindow } from './login.ts'
+import { closeLoginWindow, electronAvailable, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { validateAuth } from './webapi.ts'
 
 export const name = 'dsh-deepseek-web-login'
@@ -135,6 +135,7 @@ export function apply(ctx: any, config: Config = {}): void {
                 electron: electronAvailable(),
                 loginWindowOpen: isLoginWindowOpen(),
                 loginProgress: getLoginProgress(),
+                fingerprint: getFingerprintReport(),
                 lastLoginResult: getLastLoginResult(),
                 auth: summary,
                 validation,
@@ -157,6 +158,13 @@ export function apply(ctx: any, config: Config = {}): void {
 
             if (req.method === 'POST' && route === '/login/browser') {
               const result = await openLoginWindow(logger)
+              sendJson(res, 200, result)
+              return
+            }
+
+            if (req.method === 'POST' && route === '/login/external') {
+              // 兜底：网页端连干净指纹的 Electron 窗口也拦时，用系统默认浏览器打开
+              const result = await openExternalLogin()
               sendJson(res, 200, result)
               return
             }

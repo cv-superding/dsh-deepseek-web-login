@@ -21,6 +21,7 @@ interface StatusPayload {
   electron: boolean
   loginWindowOpen: boolean
   loginProgress: { open: boolean; startedAt?: string; captured?: { token: boolean; cookie: boolean; fingerprint: boolean; wasm: boolean }; lastError?: string; finished?: boolean }
+  fingerprint?: { at: string; url: string; stripped: string[]; pageUa?: string; pageBrands?: string[]; pageWebdriver?: boolean }
   lastLoginResult?: { ok: boolean; message: string; at: string }
   auth: { loggedIn: boolean; display?: string; capturedAt?: string; hasCookie: boolean; hasFingerprint: boolean; wasmHost?: string; unverified?: boolean; tokenLength?: number }
   validation?: { ok: boolean; error?: string }
@@ -128,10 +129,19 @@ function Panel(): any {
     const loginActions = el('div', 'dsw-row')
     loginActions.style.marginTop = '10px'
     const browserBtn = el('button', 'dsw-btn', '浏览器窗口登录') as HTMLButtonElement
+    const externalBtn = el('button', 'dsw-btn ghost', '用我的默认浏览器登录') as HTMLButtonElement
     const recoverBtn = el('button', 'dsw-btn ghost', '从已登录窗口恢复') as HTMLButtonElement
     const refreshBtn = el('button', 'dsw-btn ghost', '刷新状态') as HTMLButtonElement
-    loginActions.append(browserBtn, recoverBtn, refreshBtn)
+    loginActions.append(browserBtn, externalBtn, recoverBtn, refreshBtn)
     loginCard.append(loginActions)
+    loginCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '「用我的默认浏览器登录」= 用系统浏览器打开 chat.deepseek.com（网页端若提示「使用环境异常」，走这条）。' +
+          '外部浏览器的登录态插件抓不到，所以要用 F12 控制台取 token 粘到下面那张卡（命令已备好）。',
+      ),
+    )
     loginCard.append(
       el(
         'p',
@@ -257,6 +267,22 @@ function Panel(): any {
       if (status.loginProgress?.lastError && status.loginWindowOpen) {
         rows.push(['窗口提示', status.loginProgress.lastError])
       }
+      if (status.fingerprint && status.fingerprint.stripped.length > 0) {
+        rows.push(['指纹清理', `已剔除 ${status.fingerprint.stripped.length} 个 Electron 头：${status.fingerprint.stripped.join(', ')}`])
+      } else if (status.loginWindowOpen) {
+        rows.push(['指纹清理', '窗口已打开（尚未命中需要清理的头）'])
+      }
+      if (status.fingerprint?.pageUa) {
+        const bad = /electron/i.test(status.fingerprint.pageUa)
+        rows.push(['页面看到 UA', `${bad ? '⚠️ 仍含 Electron：' : '✅ '}${status.fingerprint.pageUa}`])
+      }
+      if (status.fingerprint?.pageBrands?.length) {
+        const dirty = status.fingerprint.pageBrands.filter((b) => /electron|dsh/i.test(b))
+        rows.push(['页面品牌', `${dirty.length ? `⚠️ ${dirty.join(', ')}` : '✅ '}${status.fingerprint.pageBrands.join(', ')}`])
+      }
+      if (status.fingerprint?.pageWebdriver !== undefined) {
+        rows.push(['webdriver', status.fingerprint.pageWebdriver ? '⚠️ true（自动化痕迹）' : '✅ false'])
+      }
       renderKv(rows)
 
       browserBtn.disabled = !electron
@@ -335,6 +361,27 @@ function Panel(): any {
         }
         recoverBtn.disabled = false
         await refresh(false)
+      })()
+    })
+
+    externalBtn.addEventListener('click', () => {
+      void (async () => {
+        externalBtn.disabled = true
+        try {
+          const result = await api('/login/external', { method: 'POST', body: '{}' })
+          if (result?.ok) {
+            showMessage(
+              `已用系统默认浏览器打开 ${result.url}\n` +
+                '① 在浏览器里正常登录；②按 F12 → Console，粘贴下方「手动粘贴 Token」卡里的那行命令；' +
+                '③ 把打印出来的结果粘到那张卡的输入框 → 点「保存并验证」。',
+            )
+          } else {
+            showMessage(`打开失败：${result?.message ?? '未知原因'}；请手动在浏览器访问 ${result?.url ?? 'https://chat.deepseek.com'}`, 'err')
+          }
+        } catch (error: any) {
+          showMessage(`打开失败：${error?.message ?? error}`, 'err')
+        }
+        externalBtn.disabled = false
       })()
     })
 

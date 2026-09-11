@@ -37,6 +37,10 @@ const checks = {
   'client 退出按钮': client.includes('退出当前账号'),
   'client 换号入口': client.includes('退出并登录其它账号'),
   'client 退出二次确认': client.includes('确认退出？'),
+  '登录窗口报干净 Chrome UA': host.includes('buildLoginUserAgent') && host.includes('sanitizeClientHints'),
+  'UA-CH 品牌清理': host.includes('sec-ch-ua'),
+  '默认浏览器兜底入口': host.includes('/login/external') && client.includes('用我的默认浏览器登录'),
+  '页面指纹回读（可观测）': host.includes('pageBrands') && client.includes('页面看到 UA'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),
 }
