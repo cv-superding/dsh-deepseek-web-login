@@ -128,6 +128,16 @@ function mutedMessage(untilMs: number | undefined): string {
 }
 
 /**
+ * 「同一账号同时只能生成一条」的并发拒绝（实测 2026-09-11：两个 DSH 窗口共用同一网页账号，
+ * 一个正在生成时另一个发请求即得此错：`A message is being generated, please try again later.`）。
+ * 它**不是封号**（封号是 `user is muted`），但也无法立刻成功 ——
+ * 归为可重试的 RATE_LIMIT，交由 dsh-llm-retry 稍后自动重发，而不是让整轮直接失败。
+ */
+export function isBusyGenerating(message: string): boolean {
+  return /being generated|try again later|请稍后再试|稍后再试|正在生成/i.test(String(message ?? ''))
+}
+
+/**
  * 会话失效判定：服务端用 biz_msg 表达「这个 chat_session_id 不存在/无效」。
  * 触发场景（实测）：请求发出前会话已被删除（旧版把删除排在建会话之后 1.5s，
  * 而 PoW 求解 + 建连可能超过 1.5s），或服务端自行回收了闲置会话。
@@ -474,7 +484,7 @@ export type WebStreamEvent =
   | { kind: 'text'; text: string }
   | { kind: 'status'; value: string }
   | { kind: 'finish'; reason?: string }
-  | { kind: 'error'; message: string; raw?: string }
+  | { kind: 'error'; message: string; raw?: string; /** 语义归类（如并发生成 → RATE_LIMIT），调用方据此决定重试 */ code?: string; retryAfterMs?: number }
 
 interface Fragment {
   type: string
@@ -666,16 +676,31 @@ export function createSseState() {
         }
         return out
       }
-      // 2) 模型错误事件
+      // 2) 模型错误事件：按语义归类（并发生成 → 可重试的 RATE_LIMIT），调用方据此决定重试还是报错
       if (d && typeof d === 'object' && d.type === 'error') {
         const message = typeof d.content === 'string' ? d.content : typeof d.message === 'string' ? d.message : 'model error'
-        out.push({ kind: 'error', message, ...(d.finish_reason !== undefined ? { raw: String(d.finish_reason) } : {}) })
+        const event: WebStreamEvent & { raw?: string } = {
+          kind: 'error',
+          message,
+          ...(d.finish_reason !== undefined ? { raw: String(d.finish_reason) } : {}),
+        }
+        if (isBusyGenerating(message)) {
+          event.code = 'RATE_LIMIT'
+          event.retryAfterMs = 5_000
+        }
+        out.push(event)
         return out
       }
       // 3) SSE 命名事件（title 忽略；toast 视为提示性错误）
       if (eventName === 'toast') {
         const message = d && typeof d === 'object' ? (d.content ?? d.message ?? JSON.stringify(d)) : String(d)
-        out.push({ kind: 'error', message: `DeepSeek toast: ${String(message).slice(0, 200)}` })
+        const full = `DeepSeek toast: ${String(message).slice(0, 200)}`
+        const event: WebStreamEvent = { kind: 'error', message: full }
+        if (isBusyGenerating(full)) {
+          event.code = 'RATE_LIMIT'
+          event.retryAfterMs = 5_000
+        }
+        out.push(event)
         return out
       }
       if (eventName === 'title') return out
@@ -888,15 +913,21 @@ async function openCompletion(
     } catch {}
     const biz = envelopeError(parsed)
     const muted = isMutedError(biz)
+    const busy = !muted && !!biz && isBusyGenerating(biz.msg)
     const untilMs = muteUntilMs(parsed)
     const failure = biz
       ? new AdapterLlmError(
-          muted ? mutedMessage(untilMs) : bizErrorMessage(biz.code, biz.msg),
-          muted ? 'RATE_LIMIT' : isInvalidSessionError(biz) ? 'TRANSPORT' : bizErrorCode(biz.code),
+          muted
+            ? mutedMessage(untilMs)
+            : busy
+              ? 'DeepSeek 网页端同一账号同时只能生成一条消息（另一个窗口/标签页正在用同一账号生成）。这一步会自动重试；若两个窗口都要用网页模型，建议其中一个换 provider 或换账号。'
+              : bizErrorMessage(biz.code, biz.msg),
+          muted || busy ? 'RATE_LIMIT' : isInvalidSessionError(biz) ? 'TRANSPORT' : bizErrorCode(biz.code),
           {
             status: resp.status,
             // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
             ...(muted && untilMs !== undefined ? { providerRetryAfterMs: Math.max(0, untilMs - Date.now()) } : {}),
+            ...(busy ? { providerRetryAfterMs: 5_000 } : {}),
           },
         )
       : new AdapterLlmError(

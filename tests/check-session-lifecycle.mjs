@@ -15,7 +15,7 @@
  * 用法: node tests/check-session-lifecycle.mjs
  */
 import assert from 'node:assert/strict'
-import { envelopeError, isInvalidSessionError, isMutedError, muteUntilMs, streamWebCompletion } from '../src/webapi.ts'
+import { envelopeError, isBusyGenerating, isInvalidSessionError, isMutedError, muteUntilMs, streamWebCompletion } from '../src/webapi.ts'
 
 let passed = 0
 const failures = []
@@ -198,6 +198,41 @@ await run('muted：报 RATE_LIMIT + 解除时间，并带上 providerRetryAfterM
   const retryAfter = thrown.failure?.providerRetryAfterMs ?? thrown.providerRetryAfterMs
   assert.ok(retryAfter > 60_000, `解除时间很远时必须给出 providerRetryAfterMs（>60s）让重试策略放弃空转，实际 ${retryAfter}`)
   assert.ok(log.includes('delete:S1'), '失败也要回收会话')
+})
+
+// ── 事实 ④：两个窗口共用同一账号 → 「同时只能生成一条」必须可重试而不是整轮失败 ──
+// 用户实测（2026-09-11）：SSE 流里报
+//   A message is being generated, please try again later.
+// 旧实现一律抛 PROVIDER_ERROR（不可重试）→ 那一轮直接失败。
+const REAL_BUSY = 'A message is being generated, please try again later.'
+
+test('isBusyGenerating: 认得真实的并发生成拒绝文案', () => {
+  assert.equal(isBusyGenerating(REAL_BUSY), true)
+  assert.equal(isBusyGenerating('请稍后再试'), true)
+  assert.equal(isBusyGenerating('user is muted'), false, 'mute 是另一回事，不能混为一谈')
+  assert.equal(isBusyGenerating(''), false)
+  assert.equal(isBusyGenerating(undefined), false)
+})
+
+await run('SSE 错误事件里的「并发生成」→ 归类为可重试的 RATE_LIMIT', async () => {
+  const ssePayload = `data: ${JSON.stringify({ type: 'error', content: REAL_BUSY })}\n\n`
+  const { events, thrown } = await scenario({ completionResponses: [sseResponse(ssePayload)] })
+  assert.equal(thrown, undefined, 'streamWebCompletion 只产出事件，不抛错')
+  const errorEvent = events.find((e) => e.kind === 'error')
+  assert.ok(errorEvent, '应产出 error 事件')
+  assert.equal(errorEvent.code, 'RATE_LIMIT', `应带语义归类，实际 ${JSON.stringify(errorEvent)}`)
+  assert.equal(errorEvent.retryAfterMs, 5_000)
+})
+
+await run('信封里的「并发生成」同样归为可重试（RATE_LIMIT + 5s）', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(`{"code":0,"msg":"","data":{"biz_code":1,"biz_msg":"${REAL_BUSY}"}}`)],
+  })
+  assert.ok(thrown, '必须抛出')
+  assert.equal(thrown.code, 'RATE_LIMIT', `应可重试，实际 ${thrown.code}`)
+  const retryAfter = thrown.failure?.providerRetryAfterMs ?? thrown.providerRetryAfterMs
+  assert.equal(retryAfter, 5_000, '并发生成是短暂状态，重试间隔应该短')
+  assert.match(String(thrown.message), /同时只能生成一条|being generated/i)
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

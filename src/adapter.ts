@@ -443,6 +443,15 @@ export function createAdapter(deps: AdapterDeps) {
           if (isContextTooLong(event.message)) {
             throw new AdapterLlmError(`DeepSeek 网页端上下文超限：${event.message}`, 'CONTEXT_WINDOW_EXCEEDED')
           }
+          // webapi 层已按语义归类（并发生成 → RATE_LIMIT + retryAfterMs）：
+          // 这类错误交给 dsh-llm-retry 自动重发，而不是让整轮直接失败。
+          if (event.code === 'RATE_LIMIT') {
+            throw new AdapterLlmError(
+              `DeepSeek 网页端同一账号同时只能生成一条消息（另一个窗口/标签页正在用同一账号生成）。这一步会自动重试；若两个窗口都要用网页模型，建议其中一个换 provider 或换账号。`,
+              'RATE_LIMIT',
+              { ...(event.retryAfterMs !== undefined ? { providerRetryAfterMs: event.retryAfterMs } : {}) },
+            )
+          }
           throw new AdapterLlmError(`DeepSeek 网页端返回错误：${event.message}`, 'PROVIDER_ERROR')
         }
         if (event.kind === 'finish') {

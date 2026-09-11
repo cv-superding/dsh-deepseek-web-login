@@ -194,6 +194,7 @@ CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个 PR 上跑�
 | 报错里带「临时限制」/ `user is muted` | **账号被网页端临时限制**（不是插件问题）：登录态有效、建会话也正常，只有发消息被拒。消息里会给出解除时间；等解除或改用其它账号/官方 API key |
 | 「浏览器窗口登录」点了没反应，host 日志有 `fromPartition` 报错 | DSH 把插件宿主挪到了 **utility 进程**（没有窗口 API）→ 0.1.7 起改用**真实 Edge/Chrome + CDP** 登录：面板会显示「宿主进程」，按钮变成「用 Microsoft Edge 登录」。升级插件 + 重启 DSH 即可 |
 | 面板显示「Cookie / 指纹头 未捕获」 | 说明你走的是**手动粘贴 token** 那条路（该路径本来就没有这两项）。实测仅凭 Bearer token 即可完成校验、PoW 求解与真实生成；若日后频繁遇到 `AUTH` / `40003`，改用「浏览器登录」获取更完整的凭证（token + cookie + 指纹头） |
+| 报错 `A message is being generated, please try again later.` | **不是封号**：同一账号同时只能生成一条消息（另一个窗口/标签页正在生成）。0.1.9 起自动重试；两个窗口都要用网页模型的话，建议其中一个换 provider 或换账号 |
 | 回复里出现 `{"tool_calls":…}` 或 `<tool_calls>` 标记 | 模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时不再把 JSON 吐进正文：本轮无其他正文则自动重试，已有正文则给一句提示） |
 | 工具调用不触发 | 换说法或换 `deepseek-reasoner`；也可用面板「发送测试」确认链路 |
 
