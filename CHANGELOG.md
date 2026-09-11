@@ -2,6 +2,58 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.7 — 2026-09-11
+
+### 修复
+
+- **DSH 更新后「浏览器窗口登录」打不开**（严重，用户实测：升级 DSH 后按钮点了没反应）
+  - 现场证据（host 日志）：
+    `deepseek-web api /login/browser failed: Cannot read properties of undefined (reading 'fromPartition')`
+  - 根因：**DSH 把插件宿主从 Electron 主进程挪到了 utility 进程**。探针实测
+    `process.type === 'utility'`、Electron 43.3.0、`process.parentPort` 存在；
+    utility 进程里 `require('electron')` 拿不到 `BrowserWindow` / `session`（主进程专属 API）。
+    而旧的 `electronAvailable()` **只检查 `process.versions.electron`** → 假阳性通过 →
+    随后炸在 `session.fromPartition`。
+  - 另外：新架构**没有**给插件暴露任何「开窗口 / 开外部 URL」的通用服务
+    （`desktopRuntime` 只有 openTerminal / pickDirectory / openProfileCreateWindow 这类专用接口），
+    所以窗口式登录在新宿主里无法实现。
+
+### 新增
+
+- **真实浏览器 + CDP 登录**（取代无法使用的 Electron 窗口）
+  - 拉起系统里真实的 **Edge / Chrome**（独立 profile `<DSH_HOME>/web-login/browser-profile`，
+    不碰你日常浏览器的登录态），用 Chrome DevTools 协议读取：
+    `localStorage.userToken`（AppKit 包装自动解包）、`Storage.getCookies`（cookie 串，
+    免去 DPAPI 解密）、`Network.*` 里 `/api/*` 的**真实请求头**（x-hif-* / x-client-*）、
+    `navigator.userAgent`。你只需在弹出的浏览器里正常登录，其余全自动。
+  - 真实浏览器不会被网页端判「使用环境异常」（实测：无头 Edge 打开 chat.deepseek.com
+    正文正常、无该提示）。
+  - **必须用 `--remote-debugging-port=0`**：Windows 保留了大量端口区间
+    （实测 8792-9897、10001-10100、50000-50059 等），硬编码端口会 `bind()` 失败
+    （WSAEACCES 10013，Chromium 报 "Cannot start http server for devtools"）；
+    端口 0 由系统分配，真实端口写在 `<profile>/DevToolsActivePort`。
+- **登录能力自检 + 面板展示**：`/status` 新增 `loginCapability`（宿主进程类型 / 能否开窗口 /
+  有无可用浏览器），面板「登录状态」区直接显示「宿主进程」与当前登录方式。
+  按钮文案随之自适应（「浏览器窗口登录」/「用 Microsoft Edge 登录」/ 禁用并提示走手动 token）。
+- `openExternalLogin`（用默认浏览器打开）不再依赖 Electron `shell`：
+  非主进程时回退到 `cmd /c start`、`open`、`xdg-open`，任何宿主都能用。
+- 退出账号时**连带清掉浏览器登录 profile**（否则换号会复用旧登录态）。
+
+### 变更
+
+- `unwrapStoredToken` 移到 `auth.ts`（浏览器登录与 Electron 登录共用，避免循环 import），
+  并显式处理实测形态 `{"value":null,"__version":"0"}` → 空串（绝不能把字符串 "null" 当 token）。
+- `electronAvailable()` 语义收紧为「真的能开窗口」；新增纯函数 `canOpenElectronWindowWith()`
+  便于用事故现场参数做单测。
+
+### 测试
+
+- 新增 `tests/check-browser-login.mjs`（15 项）：utility 进程必须判为不能开窗口（事故现场参数）、
+  主进程/renderer/字符串模块/非 Electron/加载抛错五类判定、端口必须为 0、
+  启动参数（独立 profile、不带 --headless）、`DevToolsActivePort` 解析（CRLF/越界/非法）、
+  `{"value":null}` 解包、cookie 串拼装、真实请求头挑选、浏览器可执行文件存在性。
+- 断言总数 96 → **111**；产物核对 38 → **42** 项。
+
 ## 0.1.6 — 2026-09-11
 
 ### 修复

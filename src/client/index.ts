@@ -19,6 +19,7 @@ interface StatusPayload {
   provider: string
   registeredProviders?: string[]
   electron: boolean
+  loginCapability?: { processType: string; canOpenWindow: boolean; browser: string | null }
   loginWindowOpen: boolean
   loginProgress: { open: boolean; startedAt?: string; captured?: { token: boolean; cookie: boolean; fingerprint: boolean; wasm: boolean }; lastError?: string; finished?: boolean }
   fingerprint?: { at: string; url: string; stripped: string[]; pageUa?: string; pageBrands?: string[]; pageWebdriver?: boolean }
@@ -285,9 +286,28 @@ function Panel(): any {
       }
       renderKv(rows)
 
-      browserBtn.disabled = !electron
-      browserBtn.textContent = windowOpen ? '登录窗口已打开' : '浏览器窗口登录'
-      browserBtn.title = electron ? '' : '当前 DSH 不是 Electron 桌面端，请改用手动粘贴 token'
+      browserBtn.disabled = false
+      // 登录能力自检（2026-09-11 事故：DSH 把插件宿主挪到 utility 进程后，窗口 API 没了）
+      const capability = status.loginCapability
+      if (capability) {
+        const mode = capability.canOpenWindow
+          ? '可开 Electron 窗口'
+          : capability.browser
+            ? `无窗口 API（${capability.processType} 进程）→ 用真实浏览器`
+            : `无窗口 API（${capability.processType} 进程）且未找到 Edge/Chrome`
+        rows.push(['宿主进程', `${capability.processType} · ${mode}`])
+        browserBtn.textContent = capability.canOpenWindow ? '浏览器窗口登录' : capability.browser ? `用 ${capability.browser} 登录` : '浏览器窗口登录'
+        browserBtn.disabled = !capability.canOpenWindow && !capability.browser
+        browserBtn.title = capability.canOpenWindow
+          ? '插件自己开窗口（带指纹伪装）'
+          : capability.browser
+            ? `拉起真实的 ${capability.browser}（独立 profile）完成登录，插件通过调试协议读取登录态`
+            : '既不能开窗口也没找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token'
+      } else {
+        browserBtn.disabled = !electron
+        browserBtn.textContent = windowOpen ? '登录窗口已打开' : '浏览器窗口登录'
+        browserBtn.title = electron ? '' : '当前宿主无法开窗：请用「用我的默认浏览器登录」+ 手动粘贴 Token'
+      }
 
       // 账号卡：显示当前账号 + 退出按钮可用性
       accountLine.textContent = ''
@@ -388,13 +408,20 @@ function Panel(): any {
     browserBtn.addEventListener('click', () => {
       void (async () => {
         browserBtn.disabled = true
-        showMessage('正在打开登录窗口……在窗口里完成 DeepSeek 登录即可，捕获成功后窗口会自动关闭。')
+        showMessage('正在启动浏览器……若是真实浏览器，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。')
         try {
           const result = await api('/login/browser', { method: 'POST', body: '{}' })
-          if (!result?.started) {
+          if (result?.mode === 'browser') {
+            // 真实浏览器 + CDP：成功即已抓完 token/cookie/指纹头
+            if (result.ok) {
+              showMessage(`${result.verified ? '✅' : '⚠️'} ${result.message}${result.display ? `（${result.display}）` : ''}`, result.verified ? 'ok' : '')
+            } else {
+              showMessage(`❌ ${result.message ?? `登录未完成（${result.reason ?? '未知'}）`}`, 'err')
+            }
+          } else if (!result?.started) {
             showMessage(
               result?.reason === 'not-electron'
-                ? '当前 DSH 运行在非 Electron 环境，无法自动开窗：请用下方「手动粘贴 Token」。'
+                ? '当前宿主进程无法开 Electron 窗口，且没找到可用的 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token。'
                 : `打开失败：${result?.reason ?? '未知原因'}`,
               'err',
             )

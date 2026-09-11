@@ -99,6 +99,29 @@ export function hasUsableAuth(auth: WebAuth | undefined): auth is WebAuth {
   return !!auth && typeof auth.token === 'string' && auth.token.length > 8
 }
 
+/**
+ * 解包页面读回的 token（兼容裸字符串与 AppKit 包装 JSON）。
+ *
+ * ⚠️ 两个必须守住的边界（都是实测形态）：
+ *  - 未登录时网页端返回的是 `{"value":null,"__version":"0"}` → 必须得到**空串**，
+ *    绝不能把字符串 "null" 当 token（否则会拿垃圾 token 去请求，报 40003 让人一头雾水）。
+ *  - 旧版本网页端存的是裸 token 字符串 → 原样返回。
+ */
+export function unwrapStoredToken(raw: unknown): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return ''
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text)
+      return typeof parsed?.value === 'string' ? parsed.value.trim() : ''
+    } catch {
+      return ''
+    }
+  }
+  // 兜底：字面量 "null"/"undefined" 一律视为空
+  return text === 'null' || text === 'undefined' ? '' : text
+}
+
 /** 掩码账号标识（保留可辨识部分，足以确认「是哪个号」而不泄露全量）。 */
 export function maskIdentifier(raw: string): string {
   const value = String(raw || '').trim()

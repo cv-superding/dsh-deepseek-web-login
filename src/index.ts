@@ -9,9 +9,10 @@
  * 设计约束：宿主自包含打包（除 node: 与 electron 外全部 bundle），
  * 不依赖 DSH 内部包的可解析性 —— 任何装配路径（注入 / bundle / patch）都能加载。
  */
-import { readAuth, writeAuth, type WebAuth } from './auth.ts'
+import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
-import { closeLoginWindow, electronAvailable, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
+import { browserLogin, findSystemBrowser } from './browser-login.ts'
+import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { validateAuth } from './webapi.ts'
 
 export const name = 'dsh-deepseek-web-login'
@@ -132,11 +133,18 @@ export function apply(ctx: any, config: Config = {}): void {
               sendJson(res, 200, {
                 provider: PROVIDER,
                 registeredProviders,
-                electron: electronAvailable(),
+                electron: canOpenElectronWindow(),
                 loginWindowOpen: isLoginWindowOpen(),
                 loginProgress: getLoginProgress(),
                 fingerprint: getFingerprintReport(),
                 lastLoginResult: getLastLoginResult(),
+                // 登录能力自检：宿主进程类型 + 能否开 Electron 窗口 + 有没有真实浏览器可用。
+                // 这三项是「窗口登录打不开」这类问题的第一现场证据（2026-09-11 就栽在这里）。
+                loginCapability: {
+                  processType: (process as any).type ?? 'node',
+                  canOpenWindow: canOpenElectronWindow(),
+                  browser: findSystemBrowser()?.name ?? null,
+                },
                 auth: summary,
                 validation,
                 models: MODEL_SPECS.map((spec) => ({
@@ -157,8 +165,44 @@ export function apply(ctx: any, config: Config = {}): void {
             }
 
             if (req.method === 'POST' && route === '/login/browser') {
-              const result = await openLoginWindow(logger)
-              sendJson(res, 200, result)
+              // 两条路：
+              //  1) 宿主在主进程（旧架构）→ 插件自己开 Electron 窗口（带指纹伪装，见 login.ts）
+              //  2) 宿主在 utility 进程（2026-09-11 起的架构）→ 没有窗口 API，
+              //     改为拉起**真实 Edge/Chrome**（独立 profile + CDP）读取登录态
+              if (canOpenElectronWindow()) {
+                const result = await openLoginWindow(logger)
+                sendJson(res, 200, { ...result, mode: 'window' })
+                return
+              }
+              const outcome = await browserLogin({
+                onProgress: (message) => logger?.info?.(`deepseek-web login(browser): ${message}`),
+                signal: undefined,
+              })
+              if (outcome.ok && outcome.auth) {
+                writeAuth(outcome.auth)
+                const check = await validateAuth(outcome.auth).catch(() => undefined)
+                const verified = !!check?.ok
+                sendJson(res, 200, {
+                  started: true,
+                  mode: 'browser',
+                  ok: true,
+                  verified,
+                  message: verified
+                    ? `${outcome.message}，服务端校验通过`
+                    : `${outcome.message}；服务端校验未通过（${check?.error ?? '未知原因'}）——可用「发送测试」再确认`,
+                  display: check?.user?.display ? maskIdentifier(check.user.display) : undefined,
+                })
+                return
+              }
+              logger?.warn?.(`deepseek-web api /login/browser(browser) failed: ${outcome.reason} ${outcome.message}`)
+              sendJson(res, 200, {
+                started: false,
+                mode: 'browser',
+                ok: false,
+                reason: outcome.reason ?? 'unknown',
+                browserLeftOpen: !!outcome.browserLeftOpen,
+                message: outcome.message,
+              })
               return
             }
 

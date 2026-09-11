@@ -14,7 +14,8 @@
  * 非 Electron 环境（纯 web profile）自动降级为「手动粘贴 token」。
  */
 import { createRequire } from 'node:module'
-import { clearAuth, maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
+import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, writeAuth, type WebAuth } from './auth.ts'
+import { clearBrowserLoginProfile } from './browser-login.ts'
 import { DS_BASE, DEFAULT_WASM_URL, FALLBACK_UA, validateAuth } from './webapi.ts'
 
 const PARTITION = 'persist:dsh-deepseek-web-login'
@@ -186,20 +187,44 @@ export function getFingerprintReport(): FingerprintReport | undefined {
 /**
  * 用**系统默认浏览器**打开 chat.deepseek.com（兜底路径）。
  *
- * 适用场景：网页端连「干净指纹的 Electron 窗口」也拦，或者用户就是想用自己的日常浏览器。
+ * 适用场景：网页端连干净指纹的窗口也拦、或者用户就是想用自己的日常浏览器。
  * 注意：外部浏览器里的登录态插件抓不到（没有 webRequest 钩子），
  * 所以这条路径要和「手动粘贴 token」配合 —— 面板里给了现成的控制台命令。
+ *
+ * ⚠️ 2026-09-11：插件宿主在 **utility 进程**里没有 `shell`（主进程专属），所以加了
+ * 纯 Node 的打开方式（Windows `start` / macOS `open` / Linux `xdg-open`），保证任何宿主都能用。
  */
-export async function openExternalLogin(): Promise<{ ok: boolean; url: string; message?: string }> {
-  if (!electronAvailable()) {
-    return { ok: false, url: LOGIN_URL, message: '当前不是 Electron 桌面端：请手动在浏览器打开 chat.deepseek.com' }
+export async function openExternalLogin(): Promise<{ ok: boolean; url: string; message?: string; via?: string }> {
+  // 主进程：用 Electron 的 shell（最干净）
+  if (canOpenElectronWindow()) {
+    try {
+      const electron = createRequire(import.meta.url)('electron')
+      await electron.shell.openExternal(LOGIN_URL)
+      return { ok: true, url: LOGIN_URL, via: 'electron-shell' }
+    } catch (error: any) {
+      // 继续走下面的纯 Node 兜底
+      void error
+    }
   }
+  // 非主进程：直接调系统命令
   try {
-    const electron = createRequire(import.meta.url)('electron')
-    await electron.shell.openExternal(LOGIN_URL)
-    return { ok: true, url: LOGIN_URL }
+    const { spawn } = createRequire(import.meta.url)('node:child_process')
+    const args =
+      process.platform === 'win32'
+        ? ['/c', 'start', '', LOGIN_URL]
+        : process.platform === 'darwin'
+          ? [LOGIN_URL]
+          : [LOGIN_URL]
+    const command = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+    const child = spawn(command, args, { stdio: 'ignore', detached: true })
+    child.unref?.()
+    return { ok: true, url: LOGIN_URL, via: command }
   } catch (error: any) {
-    return { ok: false, url: LOGIN_URL, message: error?.message ?? String(error) }
+    return {
+      ok: false,
+      url: LOGIN_URL,
+      message: `${error?.message ?? error} —— 请手动在浏览器打开 ${LOGIN_URL}`,
+    }
   }
 }
 
@@ -211,15 +236,46 @@ export function getLastLoginResult(): { ok: boolean; message: string; at: string
   return lastResult
 }
 
-/** 当前进程是否跑在 Electron 主进程里（DSH Desktop 是；纯 web profile 不是）。 */
-export function electronAvailable(): boolean {
-  if (!process.versions?.electron) return false
+/**
+ * 本进程能否**真的开 Electron 窗口**（= Electron 主进程，且 electron 模块带 session/BrowserWindow）。
+ *
+ * ⚠️ 旧实现只检查 `process.versions.electron`，在 DSH 把插件宿主挪到 **utility 进程**之后成了**假阳性**：
+ * `process.versions.electron` 依然有值，但 utility 进程里 `require('electron')` 拿不到
+ * `BrowserWindow` / `session`（它们是主进程专属 API）→ 检查通过、随后炸在 `session.fromPartition`
+ * （实测：`Cannot read properties of undefined (reading 'fromPartition')`，面板表现是「窗口登录打不开」）。
+ */
+export function canOpenElectronWindow(): boolean {
+  return canOpenElectronWindowWith({
+    versions: process.versions,
+    processType: (process as any).type,
+    loadElectron: () => createRequire(import.meta.url)('electron'),
+  })
+}
+
+/**
+ * canOpenElectronWindow 的纯函数内核（便于用真实事故参数做单测）。
+ * 判定条件三条缺一不可：① 是 Electron 运行时；② 进程类型是主进程；③ electron 模块真的带窗口 API。
+ */
+export function canOpenElectronWindowWith(deps: {
+  versions?: { electron?: string } | undefined
+  processType?: string | undefined
+  loadElectron: () => any
+}): boolean {
+  if (!deps.versions?.electron) return false
+  // 'browser' = Electron 主进程；utility / renderer 都没有窗口 API
+  if (deps.processType && deps.processType !== 'browser') return false
   try {
-    createRequire(import.meta.url)('electron')
-    return true
+    const electron = deps.loadElectron()
+    if (!electron || typeof electron === 'string') return false
+    return !!(electron.session && electron.BrowserWindow)
   } catch {
     return false
   }
+}
+
+/** 兼容旧调用点：语义即「能否使用 Electron 能力」，因此等同于 canOpenElectronWindow。 */
+export function electronAvailable(): boolean {
+  return canOpenElectronWindow()
 }
 
 export function isLoginWindowOpen(): boolean {
@@ -277,20 +333,9 @@ const PAGE_READ_SCRIPT = `JSON.stringify({
   })()
 })`
 
-/** 解包页面读回的 token（兼容裸字符串与 AppKit 包装 JSON）。 */
-export function unwrapStoredToken(raw: unknown): string {
-  const text = String(raw ?? '').trim()
-  if (!text) return ''
-  if (text.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(text)
-      return typeof parsed?.value === 'string' ? parsed.value : ''
-    } catch {
-      return ''
-    }
-  }
-  return text
-}
+// unwrapStoredToken 已移到 auth.ts（浏览器登录与 Electron 登录都要用它，
+// 放在 auth.ts 可避免 browser-login ↔ login 的循环 import）。
+export { unwrapStoredToken } from './auth.ts'
 
 function successPage(message: string): string {
   const html = `<!doctype html><meta charset="utf-8"><title>DSH · 登录成功</title>
@@ -684,14 +729,18 @@ export function closeLoginWindow(): void {
 export async function logout(): Promise<boolean> {
   closeLoginWindow()
   clearAuth()
+  // 浏览器登录用的独立 profile 也是一个「登录态存放处」，退出要一起清 ——
+  // 否则再点登录会直接复用里面的登录态，等于没退出。
+  const browserProfileCleared = clearBrowserLoginProfile()
   // ⚠️ 必须 await：调用方（面板的「退出并登录其它账号」）紧接着就会打开登录窗口，
   // 分区没清完的话新窗口会带着旧账号的 cookie 打开 → 又登录回同一个账号。
-  const cleared = await clearLoginPartition().catch(() => false)
+  const partitionCleared = await clearLoginPartition().catch(() => false)
+  const cleared = partitionCleared || browserProfileCleared
   lastResult = {
     ok: true,
     message: cleared
       ? '已退出登录：本地凭证与浏览器登录态都已清除'
-      : '已退出登录：本地凭证已清除（浏览器登录态未能清理——非 Electron 环境或清理失败，登录窗口可能仍是旧账号，请手动退出网页端）',
+      : '已退出登录：本地凭证已清除（浏览器登录态未能清理——非主进程环境或清理失败，登录窗口可能仍是旧账号，请手动退出网页端）',
     at: new Date().toISOString(),
   }
   return cleared

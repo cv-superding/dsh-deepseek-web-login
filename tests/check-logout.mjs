@@ -10,7 +10,7 @@
  * 用法: node tests/check-logout.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -58,12 +58,19 @@ await test('关闭登录窗口不得删除凭证（卸载/热重载不等于登�
   assert.equal(readAuth()?.token, 't'.repeat(64), 'closeLoginWindow 只关窗口')
 })
 
-await test('logout()：删除凭证文件，并留下可读的最近结果', async () => {
+await test('logout()：删凭证 + 清浏览器登录 profile，并留下可读的最近结果', async () => {
   seedAuth()
+  // 浏览器登录用的独立 profile 也是一个「登录态存放处」：
+  // 退出必须一起清，否则再点登录会直接复用里面的登录态（等于没退出、也没法换号）。
+  const profileDir = join(home, 'web-login', 'browser-profile')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'marker.txt'), 'fake-login-state')
+
   const cleared = await logout()
-  assert.equal(cleared, false, '非 Electron 环境应返回 false（表示分区未清理）')
+  assert.equal(cleared, true, '本环境没有 Electron 分区，但浏览器 profile 应被清掉 → true')
   assert.ok(!readAuth()?.token, '凭证必须被删除')
   assert.ok(!existsSync(authFilePath()), '凭证文件必须被删除，而不只是清空内容')
+  assert.ok(!existsSync(profileDir), '浏览器登录 profile 必须被删除（否则换号会复用旧登录态）')
   const result = getLastLoginResult()
   assert.ok(result && /退出/.test(result.message), `最近结果应说明已退出：${JSON.stringify(result)}`)
 })

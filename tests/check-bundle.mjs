@@ -41,6 +41,10 @@ const checks = {
   'UA-CH 品牌清理': host.includes('sec-ch-ua'),
   '默认浏览器兜底入口': host.includes('/login/external') && client.includes('用我的默认浏览器登录'),
   '页面指纹回读（可观测）': host.includes('pageBrands') && client.includes('页面看到 UA'),
+  '宿主进程能力自检（utility 不开窗）': host.includes('canOpenElectronWindowWith') && host.includes('loginCapability'),
+  '真实浏览器登录（CDP + 端口 0）': host.includes('remote-debugging-port=0') && host.includes('DevToolsActivePort'),
+  'CDP 读 cookie 与真实请求头': host.includes('Storage.getCookies') && host.includes('requestWillBeSentExtraInfo'),
+  'client 显示宿主进程/登录方式': client.includes('宿主进程') && client.includes('loginCapability'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),
 }
