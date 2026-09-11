@@ -42,7 +42,15 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 
 ## 界面预览
 
-设置页（**示意图**，非截图）：登录状态 / **当前账号（退出当前账号 · 退出并登录其它账号）** / 浏览器窗口登录 / 从已登录窗口恢复 / 手动 token / 连通性测试 / 模型列表。
+设置页（**真实截图**）：当前账号 / 登录状态（适配器注册、凭证来源、PoW WASM、服务端校验）/ 三种登录方式（Microsoft Edge · 我的默认浏览器 · 从已登录窗口恢复）/ 手动粘贴 token。
+
+<img src="docs/assets/screenshot-settings.png" alt="DSH 设置面板 · DeepSeek 网页登录（真实截图）" width="820">
+
+DSH「使用统计」里看到的调用量 —— 免费网页通道，当日 1042.8 万 tokens / 164 次调用：
+
+<img src="docs/assets/screenshot-usage-stats.png" alt="DSH 使用统计 · deepseek-web 免费通道调用量" width="820">
+
+设置页**示意图**（标注各区块用途）：登录状态 / **当前账号（退出当前账号 · 退出并登录其它账号）** / 浏览器窗口登录 / 从已登录窗口恢复 / 手动 token / 连通性测试 / 模型列表。
 
 <img src="docs/assets/panel-preview.svg" alt="DSH 设置面板 · DeepSeek 网页登录" width="820">
 

@@ -31,6 +31,16 @@ free web quota.
 
 <img src="docs/assets/architecture.svg" alt="Architecture and data flow" width="1000">
 
+## Screenshots
+
+Settings panel (real screenshot): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.
+
+<img src="docs/assets/screenshot-settings.png" alt="DSH settings panel · DeepSeek web login (real screenshot)" width="820">
+
+DSH's usage-stats page on the free web channel — 10.4M tokens / 164 calls in a single day:
+
+<img src="docs/assets/screenshot-usage-stats.png" alt="DSH usage stats · deepseek-web free channel" width="820">
+
 ## Features
 
 | | |
