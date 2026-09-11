@@ -163,3 +163,13 @@ these public projects. **None of their source code is included here.**
 
 [Apache License 2.0](LICENSE) — includes a patent grant and patent retaliation; does **not** grant trademark
 rights (§6). See [NOTICE](NOTICE).
+
+## Community
+
+Questions, updates and general chat — join the QQ group (Chinese):
+
+<p align="center">
+  <img src="docs/assets/qq-group.jpg" alt="QQ group QR code" width="300">
+  <br>
+  <sub>QQ group: <strong>1124773537</strong></sub>
+</p>

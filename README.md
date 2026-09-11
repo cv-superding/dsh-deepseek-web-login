@@ -295,6 +295,16 @@ DSH Desktop 用的是 `desktop` profile，而注入器的 junction 默认建在 
 
 [Apache License 2.0](LICENSE) —— 含专利授权与专利报复条款；**不授予**商标权（§6）。版权与第三方说明见 [NOTICE](NOTICE)。
 
+## 交流群
+
+用法讨论、蹲更新，或者踩到坑想吐槽，欢迎加 QQ 群：
+
+<p align="center">
+  <img src="docs/assets/qq-group.jpg" alt="QQ 群二维码" width="300">
+  <br>
+  <sub>QQ 群号：<strong>1124773537</strong></sub>
+</p>
+
 <div align="center">
 <sub>unofficial plugin · not affiliated with DeepSeek · use at your own risk</sub>
 </div>
