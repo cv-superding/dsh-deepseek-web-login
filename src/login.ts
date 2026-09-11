@@ -440,14 +440,62 @@ export async function loginWithToken(
   return { ok: true, ...(check.user?.display ? { display: maskIdentifier(check.user.display) } : {}) }
 }
 
-/** 退出登录：关闭登录窗口并清除本地凭证。 */
-export function logout(): void {
+/**
+ * 清掉登录窗口所在 Electron 分区里的 **chat.deepseek.com 站点数据**（cookie / localStorage）。
+ *
+ * 为什么必须做：只删本地凭证文件的话，浏览器分区里仍是同一个账号的登录态 ——
+ * 于是「退出当前账号」之后：
+ *   1) 再点「从已登录窗口恢复」会把**同一个账号**原样抓回来（用户以为退不掉）；
+ *   2) 点「浏览器窗口登录」打开的是已登录页面，根本没法换号。
+ * 只清 deepseek 域，不动分区里的其它数据；失败静默（退出登录本身必须成功）。
+ */
+export async function clearLoginPartition(): Promise<boolean> {
+  if (!electronAvailable()) return false
+  try {
+    const electron = createRequire(import.meta.url)('electron')
+    const ses = electron.session.fromPartition(PARTITION)
+    await ses.clearStorageData({
+      origin: 'https://chat.deepseek.com',
+      storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage', 'serviceworkers', 'websql'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 退出登录：关闭登录窗口 → 清除本地凭证 → **清除浏览器分区里的站点登录态**。
+ *
+ * 最后一步是 2026-09-11 补的：此前只有前两步，导致「退出」在网页端看来根本没退出
+ * （同一个账号随时能被恢复回来，也无法切换到另一个账号）。
+ */
+/**
+ * 只关闭登录窗口（不动凭证）。
+ * 卸载/热重载插件时用它 —— 卸载插件不应该把用户登出（这是旧实现的一个隐患：
+ * 卸载时它调用的是 logout()，会把凭证一起删掉）。
+ */
+export function closeLoginWindow(): void {
   if (loginWindow) {
     try {
       loginWindow.close()
     } catch {}
   }
   cleanup()
+}
+
+export async function logout(): Promise<boolean> {
+  closeLoginWindow()
   clearAuth()
-  lastResult = { ok: true, message: '已退出登录并清除本地凭证', at: new Date().toISOString() }
+  // ⚠️ 必须 await：调用方（面板的「退出并登录其它账号」）紧接着就会打开登录窗口，
+  // 分区没清完的话新窗口会带着旧账号的 cookie 打开 → 又登录回同一个账号。
+  const cleared = await clearLoginPartition().catch(() => false)
+  lastResult = {
+    ok: true,
+    message: cleared
+      ? '已退出登录：本地凭证与浏览器登录态都已清除'
+      : '已退出登录：本地凭证已清除（浏览器登录态未能清理——非 Electron 环境或清理失败，登录窗口可能仍是旧账号，请手动退出网页端）',
+    at: new Date().toISOString(),
+  }
+  return cleared
 }

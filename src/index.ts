@@ -11,7 +11,7 @@
  */
 import { readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
-import { electronAvailable, captureFromPartition, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openLoginWindow } from './login.ts'
+import { closeLoginWindow, electronAvailable, captureFromPartition, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openLoginWindow } from './login.ts'
 import { validateAuth } from './webapi.ts'
 
 export const name = 'dsh-deepseek-web-login'
@@ -180,8 +180,9 @@ export function apply(ctx: any, config: Config = {}): void {
             }
 
             if (req.method === 'POST' && route === '/logout') {
-              logout()
-              sendJson(res, 200, { ok: true })
+              // await：面板会在退出后立刻打开登录窗口（换号），必须等分区清理完成
+              const cleared = await logout()
+              sendJson(res, 200, { ok: true, partitionCleared: cleared })
               return
             }
 
@@ -251,12 +252,10 @@ export function apply(ctx: any, config: Config = {}): void {
     'dsh-deepseek-web-login: api',
   )
 
-  // 3) 卸载即净：关闭登录窗口 + 清定时器由 login 模块自身处理，这里只做提示
+  // 3) 卸载即净：只关掉登录窗口与定时器。**不清理凭证** —— 卸载/热重载插件不等于登出。
   ctx.effect(() => () => {
     try {
-      if (isLoginWindowOpen()) {
-        logout()
-      }
+      if (isLoginWindowOpen()) closeLoginWindow()
     } catch {}
   }, 'dsh-deepseek-web-login: teardown')
 }

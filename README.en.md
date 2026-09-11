@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#models)
-[![Tests](https://img.shields.io/badge/tests-83%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
+[![Tests](https://img.shields.io/badge/tests-89%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
 [![CI](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg)](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#disclaimer)
@@ -44,6 +44,7 @@ free web quota.
 | 🖼 **Image input** | Not native multimodal input: images are uploaded via `/api/v0/file/upload_file` and referenced with `ref_file_ids`. Verified against a generated left-red/right-blue PNG — the model answered "left=red, right=blue" |
 | 🧹 **Session hygiene** | One temporary chat session per call, deleted afterwards. Verified: the web chat list is byte-identical before and after |
 | 🎛 **Settings panel** | Status, browser login, recover-from-window, manual token, connectivity test (host API at `/deepseek-web-login/api/*`) |
+| 🔓 **Logout / switch account** | A dedicated "current account" card: **log out** — also clears the chat.deepseek.com storage inside the Electron partition, so the session is really gone and you can log in as somebody else — plus "log out and sign in as another account". Two-step confirmation, so no accidental logout |
 
 <img src="docs/assets/tool-bridge.svg" alt="Tool-calling protocol bridge" width="1000">
 
@@ -64,7 +65,7 @@ Then: **Settings → DeepSeek 网页登录 → 浏览器窗口登录**, log in n
 (phone / email / verification code all work). The window closes itself once the credentials are captured.
 Finally pick provider **`DeepSeek 网页版（免费）`** → `DeepSeek 网页 · 快速模式` in the model picker.
 
-Credentials live only on your machine (`~/.dsh/web-login/deepseek-auth.json`), never in this repository.
+Credentials live only on your machine (`~/.dsh/web-login/deepseek-auth.json`), never in this repository. The panel's **current account → log out** removes them (and the partition storage) in one click.
 If they are lost, **Recover from the logged-in window** reuses the persistent partition — no re-login needed.
 
 ## Models
@@ -107,7 +108,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 ## Testing
 
 ```bash
-node tests/logic-test.mjs            # 83 assertions across 5 files
+node tests/logic-test.mjs            # 89 assertions across 6 files
 node tests/probe-live.mjs            # raw SSE event stream + timings (--big=N for long prompts)
 node tests/probe-xml-live.mjs        # XML-marker scenario against the live model
 node tests/probe-vision.mjs          # image channel (generates a red/blue PNG, uploads it, asks)

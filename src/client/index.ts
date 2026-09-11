@@ -49,6 +49,7 @@ const styles = `
 .dsw-btn{background:var(--theme-accent,#4a9eff);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px}
 .dsw-btn.ghost{background:transparent;border:1px solid var(--theme-border,#444);color:var(--theme-text,#ccc)}
 .dsw-btn.danger{background:transparent;border:1px solid #d33;color:#e05a5a}
+.dsw-btn.armed{background:#b3261e;border-color:#b3261e;color:#fff;font-weight:600}
 .dsw-btn:disabled{opacity:.45;cursor:not-allowed}
 .dsw-input,.dsw-area{width:100%;box-sizing:border-box;background:var(--theme-bg,#0f1115);color:var(--theme-text,#ddd);border:1px solid var(--theme-border,#333);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit}
 .dsw-area{min-height:64px;resize:vertical}
@@ -103,6 +104,27 @@ function Panel(): any {
     const statusKv = el('div', 'dsw-kv')
     loginCard.append(statusKv)
 
+    // ── 账号卡（退出 / 换号）──
+    // 为什么要单独一张卡：退出登录以前只作为一个按钮塞在「手动粘贴 Token」那张卡的角落里，
+    // 用户根本找不到（实测反馈）。退出账号是高频操作，必须显眼、且要能换号。
+    const accountCard = el('div', 'dsw-card')
+    accountCard.append(el('div', 'name', '当前账号'))
+    const accountLine = el('div', 'dsw-kv')
+    accountCard.append(accountLine)
+    const accountActions = el('div', 'dsw-row')
+    accountActions.style.marginTop = '8px'
+    const logoutBtn = el('button', 'dsw-btn danger', '退出当前账号') as HTMLButtonElement
+    const switchBtn = el('button', 'dsw-btn ghost', '退出并登录其它账号') as HTMLButtonElement
+    accountActions.append(logoutBtn, switchBtn)
+    accountCard.append(accountActions)
+    const accountHint = el(
+      'p',
+      'dsw-hint',
+      '退出会同时清除本地凭证与浏览器分区里的 chat.deepseek.com 登录态（否则「从已登录窗口恢复」会把同一个账号原样抓回来，也无法换号）。',
+    )
+    accountCard.append(accountHint)
+    page.append(accountCard)
+
     const loginActions = el('div', 'dsw-row')
     loginActions.style.marginTop = '10px'
     const browserBtn = el('button', 'dsw-btn', '浏览器窗口登录') as HTMLButtonElement
@@ -144,8 +166,7 @@ function Panel(): any {
     const tokenActions = el('div', 'dsw-row')
     tokenActions.style.marginTop = '8px'
     const tokenBtn = el('button', 'dsw-btn', '保存并验证') as HTMLButtonElement
-    const logoutBtn = el('button', 'dsw-btn danger', '退出登录') as HTMLButtonElement
-    tokenActions.append(tokenBtn, logoutBtn)
+    tokenActions.append(tokenBtn)
     tokenCard.append(tokenActions)
     page.append(tokenCard)
 
@@ -241,6 +262,21 @@ function Panel(): any {
       browserBtn.disabled = !electron
       browserBtn.textContent = windowOpen ? '登录窗口已打开' : '浏览器窗口登录'
       browserBtn.title = electron ? '' : '当前 DSH 不是 Electron 桌面端，请改用手动粘贴 token'
+
+      // 账号卡：显示当前账号 + 退出按钮可用性
+      accountLine.textContent = ''
+      if (loggedIn) {
+        accountLine.append(el('div', 'k', '账号'), el('div', undefined, status.auth.display || '（未获取到账号信息）'))
+        accountLine.append(
+          el('div', 'k', '登录时间'),
+          el('div', undefined, status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : '未知'),
+        )
+      } else {
+        accountLine.append(el('div', 'k', '状态'), el('div', undefined, '未登录（没有可退出的账号）'))
+      }
+      logoutBtn.disabled = !loggedIn
+      switchBtn.disabled = !loggedIn || !electron
+      switchBtn.title = electron ? '' : '当前不是 Electron 桌面端：请先「退出当前账号」，再手动粘贴另一个账号的 token'
 
       // 模型下拉
       if (modelSelect.options.length !== status.models.length) {
@@ -358,13 +394,63 @@ function Panel(): any {
       })()
     })
 
-    logoutBtn.addEventListener('click', () => {
+    /**
+     * 二次确认：退出账号是不可逆操作（凭证 + 浏览器登录态都会被清），
+     * 所以第一次点击只把按钮变成「确认退出？」，3 秒内再点一次才真的执行。
+     * 不用 window.confirm（插件面板里被宿主拦截的风险，且样式不可控）。
+     */
+    const armConfirm = (button: HTMLButtonElement, label: string, confirmLabel: string, run: () => void): void => {
+      let armed = false
+      let timer: number | undefined
+      const reset = (): void => {
+        armed = false
+        if (timer !== undefined) window.clearTimeout(timer)
+        button.textContent = label
+        button.classList.remove('armed')
+      }
+      button.textContent = label
+      button.addEventListener('click', () => {
+        if (!armed) {
+          armed = true
+          button.textContent = confirmLabel
+          button.classList.add('armed')
+          timer = window.setTimeout(reset, 3_000)
+          return
+        }
+        reset()
+        run()
+      })
+    }
+
+    const doLogout = (thenLogin: boolean): void => {
       void (async () => {
-        await api('/logout', { method: 'POST', body: '{}' })
-        showMessage('已退出登录并清除本地凭证。')
-        await refresh(false)
+        logoutBtn.disabled = true
+        switchBtn.disabled = true
+        try {
+          await api('/logout', { method: 'POST', body: '{}' })
+          // 视觉上把 token 输入框也清掉，避免误以为「还是那个账号」
+          tokenInput.value = ''
+          showMessage(thenLogin ? '已退出当前账号，正在打开登录窗口……' : '已退出当前账号：本地凭证与浏览器登录态都已清除。')
+          await refresh(false)
+          if (thenLogin) {
+            const result = await api('/login/browser', { method: 'POST', body: '{}' })
+            if (result?.started === false) {
+              showMessage(`已退出账号；打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用手动粘贴 token）`, 'err')
+            } else {
+              boostUntil = Date.now() + 180_000
+              showMessage('已退出账号，登录窗口已打开：请在窗口里登录**其它账号**，凭证会自动捕获。')
+            }
+          }
+        } catch (error: any) {
+          showMessage(`退出失败：${error?.message ?? error}`, 'err')
+        } finally {
+          await refresh(false)
+        }
       })()
-    })
+    }
+
+    armConfirm(logoutBtn, '退出当前账号', '确认退出？', () => doLogout(false))
+    armConfirm(switchBtn, '退出并登录其它账号', '确认退出并换号？', () => doLogout(true))
 
     testBtn.addEventListener('click', () => {
       void (async () => {

@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#模型档位)
-[![Tests](https://img.shields.io/badge/tests-83%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![Tests](https://img.shields.io/badge/tests-89%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
 [![CI](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg)](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#免责声明)
@@ -42,7 +42,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 
 ## 界面预览
 
-设置页（**示意图**，非截图）：登录状态 / 浏览器窗口登录 / 从已登录窗口恢复 / 手动 token / 连通性测试 / 模型列表。
+设置页（**示意图**，非截图）：登录状态 / **当前账号（退出当前账号 · 退出并登录其它账号）** / 浏览器窗口登录 / 从已登录窗口恢复 / 手动 token / 连通性测试 / 模型列表。
 
 <img src="docs/assets/panel-preview.svg" alt="DSH 设置面板 · DeepSeek 网页登录" width="820">
 
@@ -58,7 +58,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 | 🩹 **非法 JSON 宽容修复** | 模型常把 Windows 路径写成单反斜杠：`\A` 是非法转义，而 `\r` **合法**却会把 `\resources` 静默变成回车。多候选修复链逐字还原路径，解析不出才降级为正文（**绝不静默丢内容**） |
 | 🖼 **图片输入** | 走网页端文件上传通道（`/api/v0/file/upload_file` → `ref_file_ids`）。实测：上传自造的「左红右蓝」PNG，模型答出「左=红色，右=蓝色」 |
 | 🧹 **会话卫生** | 每次调用新建临时会话并在结束后删除 —— 实测调用前后网页端会话列表**完全一致**，不污染你的聊天记录 |
-| 🎛 **设置面板** | 状态展示、浏览器登录、从已登录窗口恢复、手动粘贴 token、连通性测试（host HTTP API：`/deepseek-web-login/api/*`） |
+| 🎛 **设置面板** | 状态展示、**退出当前账号 / 退出并登录其它账号**（连带清除浏览器分区登录态）、浏览器登录、从已登录窗口恢复、手动粘贴 token、连通性测试（host HTTP API：`/deepseek-web-login/api/*`） |
 
 <img src="docs/assets/tool-bridge.svg" alt="工具调用协议桥" width="1000">
 
@@ -89,7 +89,7 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 **设置 → DeepSeek 网页登录 → 浏览器窗口登录**，在弹出的窗口里正常登录（手机号 / 邮箱 / 验证码均可）。
 捕获成功后窗口自动关闭，面板显示**已登录**。
 
-- 凭证只存在本机 `~/.dsh/web-login/deepseek-auth.json`，**不在仓库里**，面板可一键清除
+- 凭证只存在本机 `~/.dsh/web-login/deepseek-auth.json`，**不在仓库里**；面板「当前账号 → 退出当前账号」一键清除（同时清掉浏览器分区里的登录态，保证真退出、可换号）
 - 凭证丢了或校验不通过：点 **从已登录窗口恢复**（复用上次登录的持久化分区，无需重新登录）
 - 非 Electron 环境（纯 web profile）：用面板里的**手动粘贴 Token**通道
 
@@ -153,7 +153,7 @@ prompt 字符上限默认 1,200,000（可配）。
 ## 测试与验证
 
 ```bash
-node tests/logic-test.mjs            # 83 项断言（5 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/logic-test.mjs            # 89 项断言（6 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
 node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
 node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
 node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）

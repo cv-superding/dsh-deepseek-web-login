@@ -31,6 +31,12 @@ const checks = {
   'imageRequestPricing（否则压缩静默失效）': host.includes('imageRequestPricing'),
   '丢弃载荷落盘（rejected.jsonl）': host.includes('rejected.jsonl'),
   '会话清理开关': host.includes('deleteWebSessions'),
+  '退出账号：清浏览器分区': host.includes('clearLoginPartition'),
+  '卸载插件不等于登出': host.includes('closeLoginWindow'),
+  'client 独立「当前账号」卡': client.includes('当前账号'),
+  'client 退出按钮': client.includes('退出当前账号'),
+  'client 换号入口': client.includes('退出并登录其它账号'),
+  'client 退出二次确认': client.includes('确认退出？'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),
 }
