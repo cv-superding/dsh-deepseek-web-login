@@ -1,0 +1,50 @@
+name: Release
+
+# 打 tag 即发布：由仓库自带的 GITHUB_TOKEN 创建 Release 并附上 tgz。
+# 这样维护者不需要在本地持有个人 token。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（如 v0.1.3）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 发布前先跑断言与产物核对
+        run: |
+          node tests/logic-test.mjs
+          node tests/check-bundle.mjs
+
+      - name: 打包
+        run: npm pack
+
+      - name: 从 CHANGELOG 提取本版本说明
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          node tools/changelog-section.mjs "${TAG#v}" > notes.md
+          echo "----- notes.md -----"
+          cat notes.md
+
+      - name: 创建 Release 并上传 tgz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" ./*.tgz \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --verify-tag
