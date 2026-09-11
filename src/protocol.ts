@@ -1288,6 +1288,11 @@ const ECHO_INLINE_SIGNATURES: readonly RegExp[] = [
   /\[\s*status\s*:/i,
   /\[\s*Truncated\s*\]/i,
   /\[\s*(?:System|Assistant)\s*\]/i,
+  // DSH 核心与 serializePrompt 自己的截断占位符 —— 会话超长后它们就躺在 prompt 里，
+  // 模型会原样复读（实测 2026-09-11 17:2x：正文里出现 `truncated]` / `[Assistant truncated]`）
+  /\[\s*truncated\s*\]/i,
+  /assistant\s+truncated/i,
+  /\[\s*\d+\s*chars?\s+omitted\s*\]/i,
 ]
 
 /** 光秃秃的 `Assistant:` / `User:`（冒号后没有内容）—— 模型正在起一行假转写。 */
@@ -1383,6 +1388,8 @@ export class TranscriptEchoGuard {
     }
     if (this.inFence) return 'plain'
     for (const re of ECHO_SIGNATURES) if (re.test(t)) return 'echo'
+    // 截断占位符被拦腰切开后剩下的残片（如单独一行 `truncated]`）
+    if (/^\]?\s*truncated\s*\]?\s*$/i.test(t)) return 'echo'
     // 加了 `Assistant: ` 前缀的回声：标记不在行首，但确实是转写回放
     for (const re of ECHO_INLINE_SIGNATURES) if (re.test(t)) return 'echo'
     // 冒号后没内容的 `Assistant:` —— 真回答里几乎不会出现，放过它就等着看回放

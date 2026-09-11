@@ -165,6 +165,33 @@ test('裸的 `Assistant:`（冒号后无内容）视为起一行假转写 → �
   assert.equal(text, '正常回答。\n', `实际：${JSON.stringify(text)}`)
 })
 
+// ⑧ 2026-09-11 17:2x：会话超长后，模型复读 prompt 里的截断占位符
+// 现场（install-plugin 工作区会话 54628c96，模型原样输出）：
+const REAL_TRUNC_ECHO =
+  '重启后的状态我已经查到了——插件确实挂上了，再做最后一步验证。\n\n\n\ntruncated]\n\n[Assistant truncated]'
+
+test('复读截断占位符（`truncated]` / `[Assistant truncated]`）拦下，正文保留', () => {
+  const { text, echoed } = run([REAL_TRUNC_ECHO])
+  assert.equal(echoed, true, '必须判定为回声')
+  assert.ok(text.includes('重启后的状态我已经查到了'), `回声之前的正文要保留：${JSON.stringify(text)}`)
+  assert.ok(!text.includes('truncated'), `占位符漏了：${JSON.stringify(text)}`)
+})
+
+test('插件的省略标记（`[N chars omitted]`）被复读也拦下', () => {
+  const { text, echoed } = run(['前文。\n', '...[12345 chars omitted]...\n', '后面没了。'])
+  assert.equal(echoed, true)
+  assert.equal(text, '前文。\n', `实际：${JSON.stringify(text)}`)
+})
+
+test('分块到达时同样拦得住', () => {
+  const chunks = ['正文。\n\n\n\ntruncat', 'ed]\n\n[Assistan', 't truncated]']
+  const { text, echoed } = run(chunks)
+  assert.equal(echoed, true)
+  assert.ok(!text.includes('truncated'), `分块时漏了：${JSON.stringify(text)}`)
+  // 回声之前的空行属于正文，保留是正常的
+  assert.equal(text, '正文。\n\n\n\n')
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
 if (failures.length) process.exitCode = 1

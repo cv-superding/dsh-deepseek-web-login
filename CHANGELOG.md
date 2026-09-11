@@ -2,6 +2,22 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.16 — 2026-09-11
+
+### 修复
+
+- **模型复读 prompt 里的截断占位符**（用户实测 17:2x，会话 1.2M tok 已超模型 1M 窗口，
+  中段历史必然被截）：正文里出现 `truncated]` / `[Assistant truncated]`，并被模型接着往下写。
+  这些占位符来自 DSH 核心的压缩标记与 serializePrompt 的省略标记（`[N chars omitted]`），
+  会话超长后就躺在 prompt 里，模型照抄。
+  - `ECHO_INLINE_SIGNATURES` 增补：`[truncated]` / `assistant truncated` / `[N chars omitted]`。
+  - 行级新增：单独一行 `truncated]`（占位符被拦腰切开的残片）也判回声。
+  - 围栏代码块内不判（讨论截断机制的正常回答不受影响）。
+
+### 测试
+
+- `check-transcript-echo` 13 → **16 项**：占位符复读（正文保留）、`[N chars omitted]`、分块到达。
+
 ## 0.1.15 — 2026-09-11
 
 ### 修复
