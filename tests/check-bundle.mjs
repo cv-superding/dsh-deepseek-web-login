@@ -8,7 +8,10 @@ const checks = {
   'XML 工具调用解析器': host.includes('function_calls') && host.includes('<parameter'),
   'DSML 归一化': host.includes('DSML'),
   '指令禁止 XML': host.includes('Do NOT use XML'),
-  '截断判定（无 FINISHED → max-tokens）': host.includes('sse_auto_resume'),
+  // 0.1.12 起截断改由「自动续写」兜底，产物必须含续写逻辑、且再无 max-tokens 上报。
+  // （旧断言查的是 mapFinish 里的 sse_auto_resume 注释 —— 该函数已删除，断言会永久失败）
+  '自动续写（截断提示不再出现）': host.includes('自动续写') && host.includes('maxContinuations'),
+  '产物不再上报 max-tokens（截断提示的触发源）': !host.includes('max-tokens'),
   '登录恢复路由': host.includes('/login/recover'),
   'AppKit token 解包': host.includes('__appKit_userInfo'),
   '新档位（快速模式）': host.includes('快速模式'),
