@@ -138,6 +138,23 @@ export function isBusyGenerating(message: string): boolean {
 }
 
 /**
+ * 账号级节流：「发得太频繁」。
+ *
+ * 实测 2026-09-11 16:11（SSE error 事件，不是 HTTP 429）：
+ *   `消息发送过于频繁，请稍后重试`
+ * ⚠️ 注意它和上面那条**差一个字**：并发拒绝写的是「请稍后再**试**」，节流写的是「请稍后**重**试」。
+ * 之前只匹配前者，于是这条落到 PROVIDER_ERROR（**不可重试**）→ 整轮直接失败、只能手点「继续」。
+ *
+ * 与 `user is muted`（有明确解除时间）也不是一回事：节流是短时的，退避够久就能过去。
+ * 退避给 20s（并发那条只给 5s）：撞得越勤越可能延长限制。
+ */
+export function isThrottled(message: string): boolean {
+  return /过于频繁|太频繁|操作频繁|too\s+many\s+requests|rate\s*limit|稍后重试|限流/i.test(
+    String(message ?? ''),
+  )
+}
+
+/**
  * 会话失效判定：服务端用 biz_msg 表达「这个 chat_session_id 不存在/无效」。
  * 触发场景（实测）：请求发出前会话已被删除（旧版把删除排在建会话之后 1.5s，
  * 而 PoW 求解 + 建连可能超过 1.5s），或服务端自行回收了闲置会话。
@@ -484,7 +501,16 @@ export type WebStreamEvent =
   | { kind: 'text'; text: string }
   | { kind: 'status'; value: string }
   | { kind: 'finish'; reason?: string }
-  | { kind: 'error'; message: string; raw?: string; /** 语义归类（如并发生成 → RATE_LIMIT），调用方据此决定重试 */ code?: string; retryAfterMs?: number }
+  | {
+      kind: 'error'
+      message: string
+      raw?: string
+      /** 语义归类（如并发生成 → RATE_LIMIT），调用方据此决定重试 */
+      code?: string
+      retryAfterMs?: number
+      /** RATE_LIMIT 细分：并发抢占（等对面写完）还是账号节流（等限流解除）—— 文案与退避都不同 */
+      rateLimitKind?: 'concurrent' | 'throttled'
+    }
 
 interface Fragment {
   type: string
@@ -687,6 +713,12 @@ export function createSseState() {
         if (isBusyGenerating(message)) {
           event.code = 'RATE_LIMIT'
           event.retryAfterMs = 5_000
+          event.rateLimitKind = 'concurrent'
+        } else if (isThrottled(message)) {
+          // 账号级节流（「消息发送过于频繁，请稍后重试」）：退避给足，别一直撞
+          event.code = 'RATE_LIMIT'
+          event.retryAfterMs = 20_000
+          event.rateLimitKind = 'throttled'
         }
         out.push(event)
         return out
@@ -699,6 +731,11 @@ export function createSseState() {
         if (isBusyGenerating(full)) {
           event.code = 'RATE_LIMIT'
           event.retryAfterMs = 5_000
+          event.rateLimitKind = 'concurrent'
+        } else if (isThrottled(full)) {
+          event.code = 'RATE_LIMIT'
+          event.retryAfterMs = 20_000
+          event.rateLimitKind = 'throttled'
         }
         out.push(event)
         return out

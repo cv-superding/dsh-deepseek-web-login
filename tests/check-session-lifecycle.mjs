@@ -15,7 +15,7 @@
  * 用法: node tests/check-session-lifecycle.mjs
  */
 import assert from 'node:assert/strict'
-import { envelopeError, isBusyGenerating, isInvalidSessionError, isMutedError, muteUntilMs, streamWebCompletion } from '../src/webapi.ts'
+import { envelopeError, isBusyGenerating, isInvalidSessionError, isMutedError, isThrottled, muteUntilMs, streamWebCompletion } from '../src/webapi.ts'
 
 let passed = 0
 const failures = []
@@ -212,6 +212,35 @@ test('isBusyGenerating: 认得真实的并发生成拒绝文案', () => {
   assert.equal(isBusyGenerating('user is muted'), false, 'mute 是另一回事，不能混为一谈')
   assert.equal(isBusyGenerating(''), false)
   assert.equal(isBusyGenerating(undefined), false)
+})
+
+// ── 事实 ⑤：账号级节流（「消息发送过于频繁，请稍后重试」）也要可重试 ──
+// 用户实测（2026-09-11 16:11，SSE error 事件）：
+//   DeepSeek 网页端返回错误：消息发送过于频繁，请稍后重试   → 旧版归 PROVIDER_ERROR，整轮失败
+// 根因：并发那条文案是「请稍后再试」，节流是「请稍后**重**试」，差一个字没匹配上。
+const REAL_THROTTLE = '消息发送过于频繁，请稍后重试'
+
+test('isThrottled: 认得「请稍后重试」，且不误伤会话失效/mute', () => {
+  assert.equal(isThrottled(REAL_THROTTLE), true)
+  assert.equal(isThrottled('请求过于频繁'), true)
+  assert.equal(isThrottled('Too many requests'), true)
+  assert.equal(isThrottled(REAL_BUSY), false, '并发那条由 isBusyGenerating 管，两条判据别互相串')
+  assert.equal(isThrottled('invalid chat session id'), false)
+  assert.equal(isThrottled('user is muted'), false)
+  assert.equal(isThrottled(''), false)
+  assert.equal(isThrottled(undefined), false)
+})
+
+const SSE_THROTTLE = `data: ${JSON.stringify({ type: 'error', content: REAL_THROTTLE })}\n\n`
+
+await run('账号节流：webapi 产出的事件必须带 RATE_LIMIT + throttled + 退避 ≥20s', async () => {
+  const { events, thrown } = await scenario({ completionResponses: [sseResponse(SSE_THROTTLE)] })
+  assert.equal(thrown, undefined, `webapi 层不抛错，只产出事件：${thrown?.message}`)
+  const err = events.find((e) => e.kind === 'error')
+  assert.ok(err, `应产出 error 事件，实际：${JSON.stringify(events)}`)
+  assert.equal(err.code, 'RATE_LIMIT', '旧版这里没有 code → 适配器归成不可重试的 PROVIDER_ERROR → 整轮失败')
+  assert.equal(err.rateLimitKind, 'throttled', '要与「并发生成」区分开（文案与退避都不同）')
+  assert.ok(err.retryAfterMs >= 20_000, `节流退避要给足（≥20s），实际 ${err.retryAfterMs}`)
 })
 
 await run('SSE 错误事件里的「并发生成」→ 归类为可重试的 RATE_LIMIT', async () => {

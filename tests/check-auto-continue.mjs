@@ -240,6 +240,34 @@ await test('续写轮也带声明 → 两处都不上屏，最终正文干净', 
   assert.equal(blocks[0], '前半段没写完后半段写完了。')
 })
 
+await test('账号节流（RATE_LIMIT/throttled）→ 文案说限流，别说成「另一个窗口正在生成」', async () => {
+  // 现场（2026-09-11 16:11）：SSE error「消息发送过于频繁，请稍后重试」
+  const throttleStream = async function* () {
+    yield {
+      kind: 'error',
+      message: '消息发送过于频繁，请稍后重试',
+      code: 'RATE_LIMIT',
+      retryAfterMs: 20_000,
+      rateLimitKind: 'throttled',
+    }
+  }
+  const adapter = createAdapter({ getAuth: () => AUTH, config: {}, streamCompletion: () => throttleStream() })
+  let thrown = null
+  try {
+    for await (const _ of adapter.stream({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }] })) void _
+  } catch (error) {
+    thrown = error
+  }
+  assert.ok(thrown, '必须抛出（不能假装成功）')
+  assert.equal(thrown.code, 'RATE_LIMIT', '要归到可自动退避重试的那一类')
+  assert.match(String(thrown.message), /限流|频繁/, `文案应说明是限流：${thrown.message}`)
+  assert.ok(!/另一个窗口/.test(String(thrown.message)), '两种 RATE_LIMIT 成因不同，文案不能串台')
+  assert.ok(
+    (thrown.failure?.providerRetryAfterMs ?? 0) >= 20_000,
+    '必须把退避时间透给重试策略',
+  )
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1
