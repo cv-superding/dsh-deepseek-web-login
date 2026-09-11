@@ -45,6 +45,8 @@ const checks = {
   '真实浏览器登录（CDP + 端口 0）': host.includes('remote-debugging-port=0') && host.includes('DevToolsActivePort'),
   'CDP 读 cookie 与真实请求头': host.includes('Storage.getCookies') && host.includes('requestWillBeSentExtraInfo'),
   'client 显示宿主进程/登录方式': client.includes('宿主进程') && client.includes('loginCapability'),
+  'client 如实说明凭证来源（不再写「可能仍可用」）': client.includes('凭证来源') && !client.includes('可能仍可用'),
+  'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),
 }

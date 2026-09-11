@@ -66,6 +66,10 @@ Then: **Settings → DeepSeek 网页登录 → 浏览器窗口登录**, log in n
 Finally pick provider **`DeepSeek 网页版（免费）`** → `DeepSeek 网页 · 快速模式` in the model picker.
 
 Credentials live only on your machine (`~/.dsh/web-login/deepseek-auth.json`), never in this repository. The panel's **current account → log out** removes them (and the partition storage) in one click.
+
+In manual-token mode the panel shows "cookie / fingerprint headers not captured" — that is expected for this
+path (it only has the Bearer token), and it is verified working end to end: validation, PoW solving and a real
+completion all succeed. Switch to browser login if you ever hit frequent `AUTH` / `40003` errors.
 If they are lost, **Recover from the logged-in window** reuses the persistent partition — no re-login needed.
 
 ## Models

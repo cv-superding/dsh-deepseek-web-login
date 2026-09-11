@@ -247,13 +247,42 @@ function Panel(): any {
       if (loggedIn) {
         rows.push(['账号', status.auth.display || '（未获取到账号信息）'])
         rows.push(['捕获时间', status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : '未知'])
-        rows.push(['Cookie', status.auth.hasCookie ? '已捕获' : '未捕获（可能仍可用）'])
-        rows.push(['指纹头', status.auth.hasFingerprint ? '已捕获' : '未捕获'])
+        // 凭证来源与完整度：以前这里对缺失项写「未捕获（可能仍可用）」，读起来像风险提示，
+        // 实际含义只是「你走的是手动粘贴 token 那条路」。实测（2026-09-11）：
+        // 只有 Bearer token、没有 cookie / x-hif-* 时，校验、PoW、真实生成全部通过 ——
+        // 所以这里如实说明「缺什么」以及「已证实不影响使用」，而不是留一句模糊的警告。
+        const manualTokenMode = !status.auth.hasCookie && !status.auth.hasFingerprint
+        if (manualTokenMode) {
+          rows.push(['凭证来源', '手动粘贴 token（实测：仅凭 Bearer token 即可完成校验/求解/生成）'])
+        } else {
+          rows.push(['凭证来源', '浏览器登录捕获（token + cookie + 指纹头，登录态通常更耐久）'])
+        }
+        rows.push([
+          'Cookie',
+          status.auth.hasCookie
+            ? '✅ 已捕获'
+            : '未捕获 —— 手动 token 模式本就没有（已验证不影响请求；若日后频繁遇到 AUTH/40003，改用「浏览器登录」）',
+        ])
+        rows.push(['指纹头', status.auth.hasFingerprint ? '✅ 已捕获（x-hif-* / x-client-*）' : '未捕获 —— 同上，已实测可用'])
         rows.push(['PoW WASM', status.auth.wasmHost || '默认地址'])
         rows.push(['token 长度', `${status.auth.tokenLength ?? 0} 字符`])
         if (status.validation) rows.push(['服务端校验', status.validation.ok ? '通过' : `失败：${status.validation.error ?? ''}`])
       } else {
-        rows.push(['登录方式', electron ? '可开浏览器窗口（Electron 主进程）' : '当前为非 Electron 环境，请手动粘贴 token'])
+        // 未登录时说明「能用哪条路登录」（不要笼统写成「非 Electron 环境」：
+        // 2026-09-11 起宿主是 utility 进程，但真实浏览器登录是可用的）
+        const available = status.loginCapability
+        rows.push([
+          '登录方式',
+          available
+            ? available.canOpenWindow
+              ? '插件自开窗口（Electron 主进程，带指纹伪装）'
+              : available.browser
+                ? `用真实浏览器登录（${available.browser} + 调试协议，自动读取凭证）`
+                : '未找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 token'
+            : electron
+              ? '可开浏览器窗口'
+              : '请用「用我的默认浏览器登录」+ 手动粘贴 token',
+        ])
       }
       if (status.lastLoginResult) {
         rows.push(['最近结果', `${status.lastLoginResult.message} · ${new Date(status.lastLoginResult.at).toLocaleTimeString()}`])
