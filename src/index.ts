@@ -72,7 +72,7 @@ function sendJson(res: any, status: number, payload: unknown): void {
 export function apply(ctx: any, config: Config = {}): void {
   const logger = normalizeLogger(ctx.logger)
   const adapterConfig: AdapterConfig = {
-    maxPromptChars: config.maxPromptChars ?? 1_200_000,
+    maxPromptChars: config.maxPromptChars ?? 1_500_000,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
     logger,

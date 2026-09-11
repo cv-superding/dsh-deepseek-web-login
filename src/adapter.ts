@@ -7,9 +7,42 @@
  *  - 无 temperature / stop / max_tokens 字段 → 忽略（不报错）
  *  - 每次调用新建 chat_session 并在结束后删除（保持无状态 + 不污染网页端列表）
  */
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
-import { collectImageRefs, serializePrompt, ToolCallStreamFilter, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, serializePrompt, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+
+/**
+ * 把「被丢弃的完整载荷」落盘，专供事后定位。
+ *
+ * 为什么必须这么做：日志里只留前 400 字符，而实测的坏点几乎总在后半段
+ * （长 PowerShell 命令、批量多调用）。没有完整原文就只能靠猜——
+ * 2026-09-10 已经因此多绕了好几轮：先误判成 DSML 双竖线，真实原因却是未转义双引号。
+ * 落盘后可以直接把原文喂进解析器复现，从「猜」变成「验」。
+ *
+ * 失败必须无声（诊断代码绝不能影响主流程）。
+ */
+function dumpRejectedPayload(raw: string, mode: string, reason: string | undefined, logger?: any): void {
+  try {
+    const dir = joinPath(homedir(), '.dsh', 'deepseek-web')
+    mkdirSync(dir, { recursive: true })
+    const file = joinPath(dir, 'rejected.jsonl')
+    try {
+      if (statSync(file).size > 4_000_000) writeFileSync(file, '')
+    } catch {
+      /* 首次写入或读大小失败都无所谓 */
+    }
+    appendFileSync(
+      file,
+      `${JSON.stringify({ at: new Date().toISOString(), mode, reason, length: raw.length, raw })}\n`,
+      'utf8',
+    )
+  } catch (error: any) {
+    logger?.debug?.(`deepseek-web: 落盘被丢弃载荷失败：${error?.message ?? error}`)
+  }
+}
 
 export const PROVIDER = 'deepseek-web'
 
@@ -40,9 +73,16 @@ export interface ModelSpec {
  * 也可以通过推理强度（reasoningEffort）在同一个档位上切换。
  * 旧档位选择由 LEGACY_ALIASES 回退承接。
  *
- * 容量：服务器声明 `normal_history_and_file_token_limit = 890880`
- * （1M 总量扣除输出预留后的可用预算）、单请求 `input_character_limit = 2621440` 字符。
- * 因此 contextWindow 取 890880，送出的 prompt 字符上限由 maxPromptChars 控制。
+ * 容量（2026-09-11 直接抓服务端 `client/settings` 逐字段核对，configVersion 81）：
+ *   `input_character_limit = 2621440`        —— **单请求输入字符数硬上限**（= 2.5 MiB 字符）
+ *   `file_feature.token_limit = 890880`      —— 附件/文件的 token 预算（开不开思考都一样）
+ *   `file_feature.token_limit_with_thinking = 890880`
+ * ⚠️ 曾经的错误：把 `890880` 当成「模型上下文窗口」，还在文档里写成「1M 扣输出预留」。
+ * 它是 **file_feature（附件）的 token 预算**，跟上下文窗口不是一回事；而且 890880 = 870×1024，
+ * 面板按 ÷1024 显示就成了「870K」，于是看起来像「说好的 1M 变成了 870K」。
+ * 服务端并没有给出「总上下文窗口」字段；可核对的硬约束只有上面那条字符上限。
+ * 因此 contextWindow 按 DeepSeek 标称的 1M 取 1048576（1 Mi；服务端自己的数字也都是 1024 的整数倍：
+ * 2621440 = 2.5×1048576、890880 = 870×1024），真正防越界的是 maxPromptChars（远低于字符硬上限）。
  */
 export const MODEL_SPECS: ModelSpec[] = [
   {
@@ -52,7 +92,7 @@ export const MODEL_SPECS: ModelSpec[] = [
     modelType: 'default',
     thinking: false,
     configurableThinking: true,
-    contextWindow: 890_880,
+    contextWindow: 1_048_576,
     maxOutputTokens: 16_384,
   },
   {
@@ -62,7 +102,7 @@ export const MODEL_SPECS: ModelSpec[] = [
     modelType: 'default',
     thinking: true,
     configurableThinking: true,
-    contextWindow: 890_880,
+    contextWindow: 1_048_576,
     maxOutputTokens: 32_768,
   },
 ]
@@ -110,7 +150,7 @@ function isContextTooLong(message: string): boolean {
 }
 
 export interface AdapterConfig {
-  /** prompt 字符上限（超出走中段截断）。 */
+  /** prompt 字符上限（超出走中段截断）。服务端硬上限是 2621440 字符，默认留 ~43% 余量。 */
   maxPromptChars?: number
   /** SSE 空闲超时（毫秒）。 */
   idleTimeoutMs?: number
@@ -183,14 +223,6 @@ function resolveThinking(options: any, spec: ModelSpec): { thinkingEnabled: bool
 }
 
 /**
- * 协议块解析失败、但本轮正文已经发出去时补的提示。
- * 为什么不原样吐出 JSON：Web GUI 的 markdown 会把 `$…$` 当行内公式渲染
- * （实测 2026-09：泄漏的命令行 `$ErrorActionPreference='…'` 被渲染成 KaTeX，
- * 用户看到的是一个字符一行 + 弯引号的乱码），而且那段 JSON 对用户没有任何意义。
- */
-const UNPARSED_TOOL_CALL_NOTICE = '\n\n> ⚠️ 模型本次的工具调用格式无法解析（漏写括号或引号），已忽略，未执行任何工具。'
-
-/**
  * 网页端 finish 归一。
  * 实测：正常完成必定带 `response/status: FINISHED`；若流在没有该标记的情况下结束，
  * 说明被服务端上限打断（`completion_request_timeout_ms = 60000`，网页端靠
@@ -215,6 +247,22 @@ export function createAdapter(deps: AdapterDeps) {
 
     /** 未配置策略 → 走 dsh-llm 默认重试码表（EMPTY_RESPONSE/RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT）。 */
     providerRetryPolicy(_provider: string) {
+      return undefined
+    },
+
+    /**
+     * 图片请求计价：本路由不声明 → undefined（消费者回落到自己的中性估算）。
+     *
+     * ⚠️ 这个方法**必须有**，不是可选装饰：dsh-llm 的适配器注册表在计量/压缩路径上**无条件**转调
+     * `adapter.imageRequestPricing(provider, model)`（见 app.asar 内 LlmAdapterRegistry.imageRequestPricing）。
+     * 而本适配器是鸭子类型的**普通对象**、不继承 `LlmAdapter` 基类，基类里那个「默认返回 undefined」的实现
+     * 我们拿不到 → 缺了它就抛 `... .imageRequestPricing is not a function`，
+     * 于是 basic-compaction-engine 每一步压缩都失败（实测 2026-09-10：69 次，压缩**静默失效**，
+     * 长会话不再自动压缩，且只留一条 warn）。
+     *
+     * 契约：必须**同步、无 I/O**（token meter 每次测量都会调）。
+     */
+    imageRequestPricing(_provider: string, _model: string): undefined {
       return undefined
     },
 
@@ -306,11 +354,14 @@ export function createAdapter(deps: AdapterDeps) {
       system: options?.system,
       messages: options?.messages ?? [],
       tools: (options?.tools ?? []) as ToolSchemaLike[],
-      maxChars: deps.config.maxPromptChars ?? 1_200_000,
+      maxChars: deps.config.maxPromptChars ?? 1_500_000,
     })
 
     const knownNames = new Set<string>((options?.tools ?? []).map((tool: any) => String(tool?.name ?? '')))
     const filter = new ToolCallStreamFilter(knownNames)
+    // 第二道网：模型会模仿 prompt 里的转写格式（`[Tool Result for …]` / `User:` / `Assistant:`…），
+    // 把「对话转写」当回答吐出来。这与工具调用标记泄漏是两个独立来源，必须分开防。
+    const echoGuard = new TranscriptEchoGuard()
 
     let nextIndex = 0
     let textBlock: { index: number; text: string } | null = null
@@ -320,6 +371,8 @@ export function createAdapter(deps: AdapterDeps) {
     let toolCallCount = 0
     let finishReason: string | undefined
     let rejectedProtocol = ''
+    let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
+    let echoedTranscript = false
 
     const openText = (): { index: number; text: string } => {
       if (!textBlock) textBlock = { index: nextIndex++, text: '' }
@@ -368,14 +421,16 @@ export function createAdapter(deps: AdapterDeps) {
         }
         if (event.kind === 'text') {
           const out = filter.push(event.text)
-          if (out.text) {
+          const guarded = echoGuard.push(out.text)
+          if (guarded.echoed) echoedTranscript = true
+          if (guarded.text) {
             const block = openText()
             if (!textStarted) {
               textStarted = true
               yield { type: 'block-start', index: block.index, blockType: 'text' }
             }
-            block.text += out.text
-            yield { type: 'text-delta', index: block.index, text: out.text }
+            block.text += guarded.text
+            yield { type: 'text-delta', index: block.index, text: guarded.text }
           }
           if (out.calls.length > 0) yield* emitCalls(out.calls)
           continue
@@ -397,22 +452,32 @@ export function createAdapter(deps: AdapterDeps) {
 
       // 流尾：把过滤器里 hold-back / 未配平的残余吐出来
       const tail = filter.flush()
-      if (tail.text) {
+      const tailGuarded = echoGuard.flush()
+      if (tailGuarded.echoed) echoedTranscript = true
+      const tailText = tail.text + tailGuarded.text
+      if (tailText) {
         const block = openText()
         if (!textStarted) {
           textStarted = true
           yield { type: 'block-start', index: block.index, blockType: 'text' }
         }
-        block.text += tail.text
-        yield { type: 'text-delta', index: block.index, text: tail.text }
+        block.text += tailText
+        yield { type: 'text-delta', index: block.index, text: tailText }
       }
       if (tail.calls.length > 0) yield* emitCalls(tail.calls)
       if (tail.rejected) {
-        // 协议块解析失败：**绝不**把原始 JSON 当正文（Web GUI 会把里面的 `$…$` 渲染成
+        // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
         // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
         rejectedProtocol = tail.rejected.raw
+        const reason = tail.rejected.reason ?? 'unparsable'
+        rejectedReason = reason
+        // 完整载荷落盘：日志的 400 字符截断看不到后半段的坏点（见 dumpRejectedPayload 说明）
+        dumpRejectedPayload(tail.rejected.raw, tail.rejected.mode, reason, logger)
         logger?.warn?.(
-          `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败，已丢弃 ${tail.rejected.raw.length} 字符：${tail.rejected.raw.slice(0, 400)}`,
+          `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
+            `[${reason}${reason === 'unbalanced' ? '：多半是流被服务端上限截断' : '：结构不符'}]` +
+            `，已丢弃 ${tail.rejected.raw.length} 字符（将自动重试；完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
+            tail.rejected.raw.slice(0, 2000),
         )
       }
     } catch (error: any) {
@@ -444,27 +509,52 @@ export function createAdapter(deps: AdapterDeps) {
       return
     }
     const hasVisibleText = (textBlock?.text?.length ?? 0) > 0
-    if (rejectedProtocol && !hasVisibleText) {
-      // 模型这一轮只输出了坏掉的调用 JSON，没有别的正文可给用户。
-      // 用 EMPTY_RESPONSE 报错：它在 dsh-llm-retry 的默认可重试集合里 → 会自动重发这一步；
-      // 重试仍失败时用户看到的是下面这句人话，而不是一段渲染成乱码的 JSON。
+    if (echoedTranscript) {
+      // 已把回声段从可见正文里剔除；这里只留痕，方便事后定位。
+      logger?.warn?.('deepseek-web: 模型回声了「对话转写格式」（[Tool Result for …] / User: / Assistant: 等），该段已丢弃、不上屏')
+    }
+    if (echoedTranscript && !hasVisibleText && toolCallCount === 0) {
+      // 整轮输出就是一段转写回声、没有任何真内容 → 当作空响应重试（与坏掉的调用同一处理）。
       yield {
         type: 'finish',
         reason: {
           kind: 'error',
           failure: {
-            message: 'DeepSeek 网页端返回的工具调用 JSON 无法解析（模型漏写括号或引号），本次调用已丢弃。',
+            message: 'DeepSeek 网页端把「对话转写格式」当成回答输出了（已丢弃，未上屏），本次没有产生有效内容。',
             code: 'EMPTY_RESPONSE',
           },
         },
       }
       return
     }
-    if (rejectedProtocol && hasVisibleText) {
-      // 正文已经发给用户了：补一句人话提示收尾，绝不把 JSON 混进答案。
-      const block = openText()
-      block.text += UNPARSED_TOOL_CALL_NOTICE
-      yield { type: 'text-delta', index: block.index, text: UNPARSED_TOOL_CALL_NOTICE }
+    if (rejectedProtocol) {
+      // 调用被丢弃 → **必须报可重试错误**，不管有没有正文。
+      //
+      // ⚠️ 这里曾经分两种处理：无正文 → 报错重试；有正文 → 只补一句提示、然后**当作正常完成**。
+      // 结果是一个很隐蔽的故障：模型先写了半句话、再吐出坏掉的调用 JSON，调用被丢弃后
+      // 这一轮**没有任何工具调用** → agent loop 判定回合结束 → 用户看到「说半句就停了」，
+      // 而且 turn/end 的 reason 是 `completed`，连报错都看不到（实测 2026-09-10 23:27:13，
+      // 症状复现多次，用户反复重启也无法恢复）。
+      //
+      // EMPTY_RESPONSE 在 dsh-llm-retry 默认可重试集合里 → 自动重发这一步；
+      // 重试仍失败时用户看到的是下面这句人话，而不是一段渲染成乱码的 JSON 或一次静默停止。
+      //
+      // 文案按失败原因分档：实测「回声」是最常见的一种，而它其实是**我们主动拒绝**了
+      // 一段历史回放，不是故障——用「格式无法解析」来描述会让用户以为程序坏了。
+      const reasonText =
+        rejectedReason === 'echo'
+          ? '网页端本次输出的是一段历史内容回放（不是真要执行调用），已丢弃并自动重试；无需处理。'
+          : rejectedReason === 'unbalanced'
+            ? '网页端本次输出被截断，调用没收全，已丢弃并自动重试；无需处理。'
+            : '网页端本次的调用格式无法解析，已丢弃并自动重试；无需处理。'
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: { message: reasonText, code: 'EMPTY_RESPONSE' },
+        },
+      }
+      return
     }
     const hasVisible = outputChars > 0
     if (!hasVisible) {

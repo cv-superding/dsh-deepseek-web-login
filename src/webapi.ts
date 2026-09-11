@@ -78,7 +78,65 @@ export function envelopeError(json: any): { code: number; msg: string } | undefi
   if (typeof code === 'number' && code !== 0) {
     return { code, msg: String((json as any).msg ?? (json as any).message ?? 'unknown error') }
   }
+  // ⚠️ 网页端把**真实业务错误**放在 data.biz_code 里，外层 code 依旧是 0。
+  // 只认外层 code 的后果（实测 2026-09-11）：服务端明明说得很清楚
+  //   {"code":0,"msg":"","data":{"biz_code":1,"biz_msg":"invalid chat session id"}}
+  // 却被降级成人人看不懂、而且**不可重试**的
+  //   `非流式响应（content-type: application/json）：{...}` + MALFORMED_RESPONSE。
+  // 认了 biz_code 之后，既能给出真原因，也能按原因做定向恢复（重建会话重试）。
+  const bizCode = (json as any).data?.biz_code
+  if (typeof bizCode === 'number' && bizCode !== 0) {
+    const bizMsg = (json as any).data?.biz_msg
+    const text = bizMsg === undefined || bizMsg === null || bizMsg === '' ? 'unknown error' : String(bizMsg)
+    return { code: bizCode, msg: text }
+  }
   return undefined
+}
+
+/**
+ * 账号被临时限制判定（实测 2026-09-11）：
+ *   {"code":0,"data":{"biz_code":5,"biz_msg":"user is muted",
+ *                     "biz_data":{"is_muted":1,"mute_until":1789173841.894}}}
+ * 这是**服务端对账号的限制**（免费网页端对高频自动化调用的静默限流），不是插件 bug：
+ * 登录态有效、建会话也成功，只有 completion 被拒。必须把解除时间明确告诉用户，
+ * 并且**不要空转重试** —— 否则每一轮都白发请求，还可能延长限制。
+ */
+export function isMutedError(biz: { code?: number; msg?: string } | undefined): boolean {
+  return biz?.code === 5 || /user\s+is\s+muted|account\s+is\s+muted/i.test(String(biz?.msg ?? ''))
+}
+
+/** 从响应信封里读出解除限制的时间（ms）；读不到返回 undefined。 */
+export function muteUntilMs(json: any): number | undefined {
+  const raw = (json as any)?.data?.biz_data?.mute_until
+  const seconds = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined
+  return Math.round(seconds * 1000)
+}
+
+/** 被限制时的用户可读文案（带解除时间）。 */
+function mutedMessage(untilMs: number | undefined): string {
+  if (untilMs === undefined) {
+    return 'DeepSeek 网页端已临时限制本账号（user is muted），未给出解除时间。这期间任何网页模型调用都会失败；请等待解除，或改用官方 API key。'
+  }
+  const when = new Date(untilMs).toLocaleString('zh-CN', { hour12: false })
+  const minutes = Math.max(1, Math.round((untilMs - Date.now()) / 60_000))
+  return (
+    `DeepSeek 网页端已临时限制本账号（user is muted）：预计 ${when} 解除，约 ${minutes} 分钟后。` +
+    '这期间任何网页模型调用都会失败（登录态本身有效、建会话也正常，只有发消息被拒）；' +
+    '请等待解除，或改用官方 API key。免费网页端对高频自动化调用会静默限流，刚跑过大量工具步骤的会话尤其容易被限。'
+  )
+}
+
+/**
+ * 会话失效判定：服务端用 biz_msg 表达「这个 chat_session_id 不存在/无效」。
+ * 触发场景（实测）：请求发出前会话已被删除（旧版把删除排在建会话之后 1.5s，
+ * 而 PoW 求解 + 建连可能超过 1.5s），或服务端自行回收了闲置会话。
+ * 这类失败**可以透明恢复**：本插件每次调用都是全新会话、不依赖服务端历史 → 换个会话重发即可。
+ */
+export function isInvalidSessionError(biz: { code?: number; msg?: string } | undefined): boolean {
+  return /invalid\s+chat\s+session|chat\s+session\s+(?:not\s+found|expired|invalid)|chat_session_id[^\p{L}]{0,4}(?:无效|不存在|已过期|非法)|会话.{0,8}(?:无效|不存在|已过期)/iu.test(
+    String(biz?.msg ?? ''),
+  )
 }
 
 /** 业务错误码 → 稳定错误码（40003/40001：授权失败）。 */
@@ -742,78 +800,142 @@ export interface CompletionParams {
   onDeleteSession?: (sessionId: string) => void
 }
 
-/** 发起一次网页版完成请求并流式产出事件；会话在结束时尽力删除。 */
-export async function* streamWebCompletion(auth: WebAuth, params: CompletionParams): AsyncGenerator<WebStreamEvent> {
+/**
+ * 会话/请求的可注入传输层（默认就是真实实现）。
+ * 抽出来是为了能在单测里确定性地复现「会话失效 → 重建重试」与「删除时机」这两条路径，
+ * 不必真的打网络（这两处正是反复出问题的地方）。
+ */
+export interface CompletionTransport {
+  createSession: (auth: WebAuth, signal?: AbortSignal) => Promise<string>
+  powHeader: (auth: WebAuth, targetPath: string, signal?: AbortSignal) => Promise<string>
+}
+
+const defaultTransport: CompletionTransport = { createSession: createChatSession, powHeader: createPowHeader }
+
+/**
+ * 打开一次 completion 请求（建会话 + PoW + 发送），返回可用的会话与响应。
+ *
+ * 非 SSE 响应（HTTP 200 上裹着业务错误信封）在这里统一裁决：
+ *  - 会话失效（invalid chat session id）→ **换一个新会话透明重试一次**（用户无感）；
+ *  - 其它业务错误 → 按业务码抛出（AUTH / RATE_LIMIT / PROVIDER_ERROR…）。
+ */
+async function openCompletion(
+  auth: WebAuth,
+  params: CompletionParams,
+  signal: AbortSignal,
+  transport: CompletionTransport,
+): Promise<{ sessionId: string; resp: Response }> {
+  let lastFailure: AdapterLlmError | undefined
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sessionId = await transport.createSession(auth, signal)
+    let resp: Response
+    try {
+      resp = await fetch(`${DS_BASE}/api/v0/chat/completion`, {
+        method: 'POST',
+        headers: {
+          ...buildDsHeaders(auth, `${DS_BASE}/a/chat/s/${sessionId}`),
+          accept: 'text/event-stream',
+          'x-ds-pow-response': await transport.powHeader(auth, '/api/v0/chat/completion', signal),
+        },
+        body: JSON.stringify({
+          chat_session_id: sessionId,
+          parent_message_id: null,
+          prompt: params.prompt,
+          ref_file_ids: params.refFileIds ?? [],
+          thinking_enabled: params.thinkingEnabled,
+          search_enabled: params.searchEnabled ?? false,
+          model_type: params.modelType,
+          action: null,
+          preempt: false,
+        }),
+        signal,
+      })
+    } catch (error: any) {
+      if (params.signal?.aborted) throw new AdapterLlmError('DeepSeek web request aborted by caller', 'ABORTED', { cause: error })
+      throw new AdapterLlmError(`DeepSeek web request failed: ${error?.message ?? error}`, 'TRANSPORT', { cause: error })
+    }
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      const code = httpErrorCode(resp.status)
+      const retryAfter = parseRetryAfterMs(resp.headers.get('retry-after'))
+      const hint =
+        code === 'AUTH'
+          ? ' —— 网页登录态可能已过期，请到「设置 → DeepSeek 网页登录」重新登录'
+          : code === 'RATE_LIMIT'
+            ? ' —— 网页端频控（免费额度），稍后重试即可'
+            : ''
+      params.onDeleteSession?.(sessionId)
+      throw new AdapterLlmError(
+        `DeepSeek web completion failed (HTTP ${resp.status})${text ? `: ${text.slice(0, 200)}` : ''}${hint}`,
+        code,
+        { status: resp.status, ...(retryAfter !== undefined ? { providerRetryAfterMs: retryAfter } : {}), cause: new Error(text) },
+      )
+    }
+    if (!resp.body) {
+      params.onDeleteSession?.(sessionId)
+      throw new AdapterLlmError('DeepSeek web completion returned no body', 'EMPTY_RESPONSE')
+    }
+
+    // HTTP 200 也可能是「业务错误信封」或 HTML 挑战页 —— 非 SSE 一律先当错误处理
+    const contentType = String(resp.headers.get('content-type') ?? '')
+    if (contentType.includes('text/event-stream')) return { sessionId, resp }
+
+    const text = await resp.text().catch(() => '')
+    let parsed: any
+    try {
+      parsed = JSON.parse(text)
+    } catch {}
+    const biz = envelopeError(parsed)
+    const muted = isMutedError(biz)
+    const untilMs = muteUntilMs(parsed)
+    const failure = biz
+      ? new AdapterLlmError(
+          muted ? mutedMessage(untilMs) : bizErrorMessage(biz.code, biz.msg),
+          muted ? 'RATE_LIMIT' : isInvalidSessionError(biz) ? 'TRANSPORT' : bizErrorCode(biz.code),
+          {
+            status: resp.status,
+            // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
+            ...(muted && untilMs !== undefined ? { providerRetryAfterMs: Math.max(0, untilMs - Date.now()) } : {}),
+          },
+        )
+      : new AdapterLlmError(
+          `DeepSeek 网页端返回了非流式响应（content-type: ${contentType || 'unknown'}）：${text.slice(0, 200)}`,
+          'MALFORMED_RESPONSE',
+          { status: resp.status },
+        )
+    params.onDeleteSession?.(sessionId) // 这个会话已经废了，顺手回收，不留垃圾
+    if (attempt === 0 && biz && isInvalidSessionError(biz)) {
+      lastFailure = failure
+      continue
+    }
+    throw failure
+  }
+  throw lastFailure ?? new AdapterLlmError('DeepSeek 网页端无法建立可用会话', 'PROVIDER_ERROR')
+}
+
+/**
+ * 发起一次网页版完成请求并流式产出事件；会话在**流结束之后**尽力删除。
+ *
+ * ⚠️ 删除时机是这个模块最容易被写错的地方（2026-09-11 实测故障）：
+ * 旧实现把 `onDeleteSession` 放在**建会话之后立刻**调用，而它内部是「延迟 1.5s 删除」，
+ * 于是会话可能在 completion 请求发出之前就被自己删掉 —— 若 PoW 求解 + 建连超过 1.5s，
+ * 服务端回
+ *   {"code":0,"msg":"","data":{"biz_code":1,"biz_msg":"invalid chat session id"}}
+ * 更隐蔽的是「生成进行到一半会话消失」，服务端可能直接掐断流 —— 表现就是回答说半句就停、
+ * 工具调用没收全（正是我们一直在追的那类截断）。
+ * 现在删除只发生在 finally（流正常结束、报错或调用方中止都算），会话在整个请求期间都活着。
+ */
+export async function* streamWebCompletion(
+  auth: WebAuth,
+  params: CompletionParams,
+  transport: CompletionTransport = defaultTransport,
+): AsyncGenerator<WebStreamEvent> {
   const idle = params.idleTimeoutMs ?? 120_000
   const controller = new AbortController()
   const signal = params.signal ? AbortSignal.any([params.signal, controller.signal]) : controller.signal
 
-  const sessionId = await createChatSession(auth, signal)
-  params.onDeleteSession?.(sessionId)
-
-  const powHeader = await createPowHeader(auth, '/api/v0/chat/completion', signal)
-
-  let resp: Response
-  try {
-    resp = await fetch(`${DS_BASE}/api/v0/chat/completion`, {
-      method: 'POST',
-      headers: {
-        ...buildDsHeaders(auth, `${DS_BASE}/a/chat/s/${sessionId}`),
-        accept: 'text/event-stream',
-        'x-ds-pow-response': powHeader,
-      },
-      body: JSON.stringify({
-        chat_session_id: sessionId,
-        parent_message_id: null,
-        prompt: params.prompt,
-        ref_file_ids: params.refFileIds ?? [],
-        thinking_enabled: params.thinkingEnabled,
-        search_enabled: params.searchEnabled ?? false,
-        model_type: params.modelType,
-        action: null,
-        preempt: false,
-      }),
-      signal,
-    })
-  } catch (error: any) {
-    if (params.signal?.aborted) throw new AdapterLlmError('DeepSeek web request aborted by caller', 'ABORTED', { cause: error })
-    throw new AdapterLlmError(`DeepSeek web request failed: ${error?.message ?? error}`, 'TRANSPORT', { cause: error })
-  }
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '')
-    const code = httpErrorCode(resp.status)
-    const retryAfter = parseRetryAfterMs(resp.headers.get('retry-after'))
-    const hint =
-      code === 'AUTH'
-        ? ' —— 网页登录态可能已过期，请到「设置 → DeepSeek 网页登录」重新登录'
-        : code === 'RATE_LIMIT'
-          ? ' —— 网页端频控（免费额度），稍后重试即可'
-          : ''
-    throw new AdapterLlmError(
-      `DeepSeek web completion failed (HTTP ${resp.status})${text ? `: ${text.slice(0, 200)}` : ''}${hint}`,
-      code,
-      { status: resp.status, ...(retryAfter !== undefined ? { providerRetryAfterMs: retryAfter } : {}), cause: new Error(text) },
-    )
-  }
-  if (!resp.body) throw new AdapterLlmError('DeepSeek web completion returned no body', 'EMPTY_RESPONSE')
-
-  // HTTP 200 也可能是「业务错误信封」或 HTML 挑战页 —— 非 SSE 一律先当错误处理
-  const contentType = String(resp.headers.get('content-type') ?? '')
-  if (!contentType.includes('text/event-stream')) {
-    const text = await resp.text().catch(() => '')
-    let biz: { code: number; msg: string } | undefined
-    try {
-      biz = envelopeError(JSON.parse(text))
-    } catch {}
-    throw new AdapterLlmError(
-      biz
-        ? bizErrorMessage(biz.code, biz.msg)
-        : `DeepSeek 网页端返回了非流式响应（content-type: ${contentType || 'unknown'}）：${text.slice(0, 200)}`,
-      biz ? bizErrorCode(biz.code) : 'MALFORMED_RESPONSE',
-      { status: resp.status },
-    )
-  }
+  const { sessionId, resp } = await openCompletion(auth, params, signal, transport)
 
   // 空闲看门狗：SSE 事件间隔超过 idle 即判定超时
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -851,5 +973,8 @@ export async function* streamWebCompletion(auth: WebAuth, params: CompletionPara
     try {
       controller.abort('stream consumer stopped')
     } catch {}
+    // 会话回收排在**流结束之后**（正常结束 / 报错 / 调用方中止都会走到这里）。
+    // 提前删除会让会话在生成中途消失 —— 见 streamWebCompletion 顶部的事故说明。
+    params.onDeleteSession?.(sessionId)
   }
 }

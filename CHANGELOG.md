@@ -2,6 +2,47 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.4 — 2026-09-11
+
+### 修复
+
+- **会话被自己提前删掉，导致整轮失败**（严重，本次用户实测）
+  - 现象：网页快速模式下某一轮直接失败
+    `DeepSeek 网页端返回了非流式响应（content-type: application/json）：
+     {"code":0,"msg":"","data":{"biz_code":1,"biz_msg":"invalid chat session id"}}`
+  - 根因：`streamWebCompletion` 在建会话**之后立刻**调用 `onDeleteSession`，而它内部是
+    「延迟 1.5s 删除」——只要 PoW 求解 + 建连超过 1.5s，completion 发出时会话已被自己删掉。
+    更隐蔽的是**生成进行到一半会话消失**，服务端可能直接掐断流 —— 正是我们一直在追的
+    「说半句就停 / 工具调用没收全」那类截断的一个来源。
+  - 修复：删除只发生在 `finally`（流正常结束 / 报错 / 调用方中止都算），会话在整个请求期间保持存活。
+  - 反证：同一场景下旧时序为 `create → delete → pow → completion`（删除早于请求，故障成因成立），
+    新时序为 `create → pow → completion → delete`。已固化为断言。
+- **服务端的真实错误被吞掉**（严重）
+  - 根因：`envelopeError` 只看外层 `code`，而网页端把真实错误放在 `data.biz_code`（外层恒为 0）
+    → 真正的 `biz_msg` 丢失，统一降级成不可重试、无法诊断的
+    `非流式响应（content-type: application/json）` + `MALFORMED_RESPONSE`。
+  - 修复：识别 `data.biz_code` / `data.biz_msg`；并把「会话失效」映射成可重试的 `TRANSPORT`
+    ——**换一个新会话透明重试一次**，用户无感（本插件每次都是全新会话、不依赖服务端历史）。
+- **账号被服务端限制时给不出人话**（由上面那条修复才暴露出来）
+  - 实测信封：`{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,"mute_until":…}}`
+  - 现在会明确报出**解除时间**，并带上 `providerRetryAfterMs`（远超重试上限）→ 重试策略直接放弃，
+    不再空转打请求（免费网页端对高频自动化调用会静默限流，空转只会更糟）。
+- **上下文容量数字写错了**（用户指出）
+  - 旧文档/代码把 `file_feature.token_limit = 890880` 当成「模型上下文窗口」，还写成「1M 扣输出预留」。
+    实际它是**附件（file_feature）的 token 预算**；890880 = 870×1024，面板按 ÷1024 显示就成了「870K」，
+    看起来像「说好的 1M 变成了 870K」。
+  - 现场逐字段核对（`GET /api/v0/client/settings?scope=model`，configVersion 81）后改为：
+    `contextWindow = 1048576`（标称 1M），`maxPromptChars` 默认 `1200000 → 1500000`
+    （服务端单请求输入硬上限是 `input_character_limit = 2621440` 字符，留 ~43% 余量给 CJK 的字符/token 比）。
+  - 面板文案同步改为「上下文 1M token（标称）」，并注明 890880 是附件预算、不是上下文窗口。
+
+### 测试
+
+- 新增 `tests/check-session-lifecycle.mjs`（10 项）：删除时机、会话失效透明重试、
+  连续失效报可重试码、`data.biz_code` 识别、`user is muted` 文案与 `providerRetryAfterMs`、
+  以及「非会话类业务错误不得被误判」。
+- 断言总数 46 → **83**（logic 46 / badjson 11 / dsml 6 / echo 10 / lifecycle 10），产物核对 25 项。
+
 ## 0.1.3 — 2026-09-10
 
 ### 修复

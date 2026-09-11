@@ -31,8 +31,16 @@ export interface FilterOutput {
    * 又会被 Web GUI 的 markdown 渲染器当成垃圾（实测 2026-09：泄漏文本里的
    * `$ErrorActionPreference='…'` 被渲染成 KaTeX 行内公式 → 用户看到「一个字符一行 +
    * 弯引号」的乱码）。调用方据此决定「重试」或「给一句人话提示」。
+   *
+   * `reason` 区分失败形态，用于诊断（实测日志只留前 400 字符，看不到后半段的坏点）：
+   *  - `unbalanced`：块没配平/没收全 —— 多半是流被服务端 60s 上限截断，不是模型写错；
+   *  - `unparsable`：块是完整的，但结构不符（漏括号、引号没转义等）；
+   *  - `echo`      ：载荷里裹着转写回声（`[Tool Result for …]` 等）—— 模型在**复述历史**，
+   *                  不是真在调用。此类**必须丢弃**：实测抓到过一个 8152 字符、含 15 条
+   *                  「调用」的载荷，全部是历史回放，执行它等于把旧命令重跑一遍；
+   *  - `oversize`  ：超过捕获上限，放弃。
    */
-  rejected?: { raw: string; mode: 'json' | 'xml' }
+  rejected?: { raw: string; mode: 'json' | 'xml'; reason?: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' }
 }
 
 const MAX_DESCRIPTION_CHARS = 400
@@ -53,8 +61,14 @@ Rules:
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
 5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
+5b. Two things break the JSON most often — check them before you emit:
+   (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
+   (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
 6. Do NOT use XML/HTML-like markup such as <tool_calls>, <invoke>, <parameter>, <|DSML|>, or any fenced variant of them. The JSON object above is the ONLY accepted format; markup text would be shown to the user as broken output instead of running the tool.
-7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).`
+7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
+8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry — measured case: a model emitted 15 replayed calls inside one 8152-char payload, and every one of them had to be thrown away.
+9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
+10. Each call must be able to run on its own: no shared shell variables across calls, no dependence on another call in the same batch.`
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
@@ -225,18 +239,39 @@ const MARKER_RE = /\{\s*"tool_calls?"\s*:/
 /**
  * XML 风格调用标记（实测：思考模式下模型偶尔改用这套标记，形如
  * `<tool_calls><invoke name="read"><parameter name="file_path">…</parameter></invoke></tool_calls>`；
- * 亦兼容 DeepSeek 自家的 `|DSML|` 前缀与 `dsml-` 连字符变体）。
+ * 亦兼容 DeepSeek 自家的 DSML 前缀与 `dsml-` 连字符变体）。
+ *
+ * ⚠️ 2026-09-10 实测泄漏样本（真正的乱码来源）：模型把 DSML 前缀写成**重复的全角竖线**，
+ * 且包裹标签名退化成 `calls`：
+ *   `<` + `｜｜` + `DSML` + `｜｜` + ` ` + `calls>`
+ * 旧写法只容忍单个竖线（`[|｜]`），于是 `<` 后吃掉一个 `｜` 就要求紧跟 `DSML`，
+ * 却撞上第二个 `｜` → 整个标记认不出来 → 不进捕获态 → 原样进正文 → GUI 渲染成乱码。
+ * 现在竖线按 `+` 容忍（含全角/半角混用），并把 `calls` 也列入包裹标签名。
  */
-const XML_STARTER_RE = /<(?:\|\s*DSML\s*\|)?(?:dsml-)?(tool_calls|function_calls|invoke)\b/i
+const DSML_PREFIX = '(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)?'
+const WRAPPER_NAMES = 'tool_calls|tool_call|function_calls|calls'
+const XML_STARTER_RE = new RegExp(`<\\s*${DSML_PREFIX}(?:dsml-)?(${WRAPPER_NAMES}|invoke)\\b`, 'i')
 /** 代码围栏收尾（模型常把调用块放进 ``` 里）。 */
 const FENCE_TAIL_RE = /\n?[ \t]*```[a-zA-Z0-9]*[ \t]*\n?$/
 const FENCE_HEAD_RE = /^[ \t]*\n?```[ \t]*\n?/
 
-/** 归一化 DSML 噪声：`<|DSML|invoke>` / `</|DSML|invoke>` / `<｜DSML｜>` / `<dsml-invoke>` → 标准标签。 */
+/**
+ * 开/收标签前缀（宽容写法）。严格解析与宽容解析**必须共用同一套**，否则会出现
+ * 「findXmlToolCallEnd 认得出收尾、parseXmlToolCalls 认不出 invoke」→ 整块被降级成正文泄漏。
+ * 覆盖：`< invoke`（标签名带空白）、单/重复竖线的 DSML 前缀（含全角）、`<dsml-invoke>`。
+ */
+const TAG_OPEN_PREFIX = `<\\s*${DSML_PREFIX}(?:dsml-)?`
+const TAG_CLOSE_PREFIX = `<\\/\\s*${DSML_PREFIX}(?:dsml-)?`
+const XML_CLOSE_NAMES = `parameter|invoke|${WRAPPER_NAMES}`
+
+/**
+ * 归一化 DSML 噪声 → 标准标签。
+ * 竖线支持**重复与全角**（实测样本是双全角竖线），并连带吃掉其后的空白，
+ * 让标签名紧跟在 `<` 之后（`<` + 前缀 + ` ` + `invoke` → `<invoke`）。
+ */
 function normalizeDsml(text: string): string {
   return text
-    // 开标签与前缀：<|DSML|invoke / <｜DSML｜>invoke / </|DSML|invoke
-    .replace(/<(\/?)\s*[|｜]\s*DSML\s*[|｜]\s*(?=[a-zA-Z_])/gi, '<$1')
+    .replace(new RegExp(`<(/?)${DSML_PREFIX}`, 'gi'), '<$1')
     .replace(/<\s*dsml-/gi, '<')
     .replace(/<\/\s*dsml-/gi, '</')
 }
@@ -250,8 +285,8 @@ function normalizeDsml(text: string): string {
  */
 const JSON_MARKER_STARTERS = ['{"tool_calls"', '{"tool_call"']
 
-/** XML 标记前缀（用于跨包 hold-back 判断）。 */
-const XML_MARKER_STARTERS = ['<tool_calls', '<tool_call', '<function_calls', '<invoke', '<|dsml|tool_calls', '<|dsml|invoke', '<dsml-tool_calls', '<dsml-invoke']
+/** XML 标记前缀（用于跨包 hold-back 判断）。`calls` 是实测出现的退化包裹名。 */
+const XML_MARKER_STARTERS = ['<tool_calls', '<tool_call', '<function_calls', '<calls', '<invoke', '<dsml-tool_calls', '<dsml-invoke']
 
 /**
  * 判断 text 末尾是否是（可能的）标记前缀 —— 决定是否 hold back。
@@ -352,14 +387,87 @@ export function parseJsonLenient(text: string): unknown {
  * 会被 JSON 当成回车，路径被悄悄改坏（实测用户样本 #2）。
  * 若字符串里没有非法转义，则只做保守修补（保留 `\\`、`\"` 等合法转义）。
  */
+/**
+ * 修复「**字符串值里出现未转义的双引号**」——实测最高频的坏法，也是「自动停止」的元凶。
+ *
+ * 实测（2026-09-10 23:27:13，deepseek-reasoner）：命令天然写作
+ *   `Get-ChildItem "$env:USERPROFILE\.dsh" | Select-Object Name`
+ * 模型把这串里的引号**原样**塞进 JSON 字符串 → `Expected ',' or '}' after property value`
+ * → 整条调用被丢弃 → 那一轮没有工具调用 → agent loop 认为回合正常结束
+ * → 用户看到的症状就是「说半句就停了」。
+ *
+ * 判据（对 JSON 语法是稳的）：在字符串内部遇到双引号时，向后跳过空白看一个字符 ——
+ * 只有它还是 `,` `}` `]`（或文本结束）时才说明字符串真的结束；否则该引号是内容里的字面引号。
+ *
+ * ⚠️ 冒号必须**按位置**区别对待：`"` 后面跟 `:` 只在「键的位置」才是结构符。
+ * 若把值里的 `"` + `:` 也当成结束，那么命令内嵌 JSON 时会误判，例如
+ *   `node -e "const o={"a":1}"`
+ * 里的 `"a"` 会被当成字符串收尾 → 后面全部错位 → 整条调用照样被丢弃（我第一版就踩了这个洞）。
+ * 因此这里跟踪「进入字符串时是否处于键位置」（上一结构符是 `{` / `,` / `[`）。
+ */
+export function escapeInnerQuotes(text: string): string {
+  let out = ''
+  let inString = false
+  let keyPosition = false
+  let lastStructural = ''
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (!inString) {
+      if (ch === '"') {
+        inString = true
+        keyPosition = lastStructural === '{' || lastStructural === ',' || lastStructural === '['
+        out += ch
+        continue
+      }
+      if (!' \t\n\r'.includes(ch)) lastStructural = ch
+      out += ch
+      continue
+    }
+    if (ch === '\\') {
+      out += ch + (text[i + 1] ?? '')
+      i += 1
+      continue
+    }
+    if (ch === '"') {
+      let j = i + 1
+      while (j < text.length && ' \t\n\r'.includes(text[j])) j++
+      const next = text[j]
+      // 冒号只有在键位置才是结构符；值里的引号 + 冒号属于内容（内嵌 JSON 的常态）
+      const isStructural =
+        next === ',' || next === '}' || next === ']' || next === undefined || (next === ':' && keyPosition)
+      if (isStructural) {
+        inString = false
+        lastStructural = next === undefined ? '' : next
+        out += ch
+      } else {
+        out += '\\"'
+      }
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+/**
+ * ⚠️ 刻意**不提供**「更激进的猜测」候选（例如把 `"` 后跟 `}` 也一律当内容）。
+ * 试过，结果是灾难：外层键的收尾引号也会被转义 → 整个载荷被搅坏；
+ * 而且即使侥幸解析成功，也可能交出一条**被改坏的命令**并真的执行它。
+ * 嵌套引号（`node -e "console.log({"k":"v"})"`）在原理上无法靠单字符前瞻消歧 ——
+ * 这种极端用例的正确处置是**拒绝 + 重试**（重试后模型通常会改用更简单的写法），
+ * 而不是猜。宁可拒绝，也绝不交出坏命令。
+ */
 export function* jsonRepairCandidates(text: string): Generator<string> {
   const pathTail = (value: string): string => value.replace(/([A-Za-z]:[^"]*?)\\"(?=[,}\]\s])/g, '$1\\\\"')
-  // 先跑转义修复（便宜、覆盖两个实测样本）；再跑结构性修复（少写闭合括号）。
+  // 依次尝试：原样 → 补未转义引号 → 结构性补括号；每种再各跑一遍字符串级修复。
+  // 所有候选都由 JSON.parse 验证，取先成功的那个。
   for (const base of [text, ...structuralRepairCandidates(text)]) {
-    yield repairJsonText(pathTail(base), { mode: 'smart' })
-    yield repairJsonText(base, { mode: 'smart' })
-    yield repairJsonText(pathTail(base), { mode: 'conservative' })
-    yield repairJsonText(base, { mode: 'conservative' })
+    for (const variant of [base, escapeInnerQuotes(base)]) {
+      yield repairJsonText(pathTail(variant), { mode: 'smart' })
+      yield repairJsonText(variant, { mode: 'smart' })
+      yield repairJsonText(pathTail(variant), { mode: 'conservative' })
+      yield repairJsonText(variant, { mode: 'conservative' })
+    }
   }
 }
 
@@ -387,11 +495,25 @@ export function* structuralRepairCandidates(text: string): Generator<string> {
   // 安全闸门：只修补「数组已闭合」的文本（详见上方 JSDoc）
   if (!/^\][\s}\]`]*$/.test(scanned.tail)) return
   const deficits = scanned.chunks.map(braceDeficit)
-  if (deficits.every((value) => value === 0)) return
   const fixed = scanned.chunks.map((chunk, index) =>
     deficits[index] > 0 ? `${chunk.replace(/[\s,]+$/, '')}${'}'.repeat(deficits[index])}` : chunk,
   )
-  yield `${marker[0]}${fixed.join(',')}${scanned.tail}`
+  const repairedInner = deficits.some((value) => value > 0)
+  // 外层对象也常缺最后一个 `}`（`{"tool_calls":[…]` 就此收笔）。
+  // 数组已闭合 = 模型写完了，补外层括号是安全的 —— 这条以前漏了，导致整批调用被丢掉。
+  const [closers, junk] = splitArrayTail(scanned.tail)
+  const needsOuter = !closers.includes('}')
+  const body = `${marker[0]}${fixed.join(',')}`
+  if (repairedInner) yield `${body}]${closers}${junk}`
+  if (repairedInner || needsOuter) yield `${body}]${closers}${needsOuter ? '}' : ''}${junk}`
+}
+
+/** 拆开数组收尾：`]` 之后的 `}`/空白 与更后面的杂质（围栏、多余字符）。 */
+function splitArrayTail(tail: string): [string, string] {
+  const after = tail.replace(/^\]/, '')
+  const match = /^[\s}]*/.exec(after)
+  const closers = match ? match[0] : ''
+  return [closers, after.slice(closers.length)]
 }
 
 /** 按 `,{"name":` 形状把数组内容切成若干个调用元素（字符串感知）。 */
@@ -598,7 +720,7 @@ function parseParameterValue(raw: string): unknown {
  */
 export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
   const text = normalizeDsml(block).replace(FENCE_HEAD_RE, '').replace(/```\s*$/, '')
-  const invokeRe = /<invoke\b([^>]*)>([\s\S]*?)<\/invoke>/gi
+  const invokeRe = new RegExp(`${TAG_OPEN_PREFIX}invoke\\b([^>]*)>([\\s\\S]*?)${TAG_CLOSE_PREFIX}invoke\\s*>`, 'gi')
   const calls: ToolCallRequest[] = []
   let invoke: RegExpExecArray | null
   while ((invoke = invokeRe.exec(text)) !== null) {
@@ -607,7 +729,7 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
     const body = invoke[2]
     const args: Record<string, unknown> = {}
     let sawParam = false
-    const paramRe = /<parameter\b([^>]*)>([\s\S]*?)<\/parameter>/gi
+    const paramRe = new RegExp(`${TAG_OPEN_PREFIX}parameter\\b([^>]*)>([\\s\\S]*?)${TAG_CLOSE_PREFIX}parameter\\s*>`, 'gi')
     let param: RegExpExecArray | null
     while ((param = paramRe.exec(body)) !== null) {
       const key = readAttr(param[1], 'name')
@@ -634,7 +756,113 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
       arguments: JSON.stringify(args),
     })
   }
+  if (calls.length > 0) return calls
+  return salvageXmlToolCalls(text)
+}
+
+/**
+ * 宽容抢救：模型写出的 XML 调用块**收尾不全**时的最后一道网。
+ *
+ * 实测泄漏样本（2026-09，正是「一个字符一行」乱码的来源）：
+ *   `<tool_calls><invoke name="pwsh"><parameter name="command">…</parameter>`
+ * —— 参数值写完了，但**缺内层 `</invoke>`**（流被服务端上限截断时常见）。此时严格解析
+ * 认不出 invoke（它的正则要求 `</invoke>` 收尾），于是整块被当正文吐给用户；
+ * 而 Web GUI 把命令行里的 `$…$` 当 KaTeX 渲染 → 用户看到「一个字符一行 + 弯引号」的乱码。
+ * （注：只缺最外层 `</tool_calls>` 的情形严格解析本来就能兜住，不是泄漏源。）
+ *
+ * 做法：不依赖任何闭合标签，只按「`<invoke name=…>` 开标签 → 下一个开标签或块尾」切段取值。
+ * ⚠️ 只在**严格解析完全失败**时兜底，因此不会抢占正常路径。
+ * 宁可能截断也不要泄漏 —— 截断的调用会在下一轮被模型自己纠正。
+ */
+function salvageXmlToolCalls(text: string): ToolCallRequest[] | null {
+  const invokeStartRe = new RegExp(`${TAG_OPEN_PREFIX}invoke\\b([^>]*)>`, 'gi')
+  const starts: { index: number; attrs: string }[] = []
+  let match: RegExpExecArray | null
+  while ((match = invokeStartRe.exec(text)) !== null) starts.push({ index: match.index, attrs: match[1] })
+  if (starts.length === 0) return null
+
+  const calls: ToolCallRequest[] = []
+  for (let i = 0; i < starts.length; i++) {
+    const name = readAttr(starts[i].attrs, 'name')
+    if (!name) continue
+    const bodyStart = starts[i].index + starts[i].attrs.length
+    // 段落 = 到下一个 invoke 开标签为止；不能按闭合标签切，因为它们可能整段缺失。
+    const nextStart = starts[i + 1]?.index ?? text.length
+    const body = text.slice(bodyStart, nextStart)
+    calls.push({
+      id: `call_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
+      name,
+      arguments: JSON.stringify(salvageXmlParameters(body)),
+    })
+  }
   return calls.length > 0 ? calls : null
+}
+
+/** 从残缺的 invoke 内文里取出参数：按开标签切段，值取到下一个开标签或段尾。 */
+function salvageXmlParameters(body: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  const paramStartRe = new RegExp(`${TAG_OPEN_PREFIX}parameter\\b([^>]*)>`, 'gi')
+  const found: { start: number; end: number; key: string }[] = []
+  let match: RegExpExecArray | null
+  while ((match = paramStartRe.exec(body)) !== null) {
+    const key = readAttr(match[1], 'name')
+    if (key) found.push({ start: match.index, end: paramStartRe.lastIndex, key })
+  }
+  for (let i = 0; i < found.length; i++) {
+    // 值 = 本参数开标签之后 → 下一个参数开标签之前（或段尾）
+    // 按**开标签位置**切段而不是按 `</parameter>`：收尾标签可能整段缺失。
+    const valueEnd = found[i + 1] ? found[i + 1].start : body.length
+    // 值尾部残留的 `</parameter>` / `</invoke>` / `</tool_calls>` 一律剥掉
+    args[found[i].key] = parseParameterValue(stripXmlClosers(body.slice(found[i].end, valueEnd)))
+  }
+  if (found.length === 0) {
+    const inner = stripXmlClosers(body).trim()
+    if (inner) {
+      const parsed = parseJsonLenient(inner)
+      if (parsed && typeof parsed === 'object') Object.assign(args, parsed as Record<string, unknown>)
+      else args._raw = inner
+    }
+  }
+  return args
+}
+
+/** 剥掉值尾部残留的收尾标签与空白。 */
+function stripXmlClosers(value: string): string {
+  const re = new RegExp(`(?:\\s*${TAG_CLOSE_PREFIX}(?:${XML_CLOSE_NAMES})\\s*>)+\\s*$`, 'i')
+  return value.replace(re, '')
+}
+
+/**
+ * 判断捕获到的协议块是否**确实是一次工具调用尝试**（而不是正文里恰好提到了 `<invoke>` 这类词）。
+ * 只用于「解析失败时该丢弃还是该透出」的裁决：
+ *  - 像调用 → 丢弃 + 告警（绝不泄漏成乱码，交给上层重试）
+ *  - 不像调用 → 当普通正文透出（绝不吞掉模型正文）
+ */
+function looksLikeToolCallBlock(mode: 'json' | 'xml', raw: string): boolean {
+  if (mode === 'json') return MARKER_RE.test(raw)
+  const text = normalizeDsml(raw)
+  // 带 name 属性的 invoke/parameter 开标签 = 真的在尝试调用。
+  // 注意：系统提示词讲协议时只写 `<invoke>` / `<parameter>`（无 name=），因此不会被误判。
+  return (
+    new RegExp(`${TAG_OPEN_PREFIX}invoke\\b[^>]*\\bname\\s*=`, 'i').test(text) ||
+    new RegExp(`${TAG_OPEN_PREFIX}parameter\\b[^>]*\\bname\\s*=`, 'i').test(text)
+  )
+}
+
+/**
+ * 分类失败形态，用于诊断 —— 日志只保留前 400 字符，看不到后半段的坏点，
+ * 所以必须把「没收全」与「收全了但结构不对」分开，否则永远在猜。
+ *
+ *  - `unbalanced`：块没配平/没收全 —— 多半是流被服务端 60s 上限截断，不是模型写错；
+ *  - `unparsable`：块是完整的，但结构不符（漏括号、引号没转义、形状不对）；
+ *  - `echo`      ：载荷里裹着转写回声（模型在回放历史，不是在调用）。
+ */
+function classifyFailure(mode: 'json' | 'xml', raw: string): 'unbalanced' | 'unparsable' | 'echo' {
+  // 最先判回声：实测抓到的 8152 字符载荷里有 15 条「调用」，命令串内裹着
+  // `[Tool Result for call_…]` / `[Truncated]` —— 那是历史回放，执行它等于重跑旧命令。
+  if (/\[\s*Tool Result\b/i.test(raw)) return 'echo'
+  if (mode === 'json') return extractBalancedJson(raw.replace(FENCE_HEAD_RE, '')) ? 'unparsable' : 'unbalanced'
+  return findXmlToolCallEnd(raw) === -1 ? 'unbalanced' : 'unparsable'
 }
 
 /** 把解析出的 JSON 转成工具调用请求；非协议形状返回 null。 */
@@ -670,6 +898,22 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
 }
 
 /**
+ * 流尾兜底的 JSON 抢救（比 parseToolCallJson 多退一步）。
+ *
+ * 捕获缓冲里可能带着捕获后残留的多余字符（围栏、正文），此时整段 `JSON.parse` 必然失败，
+ * 但**配平的前缀本身是好的调用** —— 取前缀再解析，别把能救的调用整批丢掉。
+ * 注意：不配平的截断仍由 structuralRepairCandidates 的安全闸门拒绝（宁可不执行半条命令）。
+ */
+function parseSalvagedToolCallJson(buffer: string): ToolCallRequest[] | null {
+  const text = buffer.replace(FENCE_HEAD_RE, '')
+  const direct = parseToolCallJson(text)
+  if (direct) return direct
+  const balanced = extractBalancedJson(text)
+  if (balanced && balanced.end < text.length) return parseToolCallJson(balanced.json)
+  return null
+}
+
+/**
  * 在捕获缓冲里找 XML 调用块的结束位置（含结束标签）。
  * - 包裹式（`<tool_calls>` / `<function_calls>`）：找对应闭合标签
  * - 裸 `<invoke>`：找到 `</invoke>` 后继续吞并紧随其后的 invoke 块（同一批调用）
@@ -677,13 +921,14 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
  */
 export function findXmlToolCallEnd(buffer: string): number {
   const text = buffer
-  const wrapper = /<\s*(?:\|\s*DSML\s*\|\s*)?(?:dsml-)?(tool_calls|function_calls)\b/i.exec(text)
+  const wrapper = new RegExp(`<\\s*${DSML_PREFIX}(?:dsml-)?(${WRAPPER_NAMES})\\b`, 'i').exec(text)
   const startsWithWrapper = wrapper !== null && wrapper.index === 0
-  const isInvokeStart = (value: string): boolean => /^\s*<\s*(?:\|\s*DSML\s*\|\s*)?(?:dsml-)?invoke\b/i.test(value)
+  const isInvokeStart = (value: string): boolean =>
+    new RegExp(`^\\s*<\\s*${DSML_PREFIX}(?:dsml-)?invoke\\b`, 'i').test(value)
 
   if (startsWithWrapper) {
     const tag = wrapper![1].toLowerCase()
-    const closeRe = new RegExp(`</\\s*(?:\\|\\s*DSML\\s*\\|\\s*)?(?:dsml-)?${tag}\\s*>`, 'i')
+    const closeRe = new RegExp(`<\\/\\s*${DSML_PREFIX}(?:dsml-)?${tag}\\s*>`, 'i')
     const match = closeRe.exec(text)
     return match ? match.index + match[0].length : -1
   }
@@ -734,12 +979,14 @@ export class ToolCallStreamFilter {
   flush(): FilterOutput {
     const out: FilterOutput = { text: '', calls: [] }
     if (this.capture) {
-      // 流结束时仍未收全：先尝试宽容解析（转义修复 + 结构性补括号）。
+      // 流结束时仍未收全：先尝试宽容解析（转义修复 + 结构性补括号 + 缺闭合标签抢救）。
       const captured = this.capture
-      const calls = captured.mode === 'xml' ? parseXmlToolCalls(captured.buffer) : parseToolCallJson(captured.buffer.replace(FENCE_HEAD_RE, ''))
+      const calls =
+        captured.mode === 'xml' ? parseXmlToolCalls(captured.buffer) : parseSalvagedToolCallJson(captured.buffer)
       if (calls) out.calls.push(...calls)
-      else if (captured.mode === 'json') this.abandoned ??= { raw: captured.buffer, mode: 'json' }
-      else out.text += captured.buffer // XML 兜底仍按正文透出（`<invoke>` 也可能只是正文里的一句话）
+      else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
+        this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
+      else out.text += captured.buffer // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出
       this.capture = null
     }
     out.text += this.pending
@@ -756,7 +1003,10 @@ export class ToolCallStreamFilter {
           const end = findXmlToolCallEnd(captured.buffer)
           if (end === -1) {
             if (captured.buffer.length > MAX_CAPTURE_CHARS) {
-              out.text += captured.buffer
+              // 超长仍未收全：是调用就丢弃（不吐乱码），只是正文提及则照常透出
+              if (looksLikeToolCallBlock('xml', captured.buffer))
+                this.abandoned ??= { raw: captured.buffer, mode: 'xml', reason: 'oversize' }
+              else out.text += captured.buffer
               this.capture = null
               continue
             }
@@ -765,6 +1015,7 @@ export class ToolCallStreamFilter {
           const block = captured.buffer.slice(0, end)
           const calls = parseXmlToolCalls(block)
           if (calls) out.calls.push(...calls)
+          else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
           else out.text += block
           this.capture = null
           this.pending = captured.buffer.slice(end).replace(FENCE_HEAD_RE, '') + this.pending
@@ -774,7 +1025,7 @@ export class ToolCallStreamFilter {
         if (!balanced) {
           if (captured.buffer.length > MAX_CAPTURE_CHARS) {
             // 超过上限仍没配平：放弃，但**不吐成正文**（那是乱码，不是回答）
-            this.abandoned ??= { raw: captured.buffer, mode: 'json' }
+            this.abandoned ??= { raw: captured.buffer, mode: 'json', reason: 'oversize' }
             this.capture = null
             continue
           }
@@ -788,8 +1039,11 @@ export class ToolCallStreamFilter {
           this.pending = captured.buffer.slice(balanced.end).replace(FENCE_HEAD_RE, '') + this.pending
           continue
         }
-        // 形状不符：当普通正文（不吞掉模型正文）
-        out.text += captured.buffer.slice(0, balanced.end)
+        // 形状不符：能进到捕获态就说明 MARKER_RE 命中过（`{"tool_calls":`），
+        // 因此这是**坏掉的调用**而不是正文 → 丢弃 + 告警（泄漏成正文才是真正的乱码来源）。
+        const head = captured.buffer.slice(0, balanced.end)
+        if (looksLikeToolCallBlock('json', head)) this.abandoned ??= { raw: head, mode: 'json', reason: 'unparsable' }
+        else out.text += head
         this.capture = null
         this.pending = captured.buffer.slice(balanced.end) + this.pending
         continue
@@ -824,5 +1078,120 @@ export class ToolCallStreamFilter {
       this.pending = ''
       return
     }
+  }
+}
+
+// ── 转写回声守卫 ──────────────────────────────────────────
+
+/**
+ * 转写格式标记 —— 也就是 `serializePrompt` 写进 prompt 的那套行首标记。
+ *
+ * 模型会**照着 prompt 里的转写格式模仿**，把工具结果 / 系统标记当回答吐出来。
+ * 这与「工具调用标记泄漏」是**两个独立的泄漏源**：`ToolCallStreamFilter` 只防后者。
+ *
+ * 实测（2026-09-10，deepseek-web / deepseek-reasoner）可见正文里出现：
+ *   `[Tool Result for call_xxx]` + 真实工具输出 + `[status: running]`
+ * 以及成串的 `User: …` / `Assistant: …` 转写行。
+ */
+const ECHO_SIGNATURES: readonly RegExp[] = [
+  /^\[\s*Tool Result\b/i,
+  /^\[\s*status\s*:\s*[a-z_]+\s*\]$/i,
+  /^\[\s*(?:System|Assistant)\s*\]$/i,
+]
+/** 转写轮次行：单行可能只是正文，成串出现才是回声。 */
+const ECHO_TURN_RE = /^(?:User|Assistant)\s*:/
+
+/** 回声标记的**半截前缀**（流在行中间被截断时出现）——同样是垃圾，不能上屏。 */
+const ECHO_PREFIXES = ['[tool result', '[status:', '[system]', '[assistant]']
+
+/** 该行是否是某个回声标记的开头片段。 */
+function looksLikeEchoPrefix(line: string): boolean {
+  const t = line.trim().toLowerCase()
+  return t.length > 0 && ECHO_PREFIXES.some((p) => p.startsWith(t))
+}
+
+/**
+ * 逐行守卫：命中回声特征后，**从该行起全部丢弃**。
+ *
+ * 为什么这样设计：
+ *  - 回声几乎总出现在末尾（模型在「续写转写」），前面才是真回答 → 截断比整段丢弃更保内容；
+ *  - 围栏代码块内不判定 —— 正常回答里也可能引用这些标记（比如讨论本插件时）；
+ *  - 逐行缓冲、保留末尾未完成的半行 → 流式下也不会先把垃圾推给用户再吞回去。
+ */
+export class TranscriptEchoGuard {
+  private pending = ''
+  private inFence = false
+  /** 已扣住、尚未判定的一行转写轮次行（等下一行决定它是回声还是正文）。 */
+  private turnCandidate: string | null = null
+  private fired = false
+
+  /**
+   * @returns `text` = 可以安全上屏的部分；`echoed` = 本轮是否出现过回声（那部分已被丢弃）。
+   */
+  push(text: string): { text: string; echoed: boolean } {
+    if (this.fired) return { text: '', echoed: true }
+    this.pending += text
+    let out = ''
+    for (;;) {
+      const nl = this.pending.indexOf('\n')
+      if (nl === -1) break
+      const line = this.pending.slice(0, nl + 1)
+      this.pending = this.pending.slice(nl + 1)
+      const verdict = this.classify(line)
+      if (verdict === 'echo') {
+        this.fired = true
+        this.pending = ''
+        this.turnCandidate = null
+        return { text: out, echoed: true }
+      }
+      if (verdict === 'turn') {
+        // 转写轮次行：单行可能是正常正文，**先扣住**，等下一行判定（否则第一行会先泄漏上屏）
+        if (this.turnCandidate !== null) {
+          this.fired = true
+          this.pending = ''
+          this.turnCandidate = null
+          return { text: out, echoed: true }
+        }
+        this.turnCandidate = line
+        continue
+      }
+      // 普通行/围栏行：只有在这一行**非空白**时，才说明扣住的那行只是正文里的 `User:` 字样 → 放行
+      if (this.turnCandidate !== null && line.trim() !== '') {
+        out += this.turnCandidate
+        this.turnCandidate = null
+      }
+      out += line
+    }
+    return { text: out, echoed: false }
+  }
+
+  flush(): { text: string; echoed: boolean } {
+    if (this.fired) return { text: '', echoed: true }
+    let out = ''
+    // 只有孤零零一行轮次行 → 判定为正文，放行
+    if (this.turnCandidate !== null) {
+      out += this.turnCandidate
+      this.turnCandidate = null
+    }
+    const rest = this.pending
+    this.pending = ''
+    // 流在行中间断掉：完整的回声判不出来，但半截标记前缀同样是垃圾，一律丢弃
+    if (rest && (this.classify(rest) === 'echo' || looksLikeEchoPrefix(rest))) {
+      this.fired = true
+      return { text: out, echoed: true }
+    }
+    return { text: out + rest, echoed: false }
+  }
+
+  private classify(line: string): 'echo' | 'turn' | 'fence' | 'plain' {
+    const t = line.trim()
+    if (t.startsWith('```') || t.startsWith('~~~')) {
+      this.inFence = !this.inFence
+      return 'fence'
+    }
+    if (this.inFence) return 'plain'
+    for (const re of ECHO_SIGNATURES) if (re.test(t)) return 'echo'
+    if (ECHO_TURN_RE.test(t)) return 'turn'
+    return 'plain'
   }
 }

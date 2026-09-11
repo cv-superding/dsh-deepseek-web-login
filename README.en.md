@@ -7,7 +7,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#models)
-[![Tests](https://img.shields.io/badge/tests-46%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
+[![Tests](https://img.shields.io/badge/tests-83%20assertions-10b981?style=flat-square&labelColor=0b1220)](#testing)
+[![CI](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg)](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#disclaimer)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#contributing)
@@ -80,14 +81,18 @@ The plugin therefore exposes two entries — which are **not two models** but tw
 | `deepseek-chat` | off | tool calls, rewriting, retrieval — fastest, cheapest |
 | `deepseek-reasoner` | on | math, multi-step debugging, planning — reasons first (streamed as thinking blocks) |
 
-Context: the server declares `normal_history_and_file_token_limit = 890880` (1M minus an output reserve) and
-`input_character_limit = 2621440` characters per request.
+Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?scope=model`, configVersion 81):
+
+- Hard per-request input cap: `input_character_limit = 2621440` characters (≈2.5 MiB)
+- Attachment (`file_feature`) token budget: `token_limit = 890880` — **this is not the context window**.
+  It was once mistaken for one (890880 = 870×1024, so a ÷1024 display reads "870K"). The server exposes no
+  total-context field, so `contextWindow` is set to the advertised 1M (`1048576`).
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
-| `maxPromptChars` | `1200000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
+| `maxPromptChars` | `1500000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
 
@@ -102,15 +107,21 @@ Context: the server declares `normal_history_and_file_token_limit = 890880` (1M 
 ## Testing
 
 ```bash
-node tests/logic-test.mjs            # 46 pure-logic assertions
+node tests/logic-test.mjs            # 83 assertions across 5 files
 node tests/probe-live.mjs            # raw SSE event stream + timings (--big=N for long prompts)
 node tests/probe-xml-live.mjs        # XML-marker scenario against the live model
 node tests/probe-vision.mjs          # image channel (generates a red/blue PNG, uploads it, asks)
+node tests/probe-batch-live.mjs     # live repro of incident #4 (deep thinking + a batch of 3 commands with $env:/Windows paths)
+node tools/changelog-section.mjs 0.1.3  # print one CHANGELOG section (reused by the release workflow)
 node tests/check-bundle.mjs          # verify every fix made it into lib/
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed
 to parse and leaked into the answer as text. It must now parse, with the path restored verbatim.
+
+CI (`.github/workflows/ci.yml`) runs both commands on every push to `main` and every PR; pushing a `v*` tag
+makes `.github/workflows/release.yml` create the GitHub Release and attach the tarball, using the repository token
+(so a maintainer never needs a personal token).
 
 Another real incident: the model omitted the closing brace of each call object in a batch of three, so the
 whole `{"tool_calls":[…]}` block leaked into the answer. The filter now closes such braces structurally —

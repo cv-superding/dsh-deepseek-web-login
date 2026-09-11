@@ -8,7 +8,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&labelColor=0b1220)](LICENSE)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&labelColor=0b1220)](https://github.com/deepseek-ai/deepseek-harness)
 [![Provider](https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&labelColor=0b1220)](#模型档位)
-[![Tests](https://img.shields.io/badge/tests-46%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![Tests](https://img.shields.io/badge/tests-83%20assertions-10b981?style=flat-square&labelColor=0b1220)](#测试与验证)
+[![CI](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg)](https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&labelColor=0b1220&color=f59e0b)](https://github.com/cv-superding/dsh-deepseek-web-login/releases)
 [![Status](https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&labelColor=0b1220)](#免责声明)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&labelColor=0b1220)](#贡献)
@@ -118,8 +119,15 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 同一档位内也可用**推理强度**（Off/High）切换；历史里的 `deepseek-pro` / `deepseek-expert` / `deepseek-vision`
 会按别名回退到快速模式，不报错。
 
-**容量**：服务器声明 `normal_history_and_file_token_limit = 890880`（1M 总量扣输出预留）、
-单请求 `input_character_limit = 2621440` 字符。本插件 contextWindow 声明 890880，
+**容量**（2026-09-11 逐字段核对 `GET /api/v0/client/settings?scope=model`，configVersion 81）：
+
+- 单请求输入**硬上限**：`input_character_limit = 2621440` 字符（≈2.5 MiB 字符）
+- 附件（file_feature）token 预算：`token_limit = 890880`（开不开思考都一样）
+  —— ⚠️ 这个数字**不是上下文窗口**。曾经把它当上下文窗口写进代码与文档（还写成「1M 扣输出预留」），
+  而 890880 = 870×1024，面板一按 ÷1024 显示就成了「870K」，看起来像「说好的 1M 缩水成 870K」。
+- 上下文窗口：服务端没有这个字段，按 DeepSeek 标称的 **1M** 取 `1048576`（服务端自己的数字都是 1024 的整数倍）
+
+本插件 contextWindow 声明 1048576，
 prompt 字符上限默认 1,200,000（可配）。
 
 ## 配置
@@ -128,7 +136,7 @@ prompt 字符上限默认 1,200,000（可配）。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `maxPromptChars` | `1200000` | 送出 prompt 的字符上限（超出走中段截断：保系统提示+工具协议与最近回合） |
+| `maxPromptChars` | `1500000` | 送出 prompt 的字符上限（超出走中段截断：保系统提示+工具协议与最近回合） |
 | `idleTimeoutMs` | `120000` | SSE 空闲超时 |
 | `deleteWebSessions` | `true` | 调用后删除临时网页端会话 |
 
@@ -145,13 +153,18 @@ prompt 字符上限默认 1,200,000（可配）。
 ## 测试与验证
 
 ```bash
-node tests/logic-test.mjs            # 46 项纯逻辑断言（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/logic-test.mjs            # 83 项断言（5 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
 node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
 node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
 node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）
+node tests/probe-batch-live.mjs     # 线上复现事故 #4 的触发条件（深度思考 + 批量 3 条带 $env:/Windows 路径的命令）
+node tools/changelog-section.mjs    # 从 CHANGELOG 取某版本段落（发布流程复用）
 node tests/check-bundle.mjs          # 产物核对（关键修复是否都进了 lib）
 node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 ```
+
+CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个 PR 上跑上面两条命令；
+打 `v*` tag 由 `.github/workflows/release.yml` 自动创建 Release 并附上 tgz（用仓库自带的 token，维护者无需持有个人令牌）。
 
 多条断言直接固化自**真实事故现场**：
 
@@ -162,6 +175,10 @@ node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
   → 现在用**真实会话日志的分块序列**回归（见 `CHANGELOG.md` 0.1.2）
 - 模型漏写调用对象的闭合括号（批量调用时每个少一个 `}`），曾让整段调用 JSON 泄漏成正文
   → 现在结构性补括号（**仅当数组已闭合**，被截断的流绝不补）+ 解析失败不再吐成正文（见 `CHANGELOG.md` 0.1.3）
+- 会话被自己提前删除（建会话后立刻排定 1.5s 后删除 → PoW+建连超时就删掉了正在用的会话）
+  → 现在删除只发生在流结束之后；会话失效还会换新会话透明重试（见 `CHANGELOG.md` 0.1.4）
+- `envelopeError` 只看外层 `code`，把 `data.biz_code` 里的真实错误吞掉（`invalid chat session id` / `user is muted` 都被降级成看不懂的「非流式响应」）
+  → 现在识别 `biz_code`，并区分「可恢复」「需等待」「重试没用」三类（见 `CHANGELOG.md` 0.1.4）
 
 ## 故障排查
 
@@ -189,7 +206,7 @@ node tools/inspect-session.mjs --search "关键词" # 按关键词找会话
 它只读本机会话日志（不联网、不上传）。典型输出：
 
 ```text
-[14:04:01] 模型: deepseek-web/deepseek-chat  ctx=890880
+[14:04:01] 模型: deepseek-web/deepseek-chat  ctx=1048576
 [14:04:01] 分块原文(文本): ["I'll check what plugins exist"," for this in the DSH ecosystem",
                            ", and also look at the current"," GUI's capabilities.\n\n{\"tool",
                            "_calls\":[{\"name\":\"find_dsh", ...]
