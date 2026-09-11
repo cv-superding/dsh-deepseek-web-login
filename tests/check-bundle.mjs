@@ -28,6 +28,8 @@ const checks = {
   '安全闸门（截断在字符串中间不修补）': host.includes('仍在字符串内'),
   'arguments 数组解包': host.includes('Array.isArray(args) && args.length === 1'),
   '转写回声守卫（TranscriptEchoGuard）': host.includes('TranscriptEchoGuard'),
+  '网页端免责声明剥离（BoilerplateFilter）': host.includes('BoilerplateFilter') && host.includes('本回答由 AI 生成'),
+  '三层缓冲按流水线反序吐净 + 轮末补剥声明（drainTextPipeline）': host.includes('drainTextPipeline') && host.includes('tailGuarded.text + tailBoiled.text + tail.text'),
   'DSML 重复/全角竖线': host.includes('DSML_PREFIX'),
   '会话删除排在流结束之后': host.includes('流结束之后') && host.includes('onDeleteSession'),
   '会话失效透明重试': host.includes('isInvalidSessionError'),

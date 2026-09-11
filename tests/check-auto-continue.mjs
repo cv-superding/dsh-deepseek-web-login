@@ -39,6 +39,18 @@ function fakeStream(parts, finishKind = 'stop') {
   }
 }
 
+/**
+ * 假流：流结束了但**没有** FINISHED 标记 = 被服务端切断。
+ * 生产里 webapi 的 finish 事件带的是 `reason: pendingFinish`，没收到 `response/status: FINISHED`
+ * 时它就是 undefined —— 注意不能用 fakeStream(parts, undefined)，默认参数会补成 'stop'。
+ */
+function cutStream(parts) {
+  return async function* () {
+    for (const text of parts) yield { kind: 'text', text }
+    yield { kind: 'finish' }
+  }
+}
+
 /** 跑一次适配器流，收集输出块 */
 async function run(depsOverrides, streams) {
   const calls = []
@@ -170,6 +182,62 @@ await test('续写轮次失败 → 保留已输出部分并报 stop（不让整�
   assert.equal(blocks[0], '前半句', '已输出部分保留')
   assert.equal(finish?.kind, 'stop', '报 stop（不显示截断提示）')
   delete globalThis.__callCount
+})
+
+await test('流没收到 FINISHED（服务端切断）→ 即使尾部像收尾也续写', async () => {
+  const { calls, blocks, finish } = await run(
+    {},
+    [
+      cutStream(['这是被服务端切掉的一段，结尾正好是句号。']),
+      fakeStream(['补上的后半段。'], 'FINISHED'),
+    ],
+  )
+  assert.equal(calls.length, 2, '没收到 FINISHED = 被截断，必须继续写')
+  assert.equal(blocks[0], '这是被服务端切掉的一段，结尾正好是句号。补上的后半段。')
+  assert.equal(finish?.kind, 'stop')
+})
+
+await test('尾部是反引号（句末判据看不出的截断）也能续写 —— 否则静默少一段', async () => {
+  const { calls } = await run(
+    {},
+    [
+      cutStream(['要我直接开跑 `dev_plugin_status` 和 `']),
+      fakeStream(['`dev_plugin_job_list`。'], 'FINISHED'),
+    ],
+  )
+  assert.equal(calls.length, 2, '旧版这里判据返回 false → 静默截断，用户只看到「和 `」就没了')
+})
+
+await test('正常收尾（收到 FINISHED + 句号结尾）不续写 —— 别把正常轮当截断', async () => {
+  const { calls, finish } = await run({}, [fakeStream(['完整回答。'], 'FINISHED')])
+  assert.equal(calls.length, 1, '收到 FINISHED 且尾部是句末标点 → 不该多发请求')
+  assert.equal(finish?.kind, 'stop')
+})
+
+await test('轮末带网页端免责声明 → 不算句中截断，不续写；声明也不上屏', async () => {
+  const DISCLAIMER = '本回答由 AI 生成，内容仅供参考，请仔细甄别'
+  const { calls, blocks, finish } = await run(
+    {},
+    [fakeStream([`这是完整回答。\n\n${DISCLAIMER}`], 'FINISHED')],
+  )
+  assert.equal(calls.length, 1, '声明以「甄别」结尾 → 旧版必然误判句中、白跑一轮（甚至两轮）')
+  assert.ok(!blocks[0].includes('本回答由'), `声明必须剥掉: ${JSON.stringify(blocks[0])}`)
+  assert.equal(blocks[0], '这是完整回答。\n\n')
+  assert.equal(finish?.kind, 'stop')
+})
+
+await test('续写轮也带声明 → 两处都不上屏，最终正文干净', async () => {
+  const DISCLAIMER = '本回答由 AI 生成，内容仅供参考，请仔细甄别'
+  const { calls, blocks } = await run(
+    {},
+    [
+      cutStream([`前半段没写完`, DISCLAIMER]),
+      fakeStream(['后半段写完了。', DISCLAIMER], 'FINISHED'),
+    ],
+  )
+  assert.equal(calls.length, 2)
+  assert.ok(!blocks[0].includes('本回答由'), `实际: ${JSON.stringify(blocks[0])}`)
+  assert.equal(blocks[0], '前半段没写完后半段写完了。')
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

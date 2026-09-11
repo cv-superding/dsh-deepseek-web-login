@@ -1142,6 +1142,117 @@ export function stripSystemMarkers(text: string): { text: string; stripped: bool
   return { text: out, stripped }
 }
 
+// ── 网页端免责声明剥离 ────────────────────────────────────
+
+/**
+ * DeepSeek 网页端在**每一轮回复末尾**自动追加的免责声明（不是模型回答的一部分）。
+ *
+ * 实测（2026-09-11，27 个 DSH 会话里命中 43 处，形态唯一）：
+ *   `本回答由 AI 生成，内容仅供参考，请仔细甄别`
+ * 它会以 SSE 增量形式到达，甚至被拆成「 AI」「 生成」「，」「内容」这样的小包。
+ *
+ * 为什么必须剥掉：
+ *   - 它卡在两条回答中间（自动续写的缝就在它后面），用户会以为「模型怎么突然插了这句话」；
+ *   - 结尾是「甄别」这种汉字 → `looksMidSentence` 恒为真 → **每一轮都被误判成「句中被截」**，
+ *     于是无限触发自动续写（续写轮又追加一遍声明，再被判成截断……）。
+ */
+const WEB_DISCLAIMER = '本回答由 AI 生成，内容仅供参考，请仔细甄别'
+
+/**
+ * 一次性剥离网页端免责声明（非流式）。
+ *
+ * 轮末残余必须用它再过一遍：`BoilerplateFilter` 的流式扣留只管它**收到**的文本，
+ * 而过滤器扣住的最后 ≤24 个字符还没经过它 —— 声明恰好 23 字，实测就整段从尾巴漏出去
+ * （会话 `6c0dbc47` 里它是一个只有单个 delta 的独立 text 块，跟在工具调用后面）。
+ */
+export function stripWebDisclaimer(text: string): { text: string; stripped: boolean } {
+  if (!text.includes(WEB_DISCLAIMER)) return { text, stripped: false }
+  return { text: text.split(WEB_DISCLAIMER).join(''), stripped: true }
+}
+
+/**
+ * 轮末收尾：把三层缓冲扣住的残余按**真实顺序**吐净，并补跑只作用于上屏前的两道清理。
+ *
+ * ⚠️ 为什么不能只把三层 flush 结果拼起来：
+ *   - 吐净顺序必须是流水线**反序**（越深的层扣住的文本越早）—— 否则最后几段文字前后颠倒；
+ *   - 浅层（过滤器）扣住的字符**从没经过**「剥声明」这一层，而声明就爱待在最后几个字符里；
+ *   - 同理，伪系统标记也可能整段藏在尾巴里。
+ * 轮末没有后续输入了，所以这里可以直接做一次性替换，不需要流式扣留。
+ */
+export function drainTextPipeline(
+  filter: ToolCallStreamFilter,
+  boilerplate: BoilerplateFilter,
+  guard: TranscriptEchoGuard,
+): {
+  text: string
+  echoed: boolean
+  disclaimers: number
+  calls: FilterOutput['calls']
+  rejected: FilterOutput['rejected']
+} {
+  const tailGuarded = guard.flush()
+  const tailBoiled = boilerplate.flush()
+  const tail = filter.flush()
+  const raw = tailGuarded.text + tailBoiled.text + tail.text
+  const dedisclaimered = stripWebDisclaimer(raw)
+  const cleaned = stripSystemMarkers(dedisclaimered.text)
+  return {
+    text: cleaned.text,
+    echoed: tailGuarded.echoed,
+    disclaimers: boilerplate.count + (dedisclaimered.stripped ? 1 : 0),
+    calls: tail.calls,
+    rejected: tail.rejected,
+  }
+}
+
+/**
+ * 流式剥离网页端免责声明。
+ *
+ * 逐包调用：命中即整段丢弃。
+ *
+ * ⚠️ 扣留策略必须是「**恒定扣住最后 |声明|-1 个字符**」，不能只扣「声明的前缀」：
+ * 声明会被 SSE 切成任意小包（实测有「 AI」「 生成」「，」「内容」这种），
+ * 一旦切点落在声明中间，前半截已经不是「前缀」了 —— 只扣前缀就会把它放出去，
+ * 后半截到齐时再也拼不回来（2026-09-11 实测漏过一次）。
+ * 扣 22 个字符的代价是上屏延迟 22 字，肉眼不可见。
+ */
+export class BoilerplateFilter {
+  private pending = ''
+  private hits = 0
+  private stripped = false
+  private readonly holdChars = WEB_DISCLAIMER.length - 1
+
+  push(text: string): { text: string; stripped: boolean } {
+    this.pending += text
+    let out = ''
+    for (;;) {
+      const at = this.pending.indexOf(WEB_DISCLAIMER)
+      if (at !== -1) {
+        out += this.pending.slice(0, at)
+        this.pending = this.pending.slice(at + WEB_DISCLAIMER.length)
+        this.hits += 1
+        this.stripped = true
+        continue
+      }
+      const hold = Math.min(this.pending.length, this.holdChars)
+      out += this.pending.slice(0, this.pending.length - hold)
+      this.pending = this.pending.slice(this.pending.length - hold)
+      return { text: out, stripped: this.stripped }
+    }
+  }
+
+  flush(): { text: string; stripped: boolean } {
+    const rest = this.pending
+    this.pending = ''
+    return { text: rest, stripped: this.stripped }
+  }
+
+  /** 本次流剥掉了几处声明（用于留痕）。 */
+  get count(): number {
+    return this.hits
+  }
+}
+
 /**
  * 转写格式标记 —— 也就是 `serializePrompt` 写进 prompt 的那套行首标记。
  *

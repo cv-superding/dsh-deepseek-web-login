@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
-import { collectImageRefs, serializePrompt, stripSystemMarkers, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, serializePrompt, stripSystemMarkers, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -396,6 +396,8 @@ export function createAdapter(deps: AdapterDeps) {
     // 第二道网：模型会模仿 prompt 里的转写格式（`[Tool Result for …]` / `User:` / `Assistant:`…），
     // 把「对话转写」当回答吐出来。这与工具调用标记泄漏是两个独立来源，必须分开防。
     let echoGuard = new TranscriptEchoGuard()
+    // 第四道网：网页端每轮末尾的免责声明（`本回答由 AI 生成…`）不是回答内容，必须剥掉。
+    let boilerplate = new BoilerplateFilter()
 
     let nextIndex = 0
     let textBlock: { index: number; text: string } | null = null
@@ -408,6 +410,8 @@ export function createAdapter(deps: AdapterDeps) {
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
     let echoedTranscript = false
     let systemMarkersStripped = false
+    /** 本轮是否剥掉了网页端免责声明（`本回答由 AI 生成…`）。 */
+    let disclaimerStripped = false
 
     const openText = (): { index: number; text: string } => {
       if (!textBlock) textBlock = { index: nextIndex++, text: '' }
@@ -439,8 +443,16 @@ export function createAdapter(deps: AdapterDeps) {
       // 并把续写内容无缝拼进同一条回答 —— 等价于用户手动说「继续」，但无需用户参与。
       let rounds = 0
       let currentPrompt = prompt
+      /** 本轮开始前已累计的正文长度（用来量出「这一轮到底吐了多少字」）。 */
+      let textLenAtRoundStart = 0
+      /** 本轮开始的时刻（用来量出「这一轮到底跑了多久」）。 */
+      let roundStartedAt = Date.now()
       for (;;) {
         let roundError: AdapterLlmError | undefined
+        // 每轮重置：finish 标记只反映**本轮**流，累积值会把上一轮的 FINISHED 带进来。
+        finishReason = undefined
+        textLenAtRoundStart = textBlock?.text?.length ?? 0
+        roundStartedAt = Date.now()
         try {
       for await (const event of runStream(auth as WebAuth, {
         prompt: currentPrompt,
@@ -465,7 +477,11 @@ export function createAdapter(deps: AdapterDeps) {
         }
         if (event.kind === 'text') {
           const out = filter.push(event.text)
-          const guarded = echoGuard.push(out.text)
+          // 第四道网：网页端每轮末尾自动追加的免责声明（不是模型回答）。
+          // ⚠️ 必须排在回声守卫**之前**：守卫会扣住「最后一个换行之后」的整行（说明它常在那里），
+          // 放到守卫后面就永远看不到被扣住的那行 —— 声明照旧上屏，还会让句中判据每轮误触发。
+          const boiled = boilerplate.push(out.text)
+          const guarded = echoGuard.push(boiled.text)
           if (guarded.echoed) echoedTranscript = true
           // 第三道网：模型偶尔吐出成串的伪系统标记（<ds_system>…</ds_system> / <system>…</system>），
           // 实测一条消息里出现过 13 个编造调用 ID 的 <ds_system>Tool result…，全是垃圾，必须剥掉
@@ -522,11 +538,16 @@ export function createAdapter(deps: AdapterDeps) {
             throw error
           }
         }
-        // ── 轮次收尾：把过滤器/回声守卫里 hold 的残余吐净（每轮都做，续写才有正确的拼接基准）──
-        const tail = filter.flush()
-        const tailGuarded = echoGuard.flush()
-        if (tailGuarded.echoed) echoedTranscript = true
-        const tailText = tail.text + tailGuarded.text
+        // ── 轮次收尾：把三层缓冲里 hold 的残余吐净（每轮都做，续写才有正确的拼接基准）──
+        //
+        // ⚠️ 只有「按流水线反序 flush」还不够：过滤器扣住的最后 ≤24 个字符**从没经过**声明剥离
+        // 那一层，而免责声明恰好 23 字 —— 实测整段从尾巴漏出去（会话 6c0dbc47：它是一个只有单个
+        // delta 的独立 text 块，跟在工具调用后面）。所以轮末统一走 drainTextPipeline：
+        // 反序吐净 + 对残余做一次性剥声明 / 剥伪系统标记。
+        const drained = drainTextPipeline(filter, boilerplate, echoGuard)
+        if (drained.echoed) echoedTranscript = true
+        if (drained.disclaimers > 0) disclaimerStripped = true
+        const tailText = drained.text
         if (tailText) {
           const block = openText()
           if (!textStarted) {
@@ -536,28 +557,39 @@ export function createAdapter(deps: AdapterDeps) {
           block.text += tailText
           yield { type: 'text-delta', index: block.index, text: tailText }
         }
-        if (tail.calls.length > 0) yield* emitCalls(tail.calls)
-        if (tail.rejected) {
+        if (drained.calls.length > 0) yield* emitCalls(drained.calls)
+        if (drained.rejected) {
           // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
           // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
           // 完整载荷落盘：日志的 400 字符截断看不到后半段的坏点（见 dumpRejectedPayload 说明）
-          dumpRejectedPayload(tail.rejected.raw, tail.rejected.mode, tail.rejected.reason ?? 'unparsable', logger)
+          dumpRejectedPayload(drained.rejected.raw, drained.rejected.mode, drained.rejected.reason ?? 'unparsable', logger)
           logger?.warn?.(
-            `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
-              `[${tail.rejected.reason ?? 'unparsable'}]` +
-              `，已丢弃 ${tail.rejected.raw.length} 字符（完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
-              tail.rejected.raw.slice(0, 2000),
+            `deepseek-web: 工具调用${drained.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
+              `[${drained.rejected.reason ?? 'unparsable'}]` +
+              `，已丢弃 ${drained.rejected.raw.length} 字符（完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
+              drained.rejected.raw.slice(0, 2000),
           )
           // 只有**首轮**的丢弃才触发整步重试；续写轮的丢弃记日志即可
           // （正文已上屏一部分，此时让整轮失败只会更糟）。
           if (rounds === 0) {
-            rejectedProtocol = tail.rejected.raw
-            rejectedReason = tail.rejected.reason ?? 'unparsable'
+            rejectedProtocol = drained.rejected.raw
+            rejectedReason = drained.rejected.reason ?? 'unparsable'
           }
         }
         // ── 一轮流结束：判断是否需要自动续写 ──
         const partial = textBlock?.text ?? ''
+        const roundChars = partial.length - textLenAtRoundStart
         const maxRounds = deps.config.maxContinuations ?? 2
+        // 没收到 `response/status: FINISHED` = 流被服务端切断（不是模型自己写完）。
+        // 旧版靠这个信号报 max-tokens；现在用它触发续写 —— 否则截在标点/反引号处（判据看不出
+        // 「没写完」）就会**静默**少一段，用户只看到回答末尾莫名其妙没了。
+        const cutByServer = finishReason === undefined
+        const midSentence = looksMidSentence(partial)
+        logger?.info?.(
+          `deepseek-web: 第 ${rounds + 1} 轮流结束：[本轮 ${roundChars} 字 / 累计 ${partial.length} 字 / ` +
+            `耗时 ${Date.now() - roundStartedAt}ms] finish=${finishReason ?? '(无 FINISHED → 服务端截断)'}` +
+            `${midSentence ? '，尾部是句中' : ''}`,
+        )
         const eligible =
           roundError === undefined &&
           deps.config.autoContinue !== false &&
@@ -565,7 +597,8 @@ export function createAdapter(deps: AdapterDeps) {
           toolCallCount === 0 &&
           !options?.signal?.aborted &&
           partial.length > 0 &&
-          looksMidSentence(partial)
+          roundChars > 0 &&
+          (midSentence || cutByServer)
         if (!eligible) break
         rounds += 1
         logger?.info?.(`deepseek-web: 回答疑似在句中被截，自动续写（第 ${rounds}/${maxRounds} 轮）……`)
@@ -583,6 +616,7 @@ export function createAdapter(deps: AdapterDeps) {
         // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例
         filter = new ToolCallStreamFilter(knownNames)
         echoGuard = new TranscriptEchoGuard()
+        boilerplate = new BoilerplateFilter()
       }
     } catch (error: any) {
       if (error instanceof AdapterLlmError) throw error
@@ -615,6 +649,11 @@ export function createAdapter(deps: AdapterDeps) {
     if (echoedTranscript) {
       // 已把回声段从可见正文里剔除；这里只留痕，方便事后定位。
       logger?.warn?.('deepseek-web: 模型回声了「对话转写格式」（[Tool Result for …] / User: / Assistant: 等），该段已丢弃、不上屏')
+    }
+    if (disclaimerStripped) {
+      // 网页端在每轮末尾追加的免责声明已经剥掉（它本来会卡在两条回答中间，
+      // 而且结尾的「甄别」是汉字 → 会让「句中截断」判据每轮误触发）。
+      logger?.info?.('deepseek-web: 已剥离网页端免责声明（本回答由 AI 生成，内容仅供参考，请仔细甄别）')
     }
     if (echoedTranscript && !hasVisibleText && toolCallCount === 0) {
       // 整轮输出就是一段转写回声、没有任何真内容 → 当作空响应重试（与坏掉的调用同一处理）。
