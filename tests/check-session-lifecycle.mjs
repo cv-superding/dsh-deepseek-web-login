@@ -243,6 +243,19 @@ await run('账号节流：webapi 产出的事件必须带 RATE_LIMIT + throttled
   assert.ok(err.retryAfterMs >= 20_000, `节流退避要给足（≥20s），实际 ${err.retryAfterMs}`)
 })
 
+await run('连续被限时退避渐长（20s 起、翻倍、上限 90s + 抖动）', async () => {
+  const one = await scenario({ completionResponses: [sseResponse(SSE_THROTTLE)] })
+  const first = one.events.find((e) => e.kind === 'error')?.retryAfterMs ?? 0
+  const two = await scenario({ completionResponses: [sseResponse(SSE_THROTTLE)] })
+  const second = two.events.find((e) => e.kind === 'error')?.retryAfterMs ?? 0
+  for (const v of [first, second]) {
+    assert.ok(v >= 20_000, `退避至少 20s，实际 ${v}`)
+    assert.ok(v <= 120_000, `退避不该超过 90s + 抖动，实际 ${v}`)
+  }
+  // 越被限越要等久一点（到 90s 上限后持平，抖动可能让后一次略小，所以加这个分支）
+  assert.ok(second > first || second >= 90_000, `应递增：第一次 ${first} → 第二次 ${second}`)
+})
+
 await run('SSE 错误事件里的「并发生成」→ 归类为可重试的 RATE_LIMIT', async () => {
   const ssePayload = `data: ${JSON.stringify({ type: 'error', content: REAL_BUSY })}\n\n`
   const { events, thrown } = await scenario({ completionResponses: [sseResponse(ssePayload)] })

@@ -138,6 +138,30 @@ export function isBusyGenerating(message: string): boolean {
 }
 
 /**
+ * 连续节流的状态：被限一次就退避久一点，别在限流窗口里反复撞。
+ * （实测 2026-09-11 下午：同一个账号连续被限，5 次重试全落在窗口里 → 整轮失败。）
+ */
+let throttleStreak = 0
+let lastThrottleAt = 0
+
+/** 取下一次节流退避（ms）：20s 起、每次翻倍、上限 90s，并加 0~30% 抖动。 */
+export function throttleBackoffMs(now: number = Date.now()): number {
+  // 超过 5 分钟没被限，认为窗口已过，重新开始计数
+  if (now - lastThrottleAt > 5 * 60_000) throttleStreak = 0
+  const base = Math.min(20_000 * 2 ** throttleStreak, 90_000)
+  const jitter = Math.round(base * 0.3 * Math.random())
+  return base + jitter
+}
+
+/** 记录一次节流；返回本次应给的退避（ms）。 */
+function noteThrottled(now: number = Date.now()): number {
+  if (now - lastThrottleAt > 5 * 60_000) throttleStreak = 0
+  throttleStreak += 1
+  lastThrottleAt = now
+  return throttleBackoffMs(now)
+}
+
+/**
  * 账号级节流：「发得太频繁」。
  *
  * 实测 2026-09-11 16:11（SSE error 事件，不是 HTTP 429）：
@@ -715,9 +739,9 @@ export function createSseState() {
           event.retryAfterMs = 5_000
           event.rateLimitKind = 'concurrent'
         } else if (isThrottled(message)) {
-          // 账号级节流（「消息发送过于频繁，请稍后重试」）：退避给足，别一直撞
+          // 账号级节流（「消息发送过于频繁，请稍后重试」）：连续被限就退避渐长，别一直撞
           event.code = 'RATE_LIMIT'
-          event.retryAfterMs = 20_000
+          event.retryAfterMs = noteThrottled()
           event.rateLimitKind = 'throttled'
         }
         out.push(event)
@@ -734,7 +758,7 @@ export function createSseState() {
           event.rateLimitKind = 'concurrent'
         } else if (isThrottled(full)) {
           event.code = 'RATE_LIMIT'
-          event.retryAfterMs = 20_000
+          event.retryAfterMs = noteThrottled()
           event.rateLimitKind = 'throttled'
         }
         out.push(event)
