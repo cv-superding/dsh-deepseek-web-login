@@ -65,6 +65,8 @@ Then: **Settings → DeepSeek 网页登录 → 浏览器窗口登录**, log in n
 (phone / email / verification code all work). The window closes itself once the credentials are captured.
 Finally pick provider **`DeepSeek 网页版（免费）`** → `DeepSeek 网页 · 快速模式` in the model picker.
 
+> ⚠️ **One chat window per account**: running several windows against the same account triggers a temporary web-side ban (1 day). Use one account per window, or move the extra windows to another provider — see [Known limitations](#known-limitations).
+
 Credentials live only on your machine (`~/.dsh/web-login/deepseek-auth.json`), never in this repository. The panel's **current account → log out** removes them (and the partition storage) in one click.
 
 In manual-token mode the panel shows "cookie / fingerprint headers not captured" — that is expected for this
@@ -103,6 +105,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 
 ## Known limitations
 
+- **One chat window per account**: the web client limits generation per account. Running two or more windows against the same account triggers a server-side **temporary ban (1 day)** — the login stays valid, but every request from that account is rejected until it lifts. Use one account per window, or move the extra windows to another provider
 - **No native tools**: tool calling is prompting-based. Drift is covered by both the instructions and the parser, but it remains model behaviour
 - **60s per-request cap** (`completion_request_timeout_ms`): the web client resumes streams via `sse_auto_resume`; this plugin does not implement resumption and reports `max-tokens` when a stream ends without a `FINISHED` marker instead of pretending it completed
 - Reasoning blocks are not replayed into history (token saving)

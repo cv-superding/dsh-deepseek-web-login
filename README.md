@@ -100,6 +100,8 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 模型选择器 → provider **`DeepSeek 网页版（免费）`** → `DeepSeek 网页 · 快速模式`，
 然后照常用 agent（工具调用、思考流、贴图都可用）。
 
+> ⚠️ **一个账号同时只开一个聊天窗口**：多开并发会触发网页端临时封禁（1 天）——要开多个窗口就换账号，或把多余的窗口换到别的 provider。详见[已知限制](#已知限制)。
+
 ## 模型档位
 
 权威依据：`GET /api/v0/client/settings?scope=model` 的 `model_configs`（按账号返回，实测 configVersion 81）
@@ -146,6 +148,7 @@ prompt 字符上限默认 1,200,000（可配）。
 
 ## 已知限制
 
+- **同账号同时只能开一个聊天窗口**：网页端按账号限制并发生成，多开会触发服务端的**临时封禁（1 天）**——登录态没坏，但期间该账号所有请求都会被拒。要多窗口就换账号，或把多余的窗口换到别的 provider
 - **原生 tools 不存在**：工具调用靠提示词协议；模型偶发格式漂移已被解析器与指令双重兜住，但本质是模型行为，无法 100% 保证
 - **单次请求 60s 上限**（`completion_request_timeout_ms`）：网页端靠 `sse_auto_resume` 续接，**本插件不实现续接**；流在没有 `FINISHED` 标记的情况下结束时报 `max-tokens`，而不是假装正常完成
 - **思考模式的推理过程不进上下文**：历史序列化只回放正文与工具调用/结果，以省 token
@@ -196,7 +199,7 @@ CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个 PR 上跑�
 | 报错里带「临时限制」/ `user is muted` | **账号被网页端临时限制**（不是插件问题）：登录态有效、建会话也正常，只有发消息被拒。消息里会给出解除时间；等解除或改用其它账号/官方 API key |
 | 「浏览器窗口登录」点了没反应，host 日志有 `fromPartition` 报错 | DSH 把插件宿主挪到了 **utility 进程**（没有窗口 API）→ 0.1.7 起改用**真实 Edge/Chrome + CDP** 登录：面板会显示「宿主进程」，按钮变成「用 Microsoft Edge 登录」。升级插件 + 重启 DSH 即可 |
 | 面板显示「Cookie / 指纹头 未捕获」 | 说明你走的是**手动粘贴 token** 那条路（该路径本来就没有这两项）。实测仅凭 Bearer token 即可完成校验、PoW 求解与真实生成；若日后频繁遇到 `AUTH` / `40003`，改用「浏览器登录」获取更完整的凭证（token + cookie + 指纹头） |
-| 报错 `A message is being generated, please try again later.` | **不是封号**：同一账号同时只能生成一条消息（另一个窗口/标签页正在生成）。0.1.9 起自动重试；两个窗口都要用网页模型的话，建议其中一个换 provider 或换账号 |
+| 报错 `A message is being generated, please try again later.` | **这个报错本身不是封号**：同一账号同时只能生成一条消息（另一个窗口/标签页正在生成），0.1.9 起自动重试。但别把多开当常态 —— 多窗口并发会触发服务端的**临时封禁（1 天）**，见[已知限制](#已知限制)；建议一个账号只保留一个窗口，多开请换账号或换 provider |
 | 正文里出现 `<ds_system>…</ds_system>` / `<system>…</system>` | 模型在**模仿**系统消息格式（与转写回声同类）。0.1.11 起自动剥离，不上屏 |
 | 回复在句中截断但没报错 | 服务端在句中截断却发了 FINISHED（12s 内即断，不是 60s 上限）。0.1.11 起启发式检测并报 `max-tokens`，让 UI 提示「可能被截断」 |
 | 回复里出现 `{"tool_calls":…}` 或 `<tool_calls>` 标记 | 模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时不再把 JSON 吐进正文：本轮无其他正文则自动重试，已有正文则给一句提示） |
