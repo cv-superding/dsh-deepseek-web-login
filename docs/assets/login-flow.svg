@@ -1,59 +1,307 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="286" viewBox="0 0 1040 286" role="img" aria-label="登录与凭证捕获流程">
-  <defs>
-    <marker id="a3" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
-      <path d="M0 0 L9 3.5 L0 7 z" fill="#4f46e5"/>
-    </marker>
-    <style>
-      .t{font:600 14px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
-      .x{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#475569}
-      .m{font:11.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
-      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5}
-      .flow{stroke:#4f46e5;stroke-width:2;fill:none;marker-end:url(#a3)}
-    </style>
-  </defs>
-  <rect x="0" y="0" width="1040" height="286" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="24" y="34" class="t">登录：浏览器窗口登录一次，插件旁路捕获（不接触你的密码）</text>
+<svg data-theme="light" width="1080" height="600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 600" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+<style>
+<![CDATA[
+svg {
 
-  <rect class="card" x="24" y="60" width="176" height="92" rx="12"/>
-  <text x="40" y="84" class="t">① 点「浏览器</text>
-  <text x="40" y="104" class="t">窗口登录」</text>
-  <text x="40" y="128" class="m">设置页 → host API</text>
+--bg: #f8fafc;
+      --grid: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-dim: #94a3b8;
+      --text-faint: #64748b;
 
-  <rect class="card" x="230" y="60" width="188" height="92" rx="12"/>
-  <text x="246" y="84" class="t">② Electron 窗口</text>
-  <text x="246" y="104" class="m">persist:dsh-</text>
-  <text x="246" y="122" class="m">deepseek-web-login</text>
+      --panel: #ffffff;
+      --panel-border: #e2e8f0;
+      --lane-fill: rgba(248, 250, 252, 0.65);
+      --lane-stroke: #cbd5e1;
 
-  <rect class="card" x="448" y="60" width="188" height="92" rx="12"/>
-  <text x="464" y="84" class="t">③ 你正常登录</text>
-  <text x="464" y="104" class="x">手机号 / 邮箱 / 验证码</text>
-  <text x="464" y="124" class="x">插件不读取密码</text>
+      --arrow: #94a3b8;
+      --arrow-emphasis: #059669;
 
-  <rect class="card" x="666" y="60" width="350" height="92" rx="12"/>
-  <text x="682" y="84" class="t">④ 旁路捕获（webRequest 钩子）</text>
-  <text x="682" y="106" class="m">Authorization: Bearer …（权威）</text>
-  <text x="682" y="124" class="m">cookie · x-hif-* · localStorage.userToken</text>
-  <text x="682" y="142" class="x">⚠ userToken 是 AppKit 包装 JSON，需解包；未登录时是游客 token</text>
+      --mask: #ffffff;
 
-  <rect class="card" x="24" y="176" width="240" height="86" rx="12"/>
-  <text x="40" y="200" class="t">⑤ 服务端校验</text>
-  <text x="40" y="222" class="m">GET /api/v0/users/current</text>
-  <text x="40" y="244" class="x">失败也先落盘（fail-open）</text>
+      --frontend-fill:    rgba(34, 211, 238, 0.15);
+      --frontend-stroke:  #0891b2;
+      --backend-fill:     rgba(52, 211, 153, 0.18);
+      --backend-stroke:   #059669;
+      --database-fill:    rgba(167, 139, 250, 0.2);
+      --database-stroke:  #7c3aed;
+      --cloud-fill:       rgba(251, 191, 36, 0.18);
+      --cloud-stroke:     #d97706;
+      --security-fill:    rgba(251, 113, 133, 0.15);
+      --security-stroke:  #e11d48;
+      --messagebus-fill:  rgba(251, 146, 60, 0.15);
+      --messagebus-stroke:#ea580c;
+      --external-fill:    rgba(148, 163, 184, 0.18);
+      --external-stroke:  #64748b;
 
-  <rect class="card" x="294" y="176" width="252" height="86" rx="12"/>
-  <text x="310" y="200" class="t">⑥ 凭证落盘（本机）</text>
-  <text x="310" y="222" class="m">~/.dsh/web-login/deepseek-auth.json</text>
-  <text x="310" y="244" class="x">不在仓库内；面板可一键退出登录清除</text>
+      --toolbar-bg:       rgba(255, 255, 255, 0.92);
+      --toolbar-border:   #cbd5e1;
+      --toolbar-text:     #334155;
+      --toolbar-hover:    #ffffff;
+      --toolbar-menu-bg:  #ffffff;
+}
+svg .archify-export-bg { fill: var(--bg); }
+/* ========================================================== SVG SEMANTIC CLASSES — use these instead of inline fill/stroke ========================================================== */ .c-grid { stroke: var(--grid); fill: none; }
+.c-mask { fill: var(--mask); stroke: none; }
+.c-frontend { fill: var(--frontend-fill); stroke: var(--frontend-stroke); }
+.c-backend { fill: var(--backend-fill); stroke: var(--backend-stroke); }
+.c-database { fill: var(--database-fill); stroke: var(--database-stroke); }
+.c-cloud { fill: var(--cloud-fill); stroke: var(--cloud-stroke); }
+.c-external { fill: var(--external-fill); stroke: var(--external-stroke); }
+/* Text helpers */ .t-primary { fill: var(--text); }
+.t-muted { fill: var(--text-muted); }
+.t-dim { fill: var(--text-dim); }
+.t-backend { fill: var(--backend-stroke); }
+.t-security { fill: var(--security-stroke); }
+.t-messagebus { fill: var(--messagebus-stroke); }
+/* Semantic Sigils are small authored role stamps, not icons from a brand pack and not viewer controls. Prefix selectors with svg so the canonical export's SVG-only stylesheet collector keeps them automatically. */ svg .semantic-sigil { fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; opacity: 0.76; pointer-events: none; }
+svg .semantic-sigil > * { vector-effect: non-scaling-stroke; }
+svg .semantic-sigil .sigil-fill { fill: currentColor; stroke: none; }
+svg .s-frontend { color: var(--frontend-stroke); }
+svg .s-backend { color: var(--backend-stroke); }
+svg .s-database { color: var(--database-stroke); }
+svg .s-cloud { color: var(--cloud-stroke); }
+svg .s-external { color: var(--external-stroke); }
+/* Arrows */ .a-default { stroke: var(--arrow); fill: none; }
+.a-emphasis { stroke: var(--arrow-emphasis); fill: none; }
+.a-security { stroke: var(--security-stroke); fill: none; stroke-dasharray: 5,5; }
+.a-dashed { stroke: var(--database-stroke); fill: none; stroke-dasharray: 4,4; }
+/* Arrowhead markers reference these */ .m-default { fill: var(--arrow); }
+.m-emphasis { fill: var(--arrow-emphasis); }
+.m-security { fill: var(--security-stroke); }
+.m-dashed { fill: var(--database-stroke); }
+.c-lane { fill: var(--lane-fill); stroke: var(--lane-stroke); stroke-dasharray: 6,6; }
+]]>
+</style>
+<rect width="100%" height="100%" class="archify-export-bg"/>
 
-  <rect class="card" x="576" y="176" width="440" height="86" rx="12"/>
-  <text x="592" y="200" class="t">⑦ 救援通道：从已登录窗口恢复</text>
-  <text x="592" y="222" class="x">凭证文件丢失 / 校验端点不配合时，复用上次登录的持久化分区直接取回登录态</text>
-  <text x="592" y="244" class="x">（实测：无需重新登录即可恢复，并完成服务端校验）</text>
+        <title id="archify-diagram-title">登录与凭证捕获：浏览器窗口登录一次</title>
+        <desc id="archify-diagram-description">由 Archify 生成的时序图。</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
 
-  <path class="flow" d="M200 106 H222"/>
-  <path class="flow" d="M418 106 H440"/>
-  <path class="flow" d="M636 106 H658"/>
-  <path class="flow" d="M720 152 V168 H144 V176"/>
-  <path class="flow" d="M264 219 H286"/>
-  <path class="flow" d="M546 219 H568"/>
-</svg>
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Time Segments -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="0" x="48" y="150" width="984" height="146" rx="10" class="c-lane" stroke-width="1"/>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="1" x="48" y="296" width="984" height="108" rx="10" class="c-lane" stroke-width="1"/>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="2" x="48" y="404" width="984" height="108" rx="10" class="c-lane" stroke-width="1"/>
+
+        <!-- Lifelines -->
+        <path d="M 145.5 142 L 145.5 535" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 348.25 142 L 348.25 535" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 551 142 L 551 535" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 753.75 142 L 753.75 535" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 956.5 142 L 956.5 535" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+
+        <!-- Activations -->
+        <rect x="343.25" y="170" width="10" height="342" rx="3" class="c-mask"/>
+        <rect x="343.25" y="170" width="10" height="342" rx="3" class="c-backend" stroke-width="1"/>
+        <rect x="546" y="206" width="10" height="108" rx="3" class="c-mask"/>
+        <rect x="546" y="206" width="10" height="108" rx="3" class="c-external" stroke-width="1"/>
+        <rect x="748.75" y="242" width="10" height="144" rx="3" class="c-mask"/>
+        <rect x="748.75" y="242" width="10" height="144" rx="3" class="c-cloud" stroke-width="1"/>
+        <rect x="951.5" y="422" width="10" height="72" rx="3" class="c-mask"/>
+        <rect x="951.5" y="422" width="10" height="72" rx="3" class="c-database" stroke-width="1"/>
+
+        <!-- Messages -->
+        <g data-edge-from="panel" data-edge-to="host" data-edge-label="点击「浏览器窗口登录」" data-edge-key="0">
+          <path data-composition-edge-from="panel" data-composition-edge-to="host" data-composition-points="152.5,170;341.25,170" d="M 152.5 170 L 341.25 170" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-detail="context">
+          <rect x="183.675" y="150" width="126.4" height="16" rx="3" class="c-mask"/>
+          <text x="246.875" y="160" class="t-backend" font-size="9" text-anchor="middle">点击「浏览器窗口登录」</text>
+        </g>
+        </g>
+
+        <g data-edge-from="host" data-edge-to="browser" data-edge-label="启动 Edge / Chrome（CDP）" data-edge-key="1">
+          <path data-composition-edge-from="host" data-composition-edge-to="browser" data-composition-points="355.25,206;544,206" d="M 355.25 206 L 544 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-detail="context">
+          <rect x="378.625" y="186" width="142" height="16" rx="3" class="c-mask"/>
+          <text x="449.625" y="196" class="t-backend" font-size="9" text-anchor="middle">启动 Edge / Chrome（CDP）</text>
+        </g>
+        </g>
+
+        <g data-edge-from="browser" data-edge-to="web" data-edge-label="手机号 / 邮箱 / 验证码" data-edge-key="2">
+          <path data-composition-edge-from="browser" data-composition-edge-to="web" data-composition-points="558,242;746.75,242" d="M 558 242 L 746.75 242" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="589.175" y="222" width="126.4" height="16" rx="3" class="c-mask"/>
+          <text x="652.375" y="232" class="t-backend" font-size="9" text-anchor="middle">手机号 / 邮箱 / 验证码</text>
+        </g>
+        </g>
+
+        <g data-edge-from="web" data-edge-to="browser" data-edge-label="登录成功，写入登录态" data-edge-key="3">
+          <path data-composition-edge-from="web" data-composition-edge-to="browser" data-composition-points="746.75,278;558,278" d="M 746.75 278 L 558 278" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="594.375" y="258" width="116" height="16" rx="3" class="c-mask"/>
+          <text x="652.375" y="268" class="t-muted" font-size="9" text-anchor="middle">登录成功，写入登录态</text>
+        </g>
+        </g>
+
+        <g data-edge-from="browser" data-edge-to="host" data-edge-label="旁路捕获凭证" data-edge-key="4">
+          <path data-composition-edge-from="browser" data-composition-edge-to="host" data-composition-points="544,314;355.25,314" d="M 544 314 L 355.25 314" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <g data-detail="context">
+          <rect x="412.425" y="294" width="74.4" height="16" rx="3" class="c-mask"/>
+          <text x="449.625" y="304" class="t-security" font-size="9" text-anchor="middle">旁路捕获凭证</text>
+        </g>
+        </g>
+
+        <g data-edge-from="host" data-edge-to="web" data-edge-label="GET /api/v0/users/current" data-edge-key="5">
+          <path data-composition-edge-from="host" data-composition-edge-to="web" data-composition-points="355.25,350;746.75,350" d="M 355.25 350 L 746.75 350" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <g data-detail="context">
+          <rect x="480" y="330" width="142" height="16" rx="3" class="c-mask"/>
+          <text x="551" y="340" class="t-security" font-size="9" text-anchor="middle">GET /api/v0/users/current</text>
+        </g>
+        </g>
+
+        <g data-edge-from="web" data-edge-to="host" data-edge-label="200 用户信息" data-edge-key="6">
+          <path data-composition-edge-from="web" data-composition-edge-to="host" data-composition-points="746.75,386;355.25,386" d="M 746.75 386 L 355.25 386" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="513.8" y="366" width="74.4" height="16" rx="3" class="c-mask"/>
+          <text x="551" y="376" class="t-muted" font-size="9" text-anchor="middle">200 用户信息</text>
+        </g>
+        </g>
+
+        <g data-edge-from="host" data-edge-to="creds" data-edge-label="落盘 deepseek-auth.json" data-edge-key="7">
+          <path data-composition-edge-from="host" data-composition-edge-to="creds" data-composition-points="355.25,422;949.5,422" d="M 355.25 422 L 949.5 422" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <g data-detail="context">
+          <rect x="586.575" y="402" width="131.60000000000002" height="16" rx="3" class="c-mask"/>
+          <text x="652.375" y="412" class="t-backend" font-size="9" text-anchor="middle">落盘 deepseek-auth.json</text>
+        </g>
+        </g>
+
+        <g data-edge-from="host" data-edge-to="creds" data-edge-label="凭证丢失时复用持久分区重建" data-edge-key="8">
+          <path data-composition-edge-from="host" data-composition-edge-to="creds" data-composition-points="355.25,458;949.5,458" d="M 355.25 458 L 949.5 458" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <g data-detail="context">
+          <rect x="578.775" y="438" width="147.20000000000002" height="16" rx="3" class="c-mask"/>
+          <text x="652.375" y="448" class="t-messagebus" font-size="9" text-anchor="middle">凭证丢失时复用持久分区重建</text>
+        </g>
+        </g>
+
+        <g data-edge-from="host" data-edge-to="panel" data-edge-label="面板显示已登录" data-edge-key="9">
+          <path data-composition-edge-from="host" data-composition-edge-to="panel" data-composition-points="341.25,494;152.5,494" d="M 341.25 494 L 152.5 494" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="204.475" y="474" width="84.8" height="16" rx="3" class="c-mask"/>
+          <text x="246.875" y="484" class="t-muted" font-size="9" text-anchor="middle">面板显示已登录</text>
+        </g>
+        </g>
+
+        <!-- Segment Labels -->
+        <g data-graph-role="segment-label" data-segment-id="0">
+          <rect x="56" y="128" width="55.6" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="141" class="t-dim" font-size="9" font-weight="600">登录一次</text>
+        </g>
+        <g data-graph-role="segment-label" data-segment-id="1">
+          <rect x="56" y="274" width="66" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="287" class="t-dim" font-size="9" font-weight="600">捕获与校验</text>
+        </g>
+        <g data-graph-role="segment-label" data-segment-id="2">
+          <rect x="56" y="382" width="66" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="395" class="t-dim" font-size="9" font-weight="600">落盘与救援</text>
+        </g>
+
+        <!-- Participants -->
+        <g id="node-panel" data-node-id="panel" data-node-label="设置面板" tabindex="0" role="button" aria-label="聚焦设置面板，DSH 设置页, 时序参与者" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="DSH 设置页" data-node-context="时序参与者">
+          <title>设置面板 · DSH 设置页 · 时序参与者</title>
+          <rect x="62" y="72" width="167" height="54" rx="6" class="c-mask"/>
+          <rect x="62" y="72" width="167" height="54" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(68 78) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="145.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">设置面板</text>
+          <text data-detail="context" x="145.5" y="111" class="t-muted" font-size="7" text-anchor="middle">DSH 设置页</text>
+        </g>
+
+        <g id="node-host" data-node-id="host" data-node-label="插件 host" tabindex="0" role="button" aria-label="聚焦插件 host，插件进程, 时序参与者" aria-pressed="false" data-node-kind="backend" data-node-sublabel="插件进程" data-node-context="时序参与者">
+          <title>插件 host · 插件进程 · 时序参与者</title>
+          <rect x="264.75" y="72" width="167" height="54" rx="6" class="c-mask"/>
+          <rect x="264.75" y="72" width="167" height="54" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(270.75 78) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="348.25" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">插件 host</text>
+          <text data-detail="context" x="348.25" y="111" class="t-muted" font-size="7" text-anchor="middle">插件进程</text>
+        </g>
+
+        <g id="node-browser" data-node-id="browser" data-node-label="浏览器登录窗口" tabindex="0" role="button" aria-label="聚焦浏览器登录窗口，Edge / Chrome, 时序参与者" aria-pressed="false" data-node-kind="external" data-node-sublabel="Edge / Chrome" data-node-context="时序参与者">
+          <title>浏览器登录窗口 · Edge / Chrome · 时序参与者</title>
+          <rect x="467.5" y="72" width="167" height="54" rx="6" class="c-mask"/>
+          <rect x="467.5" y="72" width="167" height="54" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(473.5 78) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="551" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">浏览器登录窗口</text>
+          <text data-detail="context" x="551" y="111" class="t-muted" font-size="7" text-anchor="middle">Edge / Chrome</text>
+        </g>
+
+        <g id="node-web" data-node-id="web" data-node-label="chat.deepseek.com" tabindex="0" role="button" aria-label="聚焦chat.deepseek.com，网页端, 时序参与者" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="网页端" data-node-context="时序参与者">
+          <title>chat.deepseek.com · 网页端 · 时序参与者</title>
+          <rect x="670.25" y="72" width="167" height="54" rx="6" class="c-mask"/>
+          <rect x="670.25" y="72" width="167" height="54" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(676.25 78) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="753.75" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">chat.deepseek.com</text>
+          <text data-detail="context" x="753.75" y="111" class="t-muted" font-size="7" text-anchor="middle">网页端</text>
+        </g>
+
+        <g id="node-creds" data-node-id="creds" data-node-label="本机凭证" tabindex="0" role="button" aria-label="聚焦本机凭证，本机文件, 时序参与者" aria-pressed="false" data-node-kind="database" data-node-sublabel="本机文件" data-node-context="时序参与者">
+          <title>本机凭证 · 本机文件 · 时序参与者</title>
+          <rect x="873" y="72" width="167" height="54" rx="6" class="c-mask"/>
+          <rect x="873" y="72" width="167" height="54" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(879 78) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="956.5" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">本机凭证</text>
+          <text data-detail="context" x="956.5" y="111" class="t-muted" font-size="7" text-anchor="middle">本机文件</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend="">
+          <text x="40" y="526" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="emphasis" data-legend-x="40" data-legend-baseline="546" data-legend-width="63">
+            <path d="M 40 543 L 74 543" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+            <text x="83" y="546" class="t-muted" font-size="10" font-weight="500">请求</text>
+          </g>
+          <g data-legend-semantic-kind="return" data-legend-x="125" data-legend-baseline="546" data-legend-width="63">
+            <path d="M 125 543 L 159 543" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
+            <text x="168" y="546" class="t-muted" font-size="10" font-weight="500">返回</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-x="210" data-legend-baseline="546" data-legend-width="63">
+            <path d="M 210 543 L 244 543" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+            <text x="253" y="546" class="t-muted" font-size="10" font-weight="500">安全</text>
+          </g>
+          <g data-legend-semantic-kind="dashed" data-legend-x="295" data-legend-baseline="546" data-legend-width="83">
+            <path d="M 295 543 L 329 543" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+            <text x="338" y="546" class="t-muted" font-size="10" font-weight="500">异步追踪</text>
+          </g>
+          <g data-legend-semantic-kind="default" data-legend-x="400" data-legend-baseline="546" data-legend-width="83">
+            <path d="M 400 543 L 434 543" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+            <text x="443" y="546" class="t-muted" font-size="10" font-weight="500">默认消息</text>
+          </g>
+        </g>
+      </svg>

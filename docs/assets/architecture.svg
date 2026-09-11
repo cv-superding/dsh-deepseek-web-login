@@ -1,95 +1,264 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="470" viewBox="0 0 1040 470" role="img" aria-label="架构与数据流">
-  <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
-      <path d="M0 0 L9 3.5 L0 7 z" fill="#64748b"/>
-    </marker>
-    <marker id="arrowIndigo" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
-      <path d="M0 0 L9 3.5 L0 7 z" fill="#4f46e5"/>
-    </marker>
-    <style>
-      .bg{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
-      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5;rx:12}
-      .title{font:600 15px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
-      .sub{font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
-      .tiny{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#64748b}
-      .flow{stroke:#64748b;stroke-width:1.6;fill:none;marker-end:url(#arrow)}
-      .flowBack{stroke:#94a3b8;stroke-width:1.4;fill:none;stroke-dasharray:5 4;marker-end:url(#arrow)}
-      .flowMain{stroke:#4f46e5;stroke-width:2;fill:none;marker-end:url(#arrowIndigo)}
-      .pill{font:600 11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    </style>
-  </defs>
+<svg data-theme="light" width="1220" height="642" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 642" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+<style>
+<![CDATA[
+svg {
 
-  <rect class="bg" x="0" y="0" width="1040" height="470" rx="16"/>
+--bg: #f8fafc;
+      --grid: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-dim: #94a3b8;
+      --text-faint: #64748b;
 
-  <text x="24" y="34" class="title">数据流：DSH agent loop → 网页端模型 → 工具调用回灌</text>
+      --panel: #ffffff;
+      --panel-border: #e2e8f0;
+      --lane-fill: rgba(248, 250, 252, 0.65);
+      --lane-stroke: #cbd5e1;
 
-  <!-- 1. DSH side -->
-  <rect class="card" x="24" y="58" width="232" height="150" rx="12"/>
-  <text x="42" y="84" class="title">DSH agent loop</text>
-  <text x="42" y="108" class="sub">messages / system / tools</text>
-  <text x="42" y="130" class="sub">tool-call 块 ← 执行结果</text>
-  <text x="42" y="152" class="sub">压缩 · 会话日志 · 重试</text>
-  <rect x="42" y="168" width="196" height="26" rx="13" fill="#eef2ff"/>
-  <text x="56" y="186" class="pill" fill="#4338ca">ctx.llm.registerAdapter()</text>
+      --arrow: #94a3b8;
+      --arrow-emphasis: #059669;
 
-  <!-- 2. adapter -->
-  <rect class="card" x="300" y="58" width="286" height="270" rx="12"/>
-  <text x="318" y="84" class="title">deepseek-web 适配器</text>
-  <rect x="318" y="98" width="250" height="34" rx="9" fill="#f1f5f9"/>
-  <text x="330" y="120" class="sub">① PoW：sha3 WASM wasm_solve</text>
-  <rect x="318" y="140" width="250" height="34" rx="9" fill="#f1f5f9"/>
-  <text x="330" y="162" class="sub">② 消息 → 单段 prompt 转写</text>
-  <rect x="318" y="182" width="250" height="34" rx="9" fill="#f1f5f9"/>
-  <text x="330" y="204" class="sub">③ SSE → StreamChunk 流</text>
-  <rect x="318" y="224" width="250" height="34" rx="9" fill="#f1f5f9"/>
-  <text x="330" y="246" class="sub">④ 工具协议桥 ⇄ tool-call 块</text>
-  <rect x="318" y="266" width="250" height="34" rx="9" fill="#f1f5f9"/>
-  <text x="330" y="288" class="sub">⑤ 图片上传 → ref_file_ids</text>
+      --mask: #ffffff;
 
-  <!-- 3. remote -->
-  <rect class="card" x="646" y="58" width="370" height="270" rx="12"/>
-  <text x="664" y="84" class="title">chat.deepseek.com（网页端私有接口）</text>
-  <text x="664" y="112" class="sub">POST /api/v0/chat/create_pow_challenge</text>
-  <text x="664" y="138" class="sub">POST /api/v0/chat_session/create</text>
-  <text x="664" y="164" class="sub">POST /api/v0/chat/completion → SSE</text>
-  <text x="664" y="190" class="sub">POST /api/v0/chat_session/delete</text>
-  <text x="664" y="216" class="sub">POST /api/v0/file/upload_file</text>
-  <text x="664" y="242" class="sub">GET  /api/v0/users/current</text>
-  <rect x="664" y="262" width="336" height="50" rx="9" fill="#fff7ed" stroke="#fdba74"/>
-  <text x="676" y="282" class="tiny">每次调用新建临时会话，结束时尽力删除</text>
-  <text x="676" y="300" class="tiny">→ 不污染你的网页端聊天列表（实测前后一致）</text>
+      --frontend-fill:    rgba(34, 211, 238, 0.15);
+      --frontend-stroke:  #0891b2;
+      --backend-fill:     rgba(52, 211, 153, 0.18);
+      --backend-stroke:   #059669;
+      --database-fill:    rgba(167, 139, 250, 0.2);
+      --database-stroke:  #7c3aed;
+      --cloud-fill:       rgba(251, 191, 36, 0.18);
+      --cloud-stroke:     #d97706;
+      --security-fill:    rgba(251, 113, 133, 0.15);
+      --security-stroke:  #e11d48;
+      --messagebus-fill:  rgba(251, 146, 60, 0.15);
+      --messagebus-stroke:#ea580c;
+      --external-fill:    rgba(148, 163, 184, 0.18);
+      --external-stroke:  #64748b;
 
-  <!-- auth -->
-  <rect class="card" x="24" y="238" width="232" height="90" rx="12"/>
-  <text x="42" y="264" class="title">凭证（本机）</text>
-  <text x="42" y="288" class="sub">~/.dsh/web-login/</text>
-  <text x="42" y="310" class="sub">token · cookie · 指纹头</text>
+      --toolbar-bg:       rgba(255, 255, 255, 0.92);
+      --toolbar-border:   #cbd5e1;
+      --toolbar-text:     #334155;
+      --toolbar-hover:    #ffffff;
+      --toolbar-menu-bg:  #ffffff;
+}
+svg .archify-export-bg { fill: var(--bg); }
+/* ========================================================== SVG SEMANTIC CLASSES — use these instead of inline fill/stroke ========================================================== */ .c-grid { stroke: var(--grid); fill: none; }
+.c-mask { fill: var(--mask); stroke: none; }
+.c-frontend { fill: var(--frontend-fill); stroke: var(--frontend-stroke); }
+.c-backend { fill: var(--backend-fill); stroke: var(--backend-stroke); }
+.c-database { fill: var(--database-fill); stroke: var(--database-stroke); }
+.c-cloud { fill: var(--cloud-fill); stroke: var(--cloud-stroke); }
+.c-external { fill: var(--external-fill); stroke: var(--external-stroke); }
+/* Text helpers */ .t-primary { fill: var(--text); }
+.t-muted { fill: var(--text-muted); }
+.t-backend { fill: var(--backend-stroke); }
+.t-database { fill: var(--database-stroke); }
+.t-cloud { fill: var(--cloud-stroke); }
+.t-messagebus { fill: var(--messagebus-stroke); }
+.t-external { fill: var(--external-stroke); }
+/* Semantic Sigils are small authored role stamps, not icons from a brand pack and not viewer controls. Prefix selectors with svg so the canonical export's SVG-only stylesheet collector keeps them automatically. */ svg .semantic-sigil { fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; opacity: 0.76; pointer-events: none; }
+svg .semantic-sigil > * { vector-effect: non-scaling-stroke; }
+svg .semantic-sigil .sigil-fill { fill: currentColor; stroke: none; }
+svg .s-frontend { color: var(--frontend-stroke); }
+svg .s-backend { color: var(--backend-stroke); }
+svg .s-database { color: var(--database-stroke); }
+svg .s-cloud { color: var(--cloud-stroke); }
+svg .s-external { color: var(--external-stroke); }
+/* Arrows */ .a-default { stroke: var(--arrow); fill: none; }
+.a-emphasis { stroke: var(--arrow-emphasis); fill: none; }
+.a-dashed { stroke: var(--database-stroke); fill: none; stroke-dasharray: 4,4; }
+/* Arrowhead markers reference these */ .m-default { fill: var(--arrow); }
+.m-emphasis { fill: var(--arrow-emphasis); }
+.m-security { fill: var(--security-stroke); }
+.m-dashed { fill: var(--database-stroke); }
+]]>
+</style>
+<rect width="100%" height="100%" class="archify-export-bg"/>
 
-  <rect class="card" x="24" y="348" width="232" height="90" rx="12"/>
-  <text x="42" y="374" class="title">Electron 登录窗口</text>
-  <text x="42" y="398" class="sub">persist 分区 · 旁路捕获</text>
-  <text x="42" y="420" class="sub">面板：登录 / 恢复 / 测试</text>
+        <title id="archify-diagram-title">架构与数据流：DSH agent loop 与 chat.deepseek.com 网页端</title>
+        <desc id="archify-diagram-description">由 Archify 生成的架构图。</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
 
-  <!-- flows -->
-  <path class="flowMain" d="M256 120 H292"/>
-  <text x="258" y="112" class="tiny">stream()</text>
-  <path class="flowMain" d="M586 120 H638"/>
-  <text x="590" y="112" class="tiny">HTTPS</text>
-  <path class="flowBack" d="M638 168 H586"/>
-  <text x="590" y="186" class="tiny">SSE patch 流</text>
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
 
-  <path class="flow" d="M280 283 H310 V204"/>
-  <text x="286" y="276" class="tiny">读凭证</text>
-  <path class="flow" d="M140 348 V334"/>
-  <text x="148" y="344" class="tiny">登录后落盘</text>
-  <path class="flowBack" d="M120 238 V200 H46 V212"/>
-  <text x="46" y="196" class="tiny">失败诊断 → 面板</text>
+        <!-- Boundaries (behind everything) -->
 
-  <!-- legend -->
-  <g transform="translate(646 356)">
-    <rect x="0" y="0" width="370" height="82" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
-    <text x="16" y="24" class="tiny">实线 = 请求链路　虚线 = 流式返回 / 诊断回传</text>
-    <text x="16" y="46" class="tiny">模型档位：快速模式（thinking 开关两档预设）</text>
-    <text x="16" y="68" class="tiny">工具调用：提示词 JSON 协议（非原生 function calling）</text>
-  </g>
-</svg>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="agent" data-edge-to="adapter" data-edge-label="ctx.llm.stream()" data-edge-key="0" data-edge-id="agent-call" data-composition-points="280,206;370,206" d="M 280 206 L 370 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="adapter" data-edge-to="agent" data-edge-label="tool-call 块回灌" data-edge-key="1" data-edge-id="toolcall-return" data-composition-points="520,128;520,104;160,104;160,150" d="M 520 128 L 520 112 Q 520 104 512 104 L 168 104 Q 160 104 160 112 L 160 150" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="adapter" data-edge-to="web" data-edge-label="HTTPS 私有接口" data-edge-key="2" data-edge-id="adapter-http" data-composition-points="670,206;760,206" d="M 670 206 L 760 206" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="web" data-edge-to="adapter" data-edge-label="SSE patch 流" data-edge-key="3" data-edge-id="sse-return" data-composition-points="920,262;920,308;513,308;513,284" d="M 920 262 L 920 300 Q 920 308 912 308 L 521 308 Q 513 308 513 300 L 513 284" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="panel" data-edge-to="hostapi" data-edge-label="HTTP API" data-edge-key="4" data-edge-id="panel-api" data-composition-points="220,522;320,522" d="M 220 522 L 320 522" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="hostapi" data-edge-to="login" data-edge-label="启动窗口" data-edge-key="5" data-edge-id="api-login" data-composition-points="520,522;620,522" d="M 520 522 L 620 522" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="login" data-edge-to="creds" data-edge-label="旁路捕获" data-edge-key="6" data-edge-id="login-capture" data-composition-points="820,522;920,522" d="M 820 522 L 920 522" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="creds" data-edge-to="adapter" data-edge-label="读取凭证" data-edge-key="7" data-edge-id="creds-read" data-composition-points="1050,470;1050,377;527,377;527,284" d="M 1050 470 L 1050 385 Q 1050 377 1042 377 L 535 377 Q 527 377 527 369 L 527 284" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Components -->
+        <g id="node-agent" data-node-id="agent" data-node-label="DSH agent loop" tabindex="0" role="button" aria-label="聚焦DSH agent loop，messages / system / tools, 架构组件" aria-pressed="false" data-node-kind="backend" data-node-sublabel="messages / system / tools" data-node-tag="压缩 · 会话日志 · 重试" data-node-context="架构组件">
+          <title>DSH agent loop · messages / system / tools · 架构组件 · 压缩 · 会话日志 · 重试</title>
+          <rect x="40" y="150" width="240" height="112" rx="6" class="c-mask"/>
+          <rect x="40" y="150" width="240" height="112" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(46 156) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="160" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DSH agent loop</text>
+        <text data-detail="context" x="160" y="220" class="t-muted" font-size="9" text-anchor="middle">messages / system / tools</text>
+        <text data-detail="fine" x="160" y="254" class="t-backend" font-size="7" text-anchor="middle">压缩 · 会话日志 · 重试</text>
+        </g>
+
+        <g id="node-adapter" data-node-id="adapter" data-node-label="deepseek-web 适配器" tabindex="0" role="button" aria-label="聚焦deepseek-web 适配器，ctx.llm provider, 架构组件" aria-pressed="false" data-node-kind="backend" data-node-sublabel="ctx.llm provider" data-node-tag="PoW · SSE · 工具协议桥" data-node-context="架构组件">
+          <title>deepseek-web 适配器 · ctx.llm provider · 架构组件 · PoW · SSE · 工具协议桥</title>
+          <rect x="370" y="128" width="300" height="156" rx="6" class="c-mask"/>
+          <rect x="370" y="128" width="300" height="156" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(376 134) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="520" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">deepseek-web 适配器</text>
+        <text data-detail="context" x="520" y="220" class="t-muted" font-size="9" text-anchor="middle">ctx.llm provider</text>
+        <text data-detail="fine" x="520" y="276" class="t-backend" font-size="7" text-anchor="middle">PoW · SSE · 工具协议桥</text>
+        </g>
+
+        <g id="node-web" data-node-id="web" data-node-label="chat.deepseek.com" tabindex="0" role="button" aria-label="聚焦chat.deepseek.com，网页端私有接口, 架构组件" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="网页端私有接口" data-node-tag="create_pow_challenge" data-node-context="架构组件">
+          <title>chat.deepseek.com · 网页端私有接口 · 架构组件 · create_pow_challenge</title>
+          <rect x="760" y="150" width="320" height="112" rx="6" class="c-mask"/>
+          <rect x="760" y="150" width="320" height="112" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(766 156) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="920" y="204" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">chat.deepseek.com</text>
+        <text data-detail="context" x="920" y="220" class="t-muted" font-size="9" text-anchor="middle">网页端私有接口</text>
+        <text data-detail="fine" x="920" y="254" class="t-cloud" font-size="7" text-anchor="middle">create_pow_challenge</text>
+        </g>
+
+        <g id="node-panel" data-node-id="panel" data-node-label="DSH 设置面板" tabindex="0" role="button" aria-label="聚焦DSH 设置面板，登录 / 恢复 / 测试, 架构组件" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="登录 / 恢复 / 测试" data-node-context="架构组件">
+          <title>DSH 设置面板 · 登录 / 恢复 / 测试 · 架构组件</title>
+          <rect x="40" y="470" width="180" height="104" rx="6" class="c-mask"/>
+          <rect x="40" y="470" width="180" height="104" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 476) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="130" y="520" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DSH 设置面板</text>
+        <text data-detail="context" x="130" y="536" class="t-muted" font-size="9" text-anchor="middle">登录 / 恢复 / 测试</text>
+        </g>
+
+        <g id="node-hostapi" data-node-id="hostapi" data-node-label="插件 host API" tabindex="0" role="button" aria-label="聚焦插件 host API，/deepseek-web-login/api/*, 架构组件" aria-pressed="false" data-node-kind="backend" data-node-sublabel="/deepseek-web-login/api/*" data-node-context="架构组件">
+          <title>插件 host API · /deepseek-web-login/api/* · 架构组件</title>
+          <rect x="320" y="470" width="200" height="104" rx="6" class="c-mask"/>
+          <rect x="320" y="470" width="200" height="104" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="420" y="520" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">插件 host API</text>
+        <text data-detail="context" x="420" y="536" class="t-muted" font-size="9" text-anchor="middle">/deepseek-web-login/api/*</text>
+        </g>
+
+        <g id="node-login" data-node-id="login" data-node-label="浏览器登录窗口" tabindex="0" role="button" aria-label="聚焦浏览器登录窗口，Edge / Chrome + CDP, 架构组件" aria-pressed="false" data-node-kind="external" data-node-sublabel="Edge / Chrome + CDP" data-node-tag="干净 UA · persist 分区" data-node-context="架构组件">
+          <title>浏览器登录窗口 · Edge / Chrome + CDP · 架构组件 · 干净 UA · persist 分区</title>
+          <rect x="620" y="470" width="200" height="104" rx="6" class="c-mask"/>
+          <rect x="620" y="470" width="200" height="104" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(626 476) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="720" y="520" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">浏览器登录窗口</text>
+        <text data-detail="context" x="720" y="536" class="t-muted" font-size="9" text-anchor="middle">Edge / Chrome + CDP</text>
+        <text data-detail="fine" x="720" y="566" class="t-external" font-size="7" text-anchor="middle">干净 UA · persist 分区</text>
+        </g>
+
+        <g id="node-creds" data-node-id="creds" data-node-label="凭证（本机）" tabindex="0" role="button" aria-label="聚焦凭证（本机），~/.dsh/web-login/, 架构组件" aria-pressed="false" data-node-kind="database" data-node-sublabel="~/.dsh/web-login/" data-node-tag="token · cookie · x-hif-*" data-node-context="架构组件">
+          <title>凭证（本机） · ~/.dsh/web-login/ · 架构组件 · token · cookie · x-hif-*</title>
+          <rect x="920" y="470" width="260" height="104" rx="6" class="c-mask"/>
+          <rect x="920" y="470" width="260" height="104" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(926 476) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1050" y="520" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">凭证（本机）</text>
+        <text data-detail="context" x="1050" y="536" class="t-muted" font-size="9" text-anchor="middle">~/.dsh/web-login/</text>
+        <text data-detail="fine" x="1050" y="566" class="t-database" font-size="7" text-anchor="middle">token · cookie · x-hif-*</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="agent" data-edge-to="adapter" data-edge-label="ctx.llm.stream()" data-edge-key="0" data-edge-id="agent-call">
+          <rect x="281.6" y="186" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="325" y="196" class="t-backend" font-size="8" text-anchor="middle">ctx.llm.stream()</text>
+        </g>
+        <g data-detail="context" data-edge-from="adapter" data-edge-to="agent" data-edge-label="tool-call 块回灌" data-edge-key="1" data-edge-id="toolcall-return">
+          <rect x="296.6" y="84" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="340" y="94" class="t-messagebus" font-size="8" text-anchor="middle">tool-call 块回灌</text>
+        </g>
+        <g data-detail="context" data-edge-from="adapter" data-edge-to="web" data-edge-label="HTTPS 私有接口" data-edge-key="2" data-edge-id="adapter-http">
+          <rect x="676.4" y="186" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="715" y="196" class="t-backend" font-size="8" text-anchor="middle">HTTPS 私有接口</text>
+        </g>
+        <g data-detail="context" data-edge-from="web" data-edge-to="adapter" data-edge-label="SSE patch 流" data-edge-key="3" data-edge-id="sse-return">
+          <rect x="682.7" y="288" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="716.5" y="298" class="t-messagebus" font-size="8" text-anchor="middle">SSE patch 流</text>
+        </g>
+        <g data-detail="context" data-edge-from="panel" data-edge-to="hostapi" data-edge-label="HTTP API" data-edge-key="4" data-edge-id="panel-api">
+          <rect x="245.8" y="502" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="270" y="512" class="t-muted" font-size="8" text-anchor="middle">HTTP API</text>
+        </g>
+        <g data-detail="context" data-edge-from="hostapi" data-edge-to="login" data-edge-label="启动窗口" data-edge-key="5" data-edge-id="api-login">
+          <rect x="545.8" y="502" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="570" y="512" class="t-muted" font-size="8" text-anchor="middle">启动窗口</text>
+        </g>
+        <g data-detail="context" data-edge-from="login" data-edge-to="creds" data-edge-label="旁路捕获" data-edge-key="6" data-edge-id="login-capture">
+          <rect x="845.8" y="502" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="870" y="512" class="t-muted" font-size="8" text-anchor="middle">旁路捕获</text>
+        </g>
+        <g data-detail="context" data-edge-from="creds" data-edge-to="adapter" data-edge-label="读取凭证" data-edge-key="7" data-edge-id="creds-read">
+          <rect x="764.3" y="357" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="788.5" y="367" class="t-backend" font-size="8" text-anchor="middle">读取凭证</text>
+        </g>
+
+        <!-- Boundary labels (foreground masks keep routes out of titles) -->
+
+
+        <!-- Legend -->
+        <g data-legend="" data-legend-bridge="">
+          <text x="40" y="606" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="前端" data-legend-x="40" data-legend-baseline="626" data-legend-width="63">
+            <rect x="40" y="617" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="626" class="t-muted" font-size="10" font-weight="500">前端</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="后端" data-legend-x="125" data-legend-baseline="626" data-legend-width="63">
+            <rect x="125" y="617" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="147" y="626" class="t-muted" font-size="10" font-weight="500">后端</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="数据库" data-legend-x="210" data-legend-baseline="626" data-legend-width="73">
+            <rect x="210" y="617" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="232" y="626" class="t-muted" font-size="10" font-weight="500">数据库</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="云服务" data-legend-x="305" data-legend-baseline="626" data-legend-width="73">
+            <rect x="305" y="617" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="327" y="626" class="t-muted" font-size="10" font-weight="500">云服务</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="外部系统" data-legend-x="400" data-legend-baseline="626" data-legend-width="83">
+            <rect x="400" y="617" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="422" y="626" class="t-muted" font-size="10" font-weight="500">外部系统</text>
+          </g>
+        </g>
+      </svg>

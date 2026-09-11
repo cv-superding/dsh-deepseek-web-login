@@ -1,58 +1,276 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="330" viewBox="0 0 1040 330" role="img" aria-label="工具调用协议桥">
-  <defs>
-    <marker id="a2" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
-      <path d="M0 0 L9 3.5 L0 7 z" fill="#475569"/>
-    </marker>
-    <style>
-      .t{font:600 14px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#0f172a}
-      .s{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
-      .x{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:#64748b}
-      .card{fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5}
-      .flow{stroke:#475569;stroke-width:1.6;fill:none;marker-end:url(#a2)}
-    </style>
-  </defs>
-  <rect x="0" y="0" width="1040" height="330" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="24" y="34" class="t">工具调用协议桥：网页端没有原生 function calling，靠「约定 + 双格式容错」实现</text>
+<svg data-theme="light" width="1088" height="668" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1088 668" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+<style>
+<![CDATA[
+svg {
 
-  <rect class="card" x="24" y="56" width="212" height="112" rx="12"/>
-  <text x="40" y="80" class="t">模型流式输出</text>
-  <text x="40" y="104" class="s">{"tool_calls":[…]}</text>
-  <text x="40" y="126" class="s">&lt;tool_calls&gt;&lt;invoke&gt;…</text>
-  <text x="40" y="148" class="x">偶发格式漂移（XML / DSML）</text>
+--bg: #f8fafc;
+      --grid: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-dim: #94a3b8;
+      --text-faint: #64748b;
 
-  <rect class="card" x="278" y="56" width="228" height="112" rx="12"/>
-  <text x="294" y="80" class="t">① 指令层劝阻</text>
-  <text x="294" y="104" class="x">显式禁止 XML/DSML 标记</text>
-  <text x="294" y="124" class="x">说明「标记会被当坏输出展示」</text>
-  <text x="294" y="144" class="x">实测模型会主动拒绝该格式</text>
+      --panel: #ffffff;
+      --panel-border: #e2e8f0;
+      --lane-fill: rgba(248, 250, 252, 0.65);
+      --lane-stroke: #cbd5e1;
 
-  <rect class="card" x="548" y="56" width="228" height="112" rx="12"/>
-  <text x="564" y="80" class="t">② 流式过滤器</text>
-  <text x="564" y="104" class="x">跨包标记 hold-back（&lt;tool_ca + lls&gt;）</text>
-  <text x="564" y="124" class="x">围栏 / 多调用 / 假阳性回退</text>
-  <text x="564" y="144" class="x">JSON 与 XML 两族都认</text>
+      --arrow: #94a3b8;
+      --arrow-emphasis: #059669;
 
-  <rect class="card" x="818" y="56" width="198" height="112" rx="12"/>
-  <text x="834" y="80" class="t">③ 合成 tool-call 块</text>
-  <text x="834" y="104" class="x">block-start / delta / block-end</text>
-  <text x="834" y="124" class="x">finish: tool-calls</text>
-  <text x="834" y="144" class="x">→ DSH 执行真实工具</text>
+      --mask: #ffffff;
 
-  <path class="flow" d="M236 112 H270"/>
-  <path class="flow" d="M506 112 H540"/>
-  <path class="flow" d="M776 112 H810"/>
+      --frontend-fill:    rgba(34, 211, 238, 0.15);
+      --frontend-stroke:  #0891b2;
+      --backend-fill:     rgba(52, 211, 153, 0.18);
+      --backend-stroke:   #059669;
+      --database-fill:    rgba(167, 139, 250, 0.2);
+      --database-stroke:  #7c3aed;
+      --cloud-fill:       rgba(251, 191, 36, 0.18);
+      --cloud-stroke:     #d97706;
+      --security-fill:    rgba(251, 113, 133, 0.15);
+      --security-stroke:  #e11d48;
+      --messagebus-fill:  rgba(251, 146, 60, 0.15);
+      --messagebus-stroke:#ea580c;
+      --external-fill:    rgba(148, 163, 184, 0.18);
+      --external-stroke:  #64748b;
 
-  <rect class="card" x="278" y="192" width="498" height="112" rx="12"/>
-  <text x="294" y="216" class="t">非法 JSON 宽容修复（实测踩坑）</text>
-  <text x="294" y="240" class="s">"F:\AdobeAll\...\resources\app.asar"   ← 单反斜杠</text>
-  <text x="294" y="262" class="x">\A 是非法转义；而 \r 合法却会把 \resources 静默变成回车 → 路径被改坏</text>
-  <text x="294" y="284" class="x">多候选修复链：整串按字面还原 + 路径尾反斜杠启发式，逐字还原路径</text>
+      --toolbar-bg:       rgba(255, 255, 255, 0.92);
+      --toolbar-border:   #cbd5e1;
+      --toolbar-text:     #334155;
+      --toolbar-hover:    #ffffff;
+      --toolbar-menu-bg:  #ffffff;
+}
+svg .archify-export-bg { fill: var(--bg); }
+/* ========================================================== SVG SEMANTIC CLASSES — use these instead of inline fill/stroke ========================================================== */ .c-grid { stroke: var(--grid); fill: none; }
+.c-mask { fill: var(--mask); stroke: none; }
+.c-backend { fill: var(--backend-fill); stroke: var(--backend-stroke); }
+.c-security { fill: var(--security-fill); stroke: var(--security-stroke); }
+.c-messagebus { fill: var(--messagebus-fill); stroke: var(--messagebus-stroke); }
+.c-external { fill: var(--external-fill); stroke: var(--external-stroke); }
+/* Text helpers */ .t-primary { fill: var(--text); }
+.t-muted { fill: var(--text-muted); }
+.t-dim { fill: var(--text-dim); }
+.t-backend { fill: var(--backend-stroke); }
+.t-security { fill: var(--security-stroke); }
+.t-messagebus { fill: var(--messagebus-stroke); }
+.t-external { fill: var(--external-stroke); }
+/* Semantic Sigils are small authored role stamps, not icons from a brand pack and not viewer controls. Prefix selectors with svg so the canonical export's SVG-only stylesheet collector keeps them automatically. */ svg .semantic-sigil { fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; opacity: 0.76; pointer-events: none; }
+svg .semantic-sigil > * { vector-effect: non-scaling-stroke; }
+svg .semantic-sigil .sigil-fill { fill: currentColor; stroke: none; }
+svg .s-backend { color: var(--backend-stroke); }
+svg .s-security { color: var(--security-stroke); }
+svg .s-messagebus { color: var(--messagebus-stroke); }
+svg .s-external { color: var(--external-stroke); }
+/* Arrows */ .a-default { stroke: var(--arrow); fill: none; }
+.a-emphasis { stroke: var(--arrow-emphasis); fill: none; }
+.a-security { stroke: var(--security-stroke); fill: none; stroke-dasharray: 5,5; }
+.a-dashed { stroke: var(--database-stroke); fill: none; stroke-dasharray: 4,4; }
+/* Arrowhead markers reference these */ .m-default { fill: var(--arrow); }
+.m-emphasis { fill: var(--arrow-emphasis); }
+.m-security { fill: var(--security-stroke); }
+.m-dashed { fill: var(--database-stroke); }
+/* Dashed boundary variants */ .c-security-group { fill: transparent; stroke: var(--security-stroke); stroke-dasharray: 4,4; }
+.c-lane { fill: var(--lane-fill); stroke: var(--lane-stroke); stroke-dasharray: 6,6; }
+]]>
+</style>
+<rect width="100%" height="100%" class="archify-export-bg"/>
 
-  <rect class="card" x="818" y="192" width="198" height="112" rx="12"/>
-  <text x="834" y="216" class="t">解析不出时</text>
-  <text x="834" y="240" class="x">降级为普通正文</text>
-  <text x="834" y="260" class="x">绝不静默丢内容</text>
-  <text x="834" y="284" class="x">（用户可见、可反馈）</text>
-  <path class="flow" d="M594 248 H810"/>
-  <path class="flow" d="M776 112 V180 H692 V192"/>
-</svg>
+        <title id="archify-diagram-title">工具调用协议桥：从模型流到真实工具执行</title>
+        <desc id="archify-diagram-description">由 Archify 生成的工作流图。</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Swimlanes -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="1032" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="74" class="t-dim" font-size="10" font-weight="600">01 / 模型输出</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="178" width="1032" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="200" class="t-dim" font-size="10" font-weight="600">02 / 适配器管线</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="304" width="1032" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="326" class="t-dim" font-size="10" font-weight="600">03 / DSH 运行时</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="430" width="1032" height="114" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-3-exception" x="46" y="436" width="1020" height="102" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="54" y="452" class="t-security" font-size="10" font-weight="600">EX / 修复与降级</text>
+
+        <!-- Phase headers -->
+        <line x1="80" y1="35" x2="292" y2="35" class="a-default" stroke-width="1.1"/>
+        <rect x="80" y="27" width="212" height="16" rx="4" class="c-mask"/>
+        <text x="186" y="39" class="t-muted" font-size="8" font-weight="600" text-anchor="middle">约束与接收</text>
+        <line x1="320" y1="35" x2="648.4" y2="35" class="a-emphasis" stroke-width="1.1"/>
+        <rect x="320" y="27" width="328.4" height="16" rx="4" class="c-mask"/>
+        <text x="484.2" y="39" class="t-backend" font-size="8" font-weight="600" text-anchor="middle">识别与修复</text>
+        <line x1="810" y1="35" x2="1022" y2="35" class="a-dashed" stroke-width="1.1"/>
+        <rect x="810" y="27" width="212" height="16" rx="4" class="c-mask"/>
+        <text x="916" y="39" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle">合成与交接</text>
+
+        <!-- Workflow groups -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="group" data-composition-frame-id="group-0" x="774" y="468" width="164" height="72" rx="9" class="c-security-group" stroke-width="1"/>
+        <text x="784" y="466" class="t-security" font-size="7" font-weight="600">解析失败时</text>
+
+        <!-- Edge paths -->
+        <path data-edge-from="filter" data-edge-to="repair" data-edge-label="JSON 解析失败" data-edge-key="0" data-edge-id="filter-to-repair" data-composition-points="444,246;524.4,246" d="M 444 246 L 524.4 246" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="prompt_guard" data-edge-to="model_stream" data-edge-label="写入系统提示" data-edge-key="1" data-edge-id="guard-to-model" data-composition-points="126,280;126,300;239,300;239,154" d="M 126 280 L 126 300 L 239 300 L 239 154" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="repair" data-edge-to="fallback" data-edge-label="解析不出" data-edge-key="2" data-edge-id="repair-to-fallback" data-composition-points="602.4,280;602.4,505;778,505" d="M 602.4 280 L 602.4 505 L 778 505" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="repair" data-edge-to="synthesize" data-edge-label="逐字还原参数" data-edge-key="3" data-edge-id="repair-to-synth" data-composition-points="680.4,246;756,246" d="M 680.4 246 L 756 246" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="model_stream" data-edge-to="filter" data-edge-label="原始分块" data-edge-key="4" data-edge-id="stream-to-filter" data-composition-points="246,154;246,300;366,300;366,280" d="M 246 154 L 246 300 L 366 300 L 366 280" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="synthesize" data-edge-to="tool_exec" data-edge-label="tool-call 块" data-edge-key="5" data-edge-id="synth-to-tool" data-composition-points="856,280;856,426;976,426;976,398" d="M 856 280 L 856 426 L 976 426 L 976 398" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Nodes -->
+        <g id="node-model_stream" data-node-id="model_stream" data-node-label="模型流式输出" tabindex="0" role="button" aria-label="聚焦模型流式输出，分块到达, 模型输出 › 约束与接收" aria-pressed="false" data-node-kind="external" data-node-sublabel="分块到达" data-node-tag="JSON 或 XML/DSML" data-node-context="模型输出 › 约束与接收">
+          <title>模型流式输出 · 分块到达 · 模型输出 › 约束与接收 · JSON 或 XML/DSML</title>
+          <rect x="168" y="86" width="156" height="68" rx="6" class="c-mask"/>
+          <rect x="168" y="86" width="156" height="68" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(174 92) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="246" y="107" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">模型流式输出</text>
+          <text data-detail="context" x="246" y="124" class="t-muted" font-size="8" text-anchor="middle">分块到达</text>
+        <text data-detail="fine" x="246" y="142" class="t-external" font-size="7" text-anchor="middle">JSON 或 XML/DSML</text>
+        </g>
+
+        <g id="node-prompt_guard" data-node-id="prompt_guard" data-node-label="指令层劝阻" tabindex="0" role="button" aria-label="聚焦指令层劝阻，显式禁止 XML/DSML, 适配器管线 › 约束与接收" aria-pressed="false" data-node-kind="security" data-node-sublabel="显式禁止 XML/DSML" data-node-tag="说明后果" data-node-context="适配器管线 › 约束与接收">
+          <title>指令层劝阻 · 显式禁止 XML/DSML · 适配器管线 › 约束与接收 · 说明后果</title>
+          <rect x="48" y="212" width="156" height="68" rx="6" class="c-mask"/>
+          <rect x="48" y="212" width="156" height="68" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(54 218) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="126" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">指令层劝阻</text>
+          <text data-detail="context" x="126" y="250" class="t-muted" font-size="8" text-anchor="middle">显式禁止 XML/DSML</text>
+        <text data-detail="fine" x="126" y="268" class="t-security" font-size="7" text-anchor="middle">说明后果</text>
+        </g>
+
+        <g id="node-filter" data-node-id="filter" data-node-label="流式过滤器" tabindex="0" role="button" aria-label="聚焦流式过滤器，跨包标记 hold-back, 适配器管线 › 识别与修复" aria-pressed="false" data-node-kind="backend" data-node-sublabel="跨包标记 hold-back" data-node-tag="围栏 · 多调用" data-node-context="适配器管线 › 识别与修复">
+          <title>流式过滤器 · 跨包标记 hold-back · 适配器管线 › 识别与修复 · 围栏 · 多调用</title>
+          <rect x="288" y="212" width="156" height="68" rx="6" class="c-mask"/>
+          <rect x="288" y="212" width="156" height="68" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(294 218) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="366" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">流式过滤器</text>
+          <text data-detail="context" x="366" y="250" class="t-muted" font-size="8" text-anchor="middle">跨包标记 hold-back</text>
+        <text data-detail="fine" x="366" y="268" class="t-backend" font-size="7" text-anchor="middle">围栏 · 多调用</text>
+        </g>
+
+        <g id="node-repair" data-node-id="repair" data-node-label="宽容修复" tabindex="0" role="button" aria-label="聚焦宽容修复，非法 JSON, 适配器管线 › 识别与修复" aria-pressed="false" data-node-kind="backend" data-node-sublabel="非法 JSON" data-node-tag="单反斜杠路径" data-node-context="适配器管线 › 识别与修复">
+          <title>宽容修复 · 非法 JSON · 适配器管线 › 识别与修复 · 单反斜杠路径</title>
+          <rect x="524.4" y="212" width="156" height="68" rx="6" class="c-mask"/>
+          <rect x="524.4" y="212" width="156" height="68" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(530.4 218) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="602.4" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">宽容修复</text>
+          <text data-detail="context" x="602.4" y="250" class="t-muted" font-size="8" text-anchor="middle">非法 JSON</text>
+        <text data-detail="fine" x="602.4" y="268" class="t-backend" font-size="7" text-anchor="middle">单反斜杠路径</text>
+        </g>
+
+        <g id="node-synthesize" data-node-id="synthesize" data-node-label="合成 tool-call 块" tabindex="0" role="button" aria-label="聚焦合成 tool-call 块，block-start / delta / block-end, 适配器管线 › 合成与交接" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="block-start / delta / block-end" data-node-tag="finish: tool-calls" data-node-context="适配器管线 › 合成与交接">
+          <title>合成 tool-call 块 · block-start / delta / block-end · 适配器管线 › 合成与交接 · finish: tool-calls</title>
+          <rect x="756" y="212" width="200" height="68" rx="6" class="c-mask"/>
+          <rect x="756" y="212" width="200" height="68" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(762 218) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="856" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">合成 tool-call 块</text>
+          <text data-detail="context" x="856" y="250" class="t-muted" font-size="8" text-anchor="middle">block-start / delta / block-end</text>
+        <text data-detail="fine" x="856" y="268" class="t-messagebus" font-size="7" text-anchor="middle">finish: tool-calls</text>
+        </g>
+
+        <g id="node-tool_exec" data-node-id="tool_exec" data-node-label="DSH 执行真实工具" tabindex="0" role="button" aria-label="聚焦DSH 执行真实工具，结果回灌下一轮, DSH 运行时 › 合成与交接" aria-pressed="false" data-node-kind="backend" data-node-sublabel="结果回灌下一轮" data-node-context="DSH 运行时 › 合成与交接">
+          <title>DSH 执行真实工具 · 结果回灌下一轮 · DSH 运行时 › 合成与交接</title>
+          <rect x="888" y="346" width="176" height="52" rx="6" class="c-mask"/>
+          <rect x="888" y="346" width="176" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(894 352) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="976" y="367" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DSH 执行真实工具</text>
+          <text data-detail="context" x="976" y="384" class="t-muted" font-size="8" text-anchor="middle">结果回灌下一轮</text>
+        </g>
+
+        <g id="node-fallback" data-node-id="fallback" data-node-label="降级为正文" tabindex="0" role="button" aria-label="聚焦降级为正文，绝不静默丢内容, 修复与降级 › 解析失败时 › 合成与交接" aria-pressed="false" data-node-kind="security" data-node-sublabel="绝不静默丢内容" data-node-tag="用户可见" data-node-context="修复与降级 › 解析失败时 › 合成与交接">
+          <title>降级为正文 · 绝不静默丢内容 · 修复与降级 › 解析失败时 › 合成与交接 · 用户可见</title>
+          <rect x="778" y="471" width="156" height="68" rx="6" class="c-mask"/>
+          <rect x="778" y="471" width="156" height="68" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(784 477) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="856" y="492" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">降级为正文</text>
+          <text data-detail="context" x="856" y="509" class="t-muted" font-size="8" text-anchor="middle">绝不静默丢内容</text>
+        <text data-detail="fine" x="856" y="527" class="t-security" font-size="7" text-anchor="middle">用户可见</text>
+        </g>
+
+        <!-- Edge labels -->
+        <g data-detail="context" data-edge-from="filter" data-edge-to="repair" data-edge-label="JSON 解析失败" data-edge-key="0" data-edge-id="filter-to-repair">
+          <rect x="448" y="226" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="484.2" y="236" class="t-muted" font-size="8" text-anchor="middle">JSON 解析失败</text>
+        </g>
+        <g data-detail="context" data-edge-from="prompt_guard" data-edge-to="model_stream" data-edge-label="写入系统提示" data-edge-key="1" data-edge-id="guard-to-model">
+          <rect x="148.7" y="280" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="182.5" y="290" class="t-security" font-size="8" text-anchor="middle">写入系统提示</text>
+        </g>
+        <g data-detail="context" data-edge-from="repair" data-edge-to="fallback" data-edge-label="解析不出" data-edge-key="2" data-edge-id="repair-to-fallback">
+          <rect x="666" y="485" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="690.2" y="495" class="t-security" font-size="8" text-anchor="middle">解析不出</text>
+        </g>
+        <g data-detail="context" data-edge-from="repair" data-edge-to="synthesize" data-edge-label="逐字还原参数" data-edge-key="3" data-edge-id="repair-to-synth">
+          <rect x="684.4000000000001" y="226" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="718.2" y="236" class="t-muted" font-size="8" text-anchor="middle">逐字还原参数</text>
+        </g>
+        <g data-detail="context" data-edge-from="model_stream" data-edge-to="filter" data-edge-label="原始分块" data-edge-key="4" data-edge-id="stream-to-filter">
+          <rect x="281.8" y="280" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="306" y="290" class="t-backend" font-size="8" text-anchor="middle">原始分块</text>
+        </g>
+        <g data-detail="context" data-edge-from="synthesize" data-edge-to="tool_exec" data-edge-label="tool-call 块" data-edge-key="5" data-edge-id="synth-to-tool">
+          <rect x="882.2" y="406" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="916" y="416" class="t-backend" font-size="8" text-anchor="middle">tool-call 块</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend="" data-legend-bridge="">
+          <text x="20" y="568" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Agent 逻辑" data-legend-x="20" data-legend-baseline="588" data-legend-width="87">
+            <rect x="20" y="580" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="42" y="588" class="t-muted" font-size="7.5" font-weight="500">Agent 逻辑</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="策略" data-legend-x="114" data-legend-baseline="588" data-legend-width="61">
+            <rect x="114" y="580" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="136" y="588" class="t-muted" font-size="7.5" font-weight="500">策略</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="工具操作" data-legend-x="182" data-legend-baseline="588" data-legend-width="78">
+            <rect x="182" y="580" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="204" y="588" class="t-muted" font-size="7.5" font-weight="500">工具操作</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="外部系统" data-legend-x="267" data-legend-baseline="588" data-legend-width="78">
+            <rect x="267" y="580" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="289" y="588" class="t-muted" font-size="7.5" font-weight="500">外部系统</text>
+          </g>
+        </g>
+      </svg>
