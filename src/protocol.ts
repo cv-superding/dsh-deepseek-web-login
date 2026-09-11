@@ -472,60 +472,49 @@ export function* jsonRepairCandidates(text: string): Generator<string> {
 }
 
 /**
- * 结构性修复候选：模型偶尔**漏写调用对象的闭合括号**。
+ * 结构性修复候选：模型写的 tool_calls JSON 常有**括号结构错误**（漏写闭合、数组/对象闭合顺序错乱）。
  *
- * 实测（2026-09，deepseek-reasoner 一次批量 3 个调用）：每个 tool_call 都少写一个 `}`
- * （只闭合了 `arguments`，没闭合调用对象自己）。JSON.parse 报
- * `Expected double-quoted property name`，于是整段调用被降级成正文 → 泄漏。
+ * 已覆盖的实测形态：
+ *  - 每个调用对象少写一个 `}`（2026-09 事故 #4：批量 3 个调用各少一个）
+ *  - arguments 写成数组、且 `]`/`}` 顺序错乱（2026-09-11 事故 #5：
+ *    `{"tool_calls":[{"name":"pwsh","arguments":[{…}}]}`  ← args 数组没闭合就写了 `}`）
+ *  - 外层对象少写收尾 `}`
  *
- * 做法：按元素边界切开 `tool_calls` 数组，给每个元素补齐它自身缺的 `}`。
- * 边界判定不能靠「嵌套深度回到 0」—— 恰恰因为元素没闭合，深度回不到 0；
- * 只能靠形状：逗号后紧跟 `{"name":`。
- * **只补括号，绝不改写内容**（不猜测引号语义，避免把命令改坏）。
- *
- * ⚠️ **安全闸门**：只修补「数组已经闭合」（以 `]` 收尾）的文本 —— 那是模型**写完了**的信号
- * （实测样本以 `]}` 收尾）。若连 `]` 都没有，多半是流被服务端 60s 上限截断/中断，
- * 此时补括号会得到一条**被截断的命令**并真的执行它；宁可拒绝（→ 重试），也不执行半条命令。
+ * 做法（rebuildToolCallJson）：栈引导重排 —— 遇到不匹配的闭合符时，**插入缺失的容器闭合**
+ * 使其匹配。只插入括号，绝不改写字符串内容。配合 parseToolCallJson 的
+ * 「arguments 数组 → 取唯一元素」解包，这类调用可以完整恢复并执行。
  */
 export function* structuralRepairCandidates(text: string): Generator<string> {
   const marker = /^\s*\{\s*"tool_calls?"\s*:\s*\[/.exec(text)
   if (!marker) return
-  const scanned = splitToolCallArray(text, marker[0].length)
-  if (!scanned) return
-  // 安全闸门：只修补「数组已闭合」的文本（详见上方 JSDoc）
-  if (!/^\][\s}\]`]*$/.test(scanned.tail)) return
-  const deficits = scanned.chunks.map(braceDeficit)
-  const fixed = scanned.chunks.map((chunk, index) =>
-    deficits[index] > 0 ? `${chunk.replace(/[\s,]+$/, '')}${'}'.repeat(deficits[index])}` : chunk,
-  )
-  const repairedInner = deficits.some((value) => value > 0)
-  // 外层对象也常缺最后一个 `}`（`{"tool_calls":[…]` 就此收笔）。
-  // 数组已闭合 = 模型写完了，补外层括号是安全的 —— 这条以前漏了，导致整批调用被丢掉。
-  const [closers, junk] = splitArrayTail(scanned.tail)
-  const needsOuter = !closers.includes('}')
-  const body = `${marker[0]}${fixed.join(',')}`
-  if (repairedInner) yield `${body}]${closers}${junk}`
-  if (repairedInner || needsOuter) yield `${body}]${closers}${needsOuter ? '}' : ''}${junk}`
+  const rebuilt = rebuildToolCallJson(text)
+  if (rebuilt && rebuilt !== text) yield rebuilt
 }
 
-/** 拆开数组收尾：`]` 之后的 `}`/空白 与更后面的杂质（围栏、多余字符）。 */
-function splitArrayTail(tail: string): [string, string] {
-  const after = tail.replace(/^\]/, '')
-  const match = /^[\s}]*/.exec(after)
-  const closers = match ? match[0] : ''
-  return [closers, after.slice(closers.length)]
-}
-
-/** 按 `,{"name":` 形状把数组内容切成若干个调用元素（字符串感知）。 */
-function splitToolCallArray(text: string, start: number): { chunks: string[]; tail: string } | null {
-  const chunks: string[] = []
-  let current = ''
+/**
+ * 栈引导的 tool_calls JSON 重排（只在严格解析失败后使用，**只插入括号、绝不改写字符串内容**）。
+ *
+ * 规则：
+ *  1) 正常的开/闭符合配 → 原样输出并弹栈；
+ *  2) 闭合符与栈顶不匹配 → 在其前**插入**能使它匹配的闭合序列（有上限保护），再正常闭合；
+ *  3) `,` 出现在 tool_calls 数组的元素层级、而栈顶是未闭合的调用对象 → 先补 `}`
+ *     （实测形态：批量调用每个元素都少写一个 `}`）；
+ *  4) 收尾按栈补齐剩余闭合。
+ *
+ * ⚠️ 安全闸门：扫描结束时若**仍在字符串内**（流被服务端 60s 上限截断的典型特征）→ 返回 null。
+ * 此时补括号会得到一条**被截断的命令**并真的执行它 —— 宁可拒绝（→ 重试），也不执行半条命令。
+ */
+export function rebuildToolCallJson(text: string): string | null {
+  if (!/^\s*\{\s*"tool_calls?"\s*:\s*\[/.test(text)) return null
+  let out = ''
+  const stack: string[] = []
   let inString = false
   let escape = false
-  for (let i = start; i < text.length; i++) {
+  let insertions = 0
+  for (let i = 0; i < text.length; i++) {
     const ch = text[i]
     if (inString) {
-      current += ch
+      out += ch
       if (escape) escape = false
       else if (ch === '\\') escape = true
       else if (ch === '"') inString = false
@@ -533,43 +522,56 @@ function splitToolCallArray(text: string, start: number): { chunks: string[]; ta
     }
     if (ch === '"') {
       inString = true
-      current += ch
+      out += ch
       continue
     }
-    if (ch === ']') {
-      chunks.push(current)
-      return { chunks, tail: text.slice(i) }
-    }
-    if (ch === ',' && /^\s*\{\s*"name"\s*:/.test(text.slice(i + 1))) {
-      chunks.push(current)
-      current = ''
+    if (ch === '{' || ch === '[') {
+      stack.push(ch)
+      out += ch
       continue
     }
-    current += ch
+    if (ch === '}' || ch === ']') {
+      const want = ch === '}' ? '{' : '['
+      while (stack.length > 0 && stack[stack.length - 1] !== want) {
+        if (insertions >= 8) return null
+        out += stack[stack.length - 1] === '{' ? '}' : ']'
+        stack.pop()
+        insertions += 1
+      }
+      if (stack.length === 0) return null
+      stack.pop()
+      out += ch
+      continue
+    }
+    if (ch === ',') {
+      // `,` 在 tool_calls 数组的**元素层级**（数组之上只有一层调用对象）而栈顶未闭合
+      // → 模型忘了写这个元素的 `}`，补上（实测：批量调用每个都少一个 `}`）。
+      // 数组之上超过一层 = 逗号在元素内部的合法位置（args 对象/数组里），不动。
+      // ⚠️ 还必须带前瞻：调用对象内部的键分隔逗号（"name" 与 "arguments" 之间）在这一刻的
+      // 深度同样是 1，但后面跟的是 `"arguments"` 而不是 `{"name"` —— 不带前瞻会把每个调用对象拦腰补坏。
+      const bracketIndex = stack.indexOf('[')
+      if (
+        bracketIndex === 1 &&
+        stack.length - bracketIndex - 1 === 1 &&
+        stack[stack.length - 1] === '{' &&
+        /^\s*\{\s*"name"\s*:/.test(text.slice(i + 1))
+      ) {
+        out += '}'
+        stack.pop()
+        insertions += 1
+      }
+      out += ch
+      continue
+    }
+    out += ch
   }
-  if (!current.trim()) return null
-  chunks.push(current)
-  return { chunks, tail: '' }
-}
-
-/** 一个片段自身的括号亏空（字符串感知）：> 0 表示缺这么多闭合括号。 */
-function braceDeficit(chunk: string): number {
-  let depth = 0
-  let inString = false
-  let escape = false
-  for (let i = 0; i < chunk.length; i++) {
-    const ch = chunk[i]
-    if (inString) {
-      if (escape) escape = false
-      else if (ch === '\\') escape = true
-      else if (ch === '"') inString = false
-      continue
-    }
-    if (ch === '"') inString = true
-    else if (ch === '{' || ch === '[') depth += 1
-    else if (ch === '}' || ch === ']') depth -= 1
+  if (inString) return null // 安全闸门（见上）
+  if (insertions > 8) return null
+  while (stack.length > 0) {
+    out += stack[stack.length - 1] === '{' ? '}' : ']'
+    stack.pop()
   }
-  return depth
+  return out
 }
 
 /**
@@ -881,6 +883,11 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
     const name = typeof entry.name === 'string' ? entry.name : typeof entry.tool === 'string' ? entry.tool : ''
     if (!name) continue
     let args = entry.arguments ?? entry.parameters ?? entry.args ?? {}
+    // 模型偶尔把 arguments 写成**数组**（实测 2026-09-11：arguments:[{…}]，规范是对象）。
+    // 只有一个对象元素时取该元素 —— 否则参数会被序列化成 "[{…}]"，工具拿到的是垃圾。
+    if (Array.isArray(args) && args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
+      args = args[0]
+    }
     if (typeof args === 'string') {
       // 已经是字符串：能解析就原样透出（DSH 的 arguments 语义是原始 JSON 串），否则包装
       const reparsed = parseJsonLenient(args)

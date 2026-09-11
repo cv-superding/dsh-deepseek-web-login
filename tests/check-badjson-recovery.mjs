@@ -137,6 +137,37 @@ test('⑫ 大批量多行命令（模拟真实长命令）', () => {
   assert.ok(cmd.includes('"done: $($?)"'), `实际: ${JSON.stringify(cmd.slice(-60))}`)
 })
 
+// ── 2026-09-11 真实事故：arguments 写成数组 + 闭合括号数错（原文逐字取自 rejected.jsonl）──
+// 现场：模型发 \`{"tool_calls":[{"name":"pwsh","arguments":[{…}]}\` —— 少了收尾的 ]}
+// 旧修复用 '}'.repeat(deficit) 盲补 '}'，但未闭合的其实是**数组** → 补出的候选仍是非法 JSON
+// → 整个调用被丢弃（用户看到的正是「回复戛然而止、工具没执行」）。
+const SAMPLE_ARGUMENTS_ARRAY = "{\"tool_calls\":[{\"name\":\"pwsh\",\"arguments\":[{\"command\":\"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $f='C:\\\\Users\\\\29436\\\\.dsh\\\\profiles\\\\desktop\\\\cordis.patch.yml'; Get-Content $f -Raw\",\"description\":\"读取 desktop profile 的 patch 文件全文\"}}]}"
+
+test('真实事故：arguments 数组 + 少写闭合括号 → 修复并解包成真正参数', () => {
+  assert.throws(() => JSON.parse(SAMPLE_ARGUMENTS_ARRAY), '前提：原文是非法 JSON（少写 ]}）')
+  const calls = parseToolCallJson(SAMPLE_ARGUMENTS_ARRAY)
+  assert.ok(calls && calls.length === 1, 'calls=' + JSON.stringify(calls))
+  assert.equal(calls[0].name, 'pwsh')
+  const args = JSON.parse(calls[0].arguments)
+  assert.ok(args && typeof args === 'object' && !Array.isArray(args), 'arguments 必须解包成对象，不能是数组：' + calls[0].arguments)
+  assert.ok(String(args.command).startsWith('[Console]::OutputEncoding'), args.command)
+  assert.ok(String(args.command).includes('cordis.patch.yml'), args.command)
+  assert.ok(String(args.description || '').length > 0, 'description 应保留')
+})
+
+test('arguments 写成数组（闭合完整）也要解包成对象', () => {
+  const payload = '{"tool_calls":[{"name":"read","arguments":[{"file_path":"a.txt"}]}]}'
+  const calls = parseToolCallJson(payload)
+  assert.ok(calls && calls.length === 1, JSON.stringify(calls))
+  assert.deepEqual(JSON.parse(calls[0].arguments), { file_path: 'a.txt' })
+})
+
+test('对照：合法调用不受解包逻辑影响', () => {
+  const calls = parseToolCallJson('{"tool_calls":[{"name":"x","arguments":{"a":1}}]}')
+  assert.deepEqual(JSON.parse(calls[0].arguments), { a: 1 })
+})
+
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
 if (failures.length) process.exitCode = 1
