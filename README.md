@@ -141,6 +141,8 @@ prompt 字符上限默认 1,200,000（可配）。
 | `maxPromptChars` | `1500000` | 送出 prompt 的字符上限（超出走中段截断：保系统提示+工具协议与最近回合） |
 | `idleTimeoutMs` | `120000` | SSE 空闲超时 |
 | `deleteWebSessions` | `true` | 调用后删除临时网页端会话 |
+| `autoContinue` | `true` | 回答在句中被截时自动发起新请求续写（无缝拼进同一条回答）；截断提示从此不出现 |
+| `maxContinuations` | `2` | 自动续写的最大轮数（每轮是一次新的网页端请求，调高消耗更多免费额度） |
 
 ## 已知限制
 

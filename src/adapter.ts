@@ -156,6 +156,14 @@ export interface AdapterConfig {
   idleTimeoutMs?: number
   /** 是否在调用结束后删除网页端会话（默认 true）。 */
   deleteWebSessions?: boolean
+  /**
+   * 回答在句中被截时自动发起新请求续写（默认开启）。
+   * 续写内容无缝拼进同一条回答；无论续写是否补全，都不会再报 max-tokens
+   * （应用户要求移除「已达到输出 token 上限」提示）。
+   */
+  autoContinue?: boolean
+  /** 自动续写的最大轮数（默认 2；每轮是一次新的网页端请求）。 */
+  maxContinuations?: number
   /** 日志器（cordis logger；缺省静默）。 */
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
 }
@@ -168,6 +176,8 @@ export interface AdapterDeps {
    * 缺省时图片输入不可用（会退化成文本占位提示）。
    */
   readImage?: (ref: any, signal?: AbortSignal) => Promise<{ data: Uint8Array; mediaType?: string; name?: string }>
+  /** 注入自定义流函数（单测用假流验证自动续写）；缺省用 streamWebCompletion。 */
+  streamCompletion?: (auth: WebAuth, params: any) => AsyncGenerator<any>
 }
 
 function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
@@ -223,23 +233,13 @@ function resolveThinking(options: any, spec: ModelSpec): { thinkingEnabled: bool
 }
 
 /**
- * 网页端 finish 归一。
- * 实测：正常完成必定带 `response/status: FINISHED`；若流在没有该标记的情况下结束，
- * 说明被服务端上限打断（`completion_request_timeout_ms = 60000`，网页端靠
- * sse_auto_resume 续接，本适配器不实现续接）→ 报 max-tokens 而不是假装 stop，
- * 让上层知道回答被截断。
- *
- * 2026-09-11 补充：还有一种形态 —— 服务端**发了 FINISHED 但正文在句中被截**
- * （实测：60s 内以 FINISHED 收笔、最后一个字符是句中汉字/字母/`**` 标记）。
- * 此时也按 max-tensors 报（让 UI 提示「可能被截断」），启发式判据见 looksMidSentence。
+ * 自动续写的用户指令（流被截后，适配器自动发起新请求让模型接着写——
+ * 等价于用户手动说「继续」，但无需用户参与、且文本无缝拼接进同一条回答）。
  */
-function mapFinish(reason: string | undefined, finalText?: string): { kind: 'stop' } | { kind: 'max-tokens' } {
-  if (reason === undefined) return { kind: 'max-tokens' }
-  const text = String(reason).toUpperCase()
-  if (text.includes('LENGTH') || text.includes('MAX_TOKEN')) return { kind: 'max-tokens' }
-  if (finalText !== undefined && looksMidSentence(finalText)) return { kind: 'max-tokens' }
-  return { kind: 'stop' }
-}
+const CONTINUE_INSTRUCTION =
+  '继续：请从你上一条回复的结尾处无缝接着往下写——不要重复任何已输出的内容，' +
+  '不要加「好的」「以下是」之类的开场白，不要重新组织语言；' +
+  '如果上一条回复停在句子中间，就从那个断点直接把句子写完并继续。'
 
 /**
  * 启发式：正文是否「在句中被截」。
@@ -269,6 +269,8 @@ function looksMidSentence(text: string): boolean {
 /** 构造 deepseek-web 适配器（鸭子类型满足 LlmAdapter 契约，无需继承）。 */
 export function createAdapter(deps: AdapterDeps) {
   const logger = deps.config.logger
+  // 流函数可注入（单测用假流验证自动续写）；缺省走真实网页端实现
+  const runStream = deps.streamCompletion ?? streamWebCompletion
 
   const adapter = {
     providerInfo(provider: string) {
@@ -388,10 +390,12 @@ export function createAdapter(deps: AdapterDeps) {
     })
 
     const knownNames = new Set<string>((options?.tools ?? []).map((tool: any) => String(tool?.name ?? '')))
-    const filter = new ToolCallStreamFilter(knownNames)
+    // 自动续写的每一轮用全新的过滤器/守卫实例（上一轮的状态在轮次收尾时已吐净），
+    // 否则跨请求的行缓冲会让续写内容与 hold 的尾部乱序。
+    let filter = new ToolCallStreamFilter(knownNames)
     // 第二道网：模型会模仿 prompt 里的转写格式（`[Tool Result for …]` / `User:` / `Assistant:`…），
     // 把「对话转写」当回答吐出来。这与工具调用标记泄漏是两个独立来源，必须分开防。
-    const echoGuard = new TranscriptEchoGuard()
+    let echoGuard = new TranscriptEchoGuard()
 
     let nextIndex = 0
     let textBlock: { index: number; text: string } | null = null
@@ -429,11 +433,20 @@ export function createAdapter(deps: AdapterDeps) {
     }
 
     try {
-      for await (const event of streamWebCompletion(auth as WebAuth, {
-        prompt,
+      // ── 自动续写循环 ──
+      // 服务端会在句中截断生成（实测：两个窗口共用同一账号时，后来的请求会抢占在生成中的流，
+      // 被抢占的流以 FINISHED 收尾）。截断发生时，这里自动发起新请求让模型「接着写」，
+      // 并把续写内容无缝拼进同一条回答 —— 等价于用户手动说「继续」，但无需用户参与。
+      let rounds = 0
+      let currentPrompt = prompt
+      for (;;) {
+        let roundError: AdapterLlmError | undefined
+        try {
+      for await (const event of runStream(auth as WebAuth, {
+        prompt: currentPrompt,
         thinkingEnabled,
         modelType: spec.modelType,
-        refFileIds,
+        refFileIds: rounds === 0 ? refFileIds : [],
         signal: options?.signal,
         idleTimeoutMs: deps.config.idleTimeoutMs ?? 120_000,
         onDeleteSession: deps.config.deleteWebSessions === false ? undefined : (sessionId: string) => {
@@ -496,36 +509,80 @@ export function createAdapter(deps: AdapterDeps) {
           finishReason = event.reason
         }
       }
-
-      // 流尾：把过滤器里 hold-back / 未配平的残余吐出来
-      const tail = filter.flush()
-      const tailGuarded = echoGuard.flush()
-      if (tailGuarded.echoed) echoedTranscript = true
-      const tailText = tail.text + tailGuarded.text
-      if (tailText) {
-        const block = openText()
-        if (!textStarted) {
-          textStarted = true
-          yield { type: 'block-start', index: block.index, blockType: 'text' }
+        } catch (error: any) {
+          // 续写轮次失败：保留已上屏的部分并正常收尾（正文已经给用户看到一部分，
+          // 此时让整轮失败只会更糟）。仅中止（用户取消）向上抛。
+          if (rounds > 0) {
+            if (options?.signal?.aborted) throw new AdapterLlmError('deepseek-web 请求被调用方取消', 'ABORTED', { cause: error })
+            roundError = error instanceof AdapterLlmError
+              ? error
+              : new AdapterLlmError(`deepseek-web 自动续写失败：${error?.message ?? error}`, 'TRANSPORT', { cause: error })
+            logger?.warn?.(`deepseek-web: 自动续写第 ${rounds} 轮失败，保留已输出部分：${roundError.message}`)
+          } else {
+            throw error
+          }
         }
-        block.text += tailText
-        yield { type: 'text-delta', index: block.index, text: tailText }
-      }
-      if (tail.calls.length > 0) yield* emitCalls(tail.calls)
-      if (tail.rejected) {
-        // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
-        // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
-        rejectedProtocol = tail.rejected.raw
-        const reason = tail.rejected.reason ?? 'unparsable'
-        rejectedReason = reason
-        // 完整载荷落盘：日志的 400 字符截断看不到后半段的坏点（见 dumpRejectedPayload 说明）
-        dumpRejectedPayload(tail.rejected.raw, tail.rejected.mode, reason, logger)
-        logger?.warn?.(
-          `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
-            `[${reason}${reason === 'unbalanced' ? '：多半是流被服务端上限截断' : '：结构不符'}]` +
-            `，已丢弃 ${tail.rejected.raw.length} 字符（将自动重试；完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
-            tail.rejected.raw.slice(0, 2000),
-        )
+        // ── 轮次收尾：把过滤器/回声守卫里 hold 的残余吐净（每轮都做，续写才有正确的拼接基准）──
+        const tail = filter.flush()
+        const tailGuarded = echoGuard.flush()
+        if (tailGuarded.echoed) echoedTranscript = true
+        const tailText = tail.text + tailGuarded.text
+        if (tailText) {
+          const block = openText()
+          if (!textStarted) {
+            textStarted = true
+            yield { type: 'block-start', index: block.index, blockType: 'text' }
+          }
+          block.text += tailText
+          yield { type: 'text-delta', index: block.index, text: tailText }
+        }
+        if (tail.calls.length > 0) yield* emitCalls(tail.calls)
+        if (tail.rejected) {
+          // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
+          // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
+          // 完整载荷落盘：日志的 400 字符截断看不到后半段的坏点（见 dumpRejectedPayload 说明）
+          dumpRejectedPayload(tail.rejected.raw, tail.rejected.mode, tail.rejected.reason ?? 'unparsable', logger)
+          logger?.warn?.(
+            `deepseek-web: 工具调用${tail.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
+              `[${tail.rejected.reason ?? 'unparsable'}]` +
+              `，已丢弃 ${tail.rejected.raw.length} 字符（完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
+              tail.rejected.raw.slice(0, 2000),
+          )
+          // 只有**首轮**的丢弃才触发整步重试；续写轮的丢弃记日志即可
+          // （正文已上屏一部分，此时让整轮失败只会更糟）。
+          if (rounds === 0) {
+            rejectedProtocol = tail.rejected.raw
+            rejectedReason = tail.rejected.reason ?? 'unparsable'
+          }
+        }
+        // ── 一轮流结束：判断是否需要自动续写 ──
+        const partial = textBlock?.text ?? ''
+        const maxRounds = deps.config.maxContinuations ?? 2
+        const eligible =
+          roundError === undefined &&
+          deps.config.autoContinue !== false &&
+          rounds < maxRounds &&
+          toolCallCount === 0 &&
+          !options?.signal?.aborted &&
+          partial.length > 0 &&
+          looksMidSentence(partial)
+        if (!eligible) break
+        rounds += 1
+        logger?.info?.(`deepseek-web: 回答疑似在句中被截，自动续写（第 ${rounds}/${maxRounds} 轮）……`)
+        // 续写 prompt = 原对话 + 已输出的半截回答（作为 assistant 消息）+ 继续指令
+        currentPrompt = serializePrompt({
+          system: options?.system,
+          messages: [
+            ...(options?.messages ?? []),
+            { role: 'assistant', content: [{ type: 'text', text: partial }] },
+            { role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] },
+          ],
+          tools: (options?.tools ?? []) as ToolSchemaLike[],
+          maxChars: deps.config.maxPromptChars ?? 1_500_000,
+        })
+        // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例
+        filter = new ToolCallStreamFilter(knownNames)
+        echoGuard = new TranscriptEchoGuard()
       }
     } catch (error: any) {
       if (error instanceof AdapterLlmError) throw error
@@ -554,8 +611,7 @@ export function createAdapter(deps: AdapterDeps) {
     if (toolCallCount > 0) {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
-    }
-    const hasVisibleText = (textBlock?.text?.length ?? 0) > 0
+    }    const hasVisibleText = (textBlock?.text?.length ?? 0) > 0
     if (echoedTranscript) {
       // 已把回声段从可见正文里剔除；这里只留痕，方便事后定位。
       logger?.warn?.('deepseek-web: 模型回声了「对话转写格式」（[Tool Result for …] / User: / Assistant: 等），该段已丢弃、不上屏')
@@ -614,7 +670,15 @@ export function createAdapter(deps: AdapterDeps) {
       }
       return
     }
-    yield { type: 'finish', reason: mapFinish(finishReason, textBlock?.text) }
+    // 0.1.12：不再报 max-tokens（应用户要求移除「已达到输出 token 上限」提示）。
+    // 截断由「自动续写」兜底（绝大多数被无声补全）；续写额度用尽仍被截时，
+    // 按正常完成（stop）上报并留痕 —— 用户可手动说「继续」。
+    if (looksMidSentence(textBlock?.text ?? '')) {
+      logger?.warn?.(
+        `deepseek-web: 回答在句中被截且自动续写额度已用尽，按正常完成上报（尾部：${JSON.stringify((textBlock?.text ?? '').slice(-60))}）`,
+      )
+    }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
 
   return adapter

@@ -76,6 +76,8 @@ export function apply(ctx: any, config: Config = {}): void {
     maxPromptChars: config.maxPromptChars ?? 1_500_000,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
+    autoContinue: config.autoContinue !== false,
+    maxContinuations: config.maxContinuations ?? 2,
     logger,
   }
 
