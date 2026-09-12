@@ -19,7 +19,7 @@
  * 用法: node tests/check-dsml-stray.mjs
  */
 import assert from 'node:assert/strict'
-import { ToolCallStreamFilter, stripStrayToolMarkup, findXmlToolCallEnd } from '../src/protocol.ts'
+import { ToolCallStreamFilter, stripStrayToolMarkup, findXmlToolCallEnd, TOOL_PROTOCOL_INSTRUCTIONS } from '../src/protocol.ts'
 
 let passed = 0
 const failures = []
@@ -141,6 +141,90 @@ test('JSON 工具调用仍正常解析（XML 那条修了不许影响 JSON 路�
   const tail = f.flush()
   assert.equal(out.calls.length + tail.calls.length, 1)
   assert.equal(!out.text && !tail.text, true, 'JSON 调用不该漏成正文')
+})
+
+// ── 现场 ②（2026-09-12 晚，用户截图 + 会话日志 [1354]）────────────────
+// 形态与现场 ① 不同：这次是**完整的开标签** + 两个闭合标签，中间没有任何 invoke。
+//   正文 + 4 个换行 + "<|DSML|calls>" + 换行 + "</|DSML|invoke>" + 换行 + "</|DSML|calls>"
+// 机制一：`<|DSML|calls>` 命中 XML_STARTER_RE → 进捕获态 → 里面没有 invoke →
+//         `looksLikeToolCallBlock` 判否 → 捕获内容被当正文透出（那条路径原本没剥残片）。
+// 机制二（只在流式下出现）：hold-back 判定不认「半截 DSML 前缀」——
+//         pending 停在 `<|DSML`（少最后一个竖线）时被判成"没有待补前缀"，半截标记直接当正文吐出去。
+const NL = String.fromCharCode(10)
+// ⚠️ 前缀必须够长：hold-back 只在 pending 超过 HOLD_BACK_CHARS(24) 时才切分，
+//    前缀太短会让整段留在 pending 里、被 drain 开头那次 stripStray 顺手清掉 ——
+//    那样就测不到「半截前缀被切出去」这条真路径（第一版样本太短，反向验证没红就是这个原因）。
+const APOS = String.fromCharCode(8217) // ’ —— 会话日志里是弯引号，逐字保留
+const leakedSample =
+  'Continuing. Two things I left in a bad state: `validate-preset.mjs` has a mid-file import ' +
+  'with `require$`-prefixed aliases, and the new scripts aren' + APOS + 't wired into `package.json`. Fixing both.' +
+  NL + NL + NL + NL +
+  '<|DSML|calls>' + NL + '</|DSML|invoke>' + NL + '</|DSML|calls>'
+
+function runThrough(chunks) {
+  const filter = new ToolCallStreamFilter()
+  let text = ''
+  const calls = []
+  for (const chunk of chunks) {
+    const out = filter.push(chunk)
+    text += out.text
+    calls.push(...(out.calls ?? []))
+  }
+  const last = filter.flush()
+  text += last.text
+  calls.push(...(last.calls ?? []))
+  return { text, calls }
+}
+
+test('现场② 退化块（开标签+闭合标签、无 invoke）：一次喂入不上屏', () => {
+  const { text, calls } = runThrough([leakedSample])
+  assert.ok(text.includes('Fixing both.'), '正常正文不能被吃掉（自证：确实走过了这段逻辑）')
+  assert.equal(calls.length, 0, '这里没有真正的调用')
+  assert.ok(!/DSML/i.test(text), `正文里不该有 DSML：${JSON.stringify(text.slice(-60))}`)
+})
+
+test('现场② 逐字符流式（hold-back 边界）：半截 DSML 前缀不许漏出去', () => {
+  assert.ok(leakedSample.length > 200, '样本必须够长才会触发 hold-back 切分（否则这条用例没测到东西）')
+  // 这条是真回归点：逐字符喂时 pending 会停在 `<|DSML`，
+  // 旧代码的 hold 判定给 0 → 半截标记被当正文吐出 → 后面补成完整标记就成了乱码。
+  const { text } = runThrough([...leakedSample])
+  assert.ok(text.includes('Fixing both.'), '正常正文不能被吃掉（自证）')
+  assert.ok(!/DSML/i.test(text), `流式下也不该有 DSML：${JSON.stringify(text.slice(-60))}`)
+})
+
+test('stripStrayToolMarkup：DSML 前缀的裸包裹标签（开/闭、空格、全角竖线）', () => {
+  const cases = [
+    '<|DSML|calls>',
+    '</|DSML|calls>',
+    '</|DSML|invoke>',
+    '<|DSML|tool_calls>',
+    '< | DSML | calls>',
+    '<｜DSML｜calls>',
+    '<dsml-calls>',
+  ]
+  for (const c of cases) assert.equal(stripStrayToolMarkup(c), '', `应剥掉：${c}`)
+})
+
+test('stripStrayToolMarkup：正常提到尖括号的文本不许乱剥（对照）', () => {
+  const keep = 'a < b and c > d, 用 <div> 标签'
+  assert.equal(stripStrayToolMarkup(keep), keep, '普通尖括号文本必须原样保留')
+})
+
+test('对照组：正常的 DSML invoke 调用必须仍被解析出来', () => {
+  const good = '<|DSML|invoke name="read"><|DSML|parameter name="path">a.ts</|DSML|parameter></|DSML|invoke>'
+  const { text, calls } = runThrough([good])
+  assert.equal(calls.length, 1, '真调用不能被这次修复误伤')
+  assert.equal(calls[0].name, 'read')
+  assert.ok(!/DSML/i.test(text), '调用块本身不该出现在正文里')
+})
+
+test('工具协议提示词里不再出现私有标记的字面量', () => {
+  // 实测：那段文字会随每次请求进到网页端会话里，用户在网页上就能看到它；
+  // 而且「点名某个 token」本身有诱发模型吐它的风险。
+  for (const bad of ['DSML|>', '|DSML|']) {
+    assert.ok(!TOOL_PROTOCOL_INSTRUCTIONS.includes(bad), `提示词里不该出现 ${bad}`)
+  }
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('Do NOT use XML/HTML-like markup'), '禁令本身要保留')
 })
 
 if (failures.length) {

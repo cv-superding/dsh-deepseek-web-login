@@ -95,7 +95,7 @@ Rules:
 5b. Two things break the JSON most often — check them before you emit:
    (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
    (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. Do NOT use XML/HTML-like markup such as <tool_calls>, <invoke>, <parameter>, <|DSML|>, or any fenced variant of them. The JSON object above is the ONLY accepted format; markup text would be shown to the user as broken output instead of running the tool.
+6. Do NOT use XML/HTML-like markup for tool calls: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), and none of the private delimiter-prefixed variants some DeepSeek surfaces use. The JSON object above is the ONLY accepted format. Markup is not just ignored — it leaks into the visible transcript (and into the web conversation) as broken output.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
 8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry — measured case: a model emitted 15 replayed calls inside one 8152-char payload, and every one of them had to be thrown away.
 9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
@@ -381,8 +381,17 @@ function partialMarkerSuffixLength(text: string): number {
   if (normalized.startsWith('<')) {
     if (XML_STARTER_RE.test(normalized)) return 0 // 已是完整标记
     const lower = normalized.toLowerCase().replace(/\s+/g, '')
-    const ok = XML_MARKER_STARTERS.some((starter) => starter.startsWith(lower))
-    return ok ? held : 0
+    if (XML_MARKER_STARTERS.some((starter) => starter.startsWith(lower))) return held
+    // ⚠️ DSML 前缀可能**只到了一半**：`<|DSML` 还差最后一个竖线，
+    // 于是 normalizeDsml（要求「竖线 DSML 竖线」）认不出来 → 上面这条 hold 判定失效。
+    // 2026-09-12 实测泄漏路径正是这里：pending 停在半截前缀时 hold 判定给了 0，
+    // 半截标记被当正文吐出，随后几个字符补成 `<|DSML|calls>` 就成了正文里的乱码。
+    // 兜底：把候选里的竖线与 `dsml` 一并擦掉再看是不是某个 starter 的前缀。
+    const loose = lower.replace(/[|｜]|dsml/g, '')
+    if (/^<\/?[a-z_]*$/.test(loose) && XML_MARKER_STARTERS.some((starter) => starter.startsWith(loose))) {
+      return held
+    }
+    return 0
   }
   return 0
 }
@@ -1060,6 +1069,17 @@ export function stripStrayToolMarkup(text: string): string {
   if (!text) return text
   if (!/voke\s*>|calls?\s*>|tool_calls?\s*>|function_calls?\s*>|DSML/i.test(text)) return text
   return text
+    // 0) DSML 前缀的**裸包裹标签**（开或闭都算）。实测（2026-09-12 用户截图）：
+    //    模型吐过一个退化的 `<|DSML|calls>` + `</|DSML|invoke>` + `</|DSML|calls>`，
+    //    里面没有任何 invoke → 不是调用块 → 被当正文透出。DSML 是私有标记，正文里不会正常出现。
+    .replace(
+      //    `dsml-` 连字符变体（`<dsml-calls>`）也要算 —— 本文件其它地方已声明兼容该变体。
+      new RegExp(
+        `<\\/?\\s*(?:(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)|dsml-)(?:dsml-)?(?:${WRAPPER_NAMES}|invoke)\\s*>`,
+        'gi',
+      ),
+      '',
+    )
     .replace(
       new RegExp(`<\\/\\s*(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)?(?:dsml-)?(?:${WRAPPER_NAMES}|invoke)\\s*>`, 'gi'),
       '',
@@ -1105,7 +1125,9 @@ export class ToolCallStreamFilter {
       if (calls) out.calls.push(...calls)
       else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
         this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
-      else out.text += captured.buffer // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出
+      // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，
+      // ⚠️ 但必须先剥残片：实测过 `<|DSML|calls>` + 闭合标签这种退化块会从这里漏到正文（2026-09-12）。
+      else out.text += stripStrayToolMarkup(captured.buffer)
       this.capture = null
     }
     // 流结束：把 hold 住的尾巴吐出去之前先剥掉孤立残片 —— 它们会在这里"逃逸"成正文
@@ -1126,7 +1148,7 @@ export class ToolCallStreamFilter {
               // 超长仍未收全：是调用就丢弃（不吐乱码），只是正文提及则照常透出
               if (looksLikeToolCallBlock('xml', captured.buffer))
                 this.abandoned ??= { raw: captured.buffer, mode: 'xml', reason: 'oversize' }
-              else out.text += captured.buffer
+              else out.text += stripStrayToolMarkup(captured.buffer)
               this.capture = null
               continue
             }
@@ -1136,7 +1158,7 @@ export class ToolCallStreamFilter {
           const calls = parseXmlToolCalls(block)
           if (calls) out.calls.push(...calls)
           else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
-          else out.text += block
+          else out.text += stripStrayToolMarkup(block)
           this.capture = null
           this.pending = captured.buffer.slice(end).replace(FENCE_HEAD_RE, '') + this.pending
           continue
