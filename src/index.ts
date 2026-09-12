@@ -23,8 +23,9 @@ import {
   MAX_INTERVAL_MS,
   type GateSettings,
 } from './gate.ts'
-import { browserLogin, findSystemBrowser } from './browser-login.ts'
-import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
+import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
+import { canOpenElectronWindow, clearLoginPartition, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
+import { beginAddAccount, commitCapturedAuth, endAddAccount } from './account-add.ts'
 import {
   validateAuth,
   createSessionCleaner,
@@ -427,6 +428,7 @@ export function apply(ctx: any, config: Config = {}): void {
             if (req.method === 'POST' && route === '/accounts/switch') {
               const body = await readJsonBody(req)
               const id = String(body?.id ?? '')
+              endAddAccount()
               if (!setActiveAccount(id)) {
                 sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除）' })
                 return
@@ -558,7 +560,10 @@ export function apply(ctx: any, config: Config = {}): void {
                 const check = await validateAuth(auth as WebAuth, AbortSignal.timeout(15_000))
                 validation = { ok: check.ok, ...(check.error ? { error: check.error } : {}) }
                 if (check.ok && check.user && auth && (!auth.user || auth.user.display !== check.user.display)) {
-                  // 补全账号展示信息
+                  // 补全**当前账号**的展示信息。
+                  // ⚠️ 这里刻意不走 commitCapturedAuth：它不是"新捕获"，而是对当前账号的
+                  // 元数据刷新。若让它消费掉添加模式，用户点了「登录新账号」后一刷新面板，
+                  // 添加模式就没了 —— 那会是个很难查的 bug。
                   writeAuth({ ...auth, user: check.user })
                 }
               }
@@ -621,6 +626,26 @@ export function apply(ctx: any, config: Config = {}): void {
               return
             }
 
+            // 「登录新账号（添加）」：往账号库里**再加一个号**，但不顶掉当前正在用的。
+            // 为什么必须先清"登录态存放处"：登录窗口/独立浏览器 profile 里还留着当前账号
+            // 的会话，不清的话新窗口一打开就是旧账号，抓回来还是它（等于没加）。
+            // 注意这里**不动账号库里的任何账号** —— 与 /logout 的区别就在这。
+            if (req.method === 'POST' && route === '/login/add') {
+              beginAddAccount()
+              const profileCleared = clearBrowserLoginProfile()
+              const partitionCleared = await clearLoginPartition().catch(() => false)
+              logger.info?.(
+                `deepseek-web: 准备添加新账号（profile=${profileCleared} partition=${partitionCleared}）—— 接下来捕获到的凭证只入库、不切换`,
+              )
+              sendJson(res, 200, {
+                ok: true,
+                profileCleared,
+                partitionCleared,
+                hint: '登录窗口里登录另一个账号；它会加入账号库，但不会自动切换',
+              })
+              return
+            }
+
             if (req.method === 'POST' && route === '/login/browser') {
               // 两条路：
               //  1) 宿主在主进程（旧架构）→ 插件自己开 Electron 窗口（带指纹伪装，见 login.ts）
@@ -636,12 +661,16 @@ export function apply(ctx: any, config: Config = {}): void {
                 signal: undefined,
               })
               if (outcome.ok && outcome.auth) {
-                writeAuth(outcome.auth)
+                // 添加模式下只入库（见 account-add.ts）；默认仍是"写入并设为当前"
+                const commit = commitCapturedAuth(outcome.auth)
                 const check = await validateAuth(outcome.auth).catch(() => undefined)
                 const verified = !!check?.ok
                 sendJson(res, 200, {
                   started: true,
                   mode: 'browser',
+                  added: commit.mode === 'add',
+                  created: commit.created === true,
+                  activeId: activeAccountId() ?? null,
                   ok: true,
                   verified,
                   message: verified
@@ -689,6 +718,9 @@ export function apply(ctx: any, config: Config = {}): void {
             }
 
             if (req.method === 'POST' && route === '/logout') {
+              // 退出/换号是明确的"改当前账号"动作 —— 顺手清掉添加模式，
+              // 免得它一直挂着、影响后面某次无关的捕获。
+              endAddAccount()
               // await：面板会在退出后立刻打开登录窗口（换号），必须等分区清理完成
               const cleared = await logout()
               sendJson(res, 200, { ok: true, partitionCleared: cleared })

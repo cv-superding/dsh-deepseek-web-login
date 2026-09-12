@@ -228,6 +228,17 @@ points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch b
 > accounts" verdict is usually treated more harshly than single-account overuse.
 > Exported backups contain fully usable credentials — never share them or commit them.
 
+**"Sign in a new account" vs "Sign out" — the difference matters:**
+
+- **Sign in a new account (add)** clears the browser-side login state only, then **adds the new
+  account to the library without switching to it**. The account you are using is untouched; click
+  *Switch* in the list to start using the new one. This is how you keep several accounts side by side.
+- **Sign out** **removes that account from the library** — both the local credentials and the browser
+  login state are cleared. It is not "just log out". Export a backup first if you want to keep it.
+
+The **Account** tab is also split into two sub-pages (**Login status** / **Account library**) so you
+never have to scroll through both halves at once.
+
 **How export/import pick files.** *Export backup…* opens the native **Save As** dialog, so the
 location and file name are yours to choose; *Import backup…* opens the native **Open** dialog, so
 there is no path to type (and none to look up first). Both fall back gracefully when the environment

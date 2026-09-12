@@ -191,6 +191,19 @@ transition:opacity .15s ease,border-color .15s ease}
 .dsw-tab:hover{opacity:1}
 .dsw-tab.active{opacity:1;color:var(--fg);border-bottom-color:var(--fg)}
 .dsw-pane[hidden]{display:none}
+/* 二级（子页面）标签：**分段胶囊**。
+   刻意和一级标签长得不一样（一级是"下划线 + 大字号"），这样一眼能看出自己在第几层；
+   否则两层长得一样、用户会以为回到了同一层。 */
+.dsw-subtabs{display:inline-flex;gap:2px;padding:3px;margin:0 0 14px;border-radius:999px;
+  background:var(--bg1);border:1px solid var(--bd)}
+.dsw-subtab{appearance:none;border:0;background:transparent;font:inherit;font-size:12px;
+  font-weight:500;color:var(--fg2);padding:4px 14px;border-radius:999px;cursor:pointer;
+  transition:color .15s ease,background-color .15s ease}
+.dsw-subtab:hover{color:var(--fg)}
+/* 选中态：底色用 bg2 铺在 bg1 上，深色主题里这两档只差一点点，
+   所以必须再加一圈描边（bd2 比 bd 明显）才立得住 —— 实测深色下不加就跟没选中一样。 */
+.dsw-subtab.active{background:var(--bg2);color:var(--fg);font-weight:600;
+  box-shadow:inset 0 0 0 1px var(--bd2)}
 /* 调用台账 */
 .dsw-spark{display:block;width:100%;height:40px;margin:8px 0 2px}
 .dsw-spark rect{fill:var(--bd2)}
@@ -343,6 +356,41 @@ function Panel(): any {
     page.append(tabBar, ...TAB_KEYS.map((key) => panes[key]))
     selectTab('account')
 
+    // ── 账号页内部再分两个子页 ──────────────────────────────────────
+    // 4 张卡堆在一页还是太长。按"你是来看状态、还是来管账号"分：
+    //   登录状态  这个号现在能不能用 / 怎么再登一次
+    //   账号库    我有哪些号 / 怎么加、切、删、导入导出
+    // 子页签用**分段胶囊**，与一级的下划线标签在视觉上分层。
+    const ACCT_KEYS = ['status', 'library'] as const
+    const ACCT_LABELS: Record<string, string> = { status: '登录状态', library: '账号库' }
+    const acctStatusPane = el('div', 'dsw-pane')
+    const acctLibraryPane = el('div', 'dsw-pane')
+    const acctPanes: Record<string, HTMLElement> = { status: acctStatusPane, library: acctLibraryPane }
+    const acctButtons: Record<string, HTMLButtonElement> = {}
+    const selectAcctTab = (key: string): void => {
+      for (const each of ACCT_KEYS) {
+        const on = each === key
+        acctPanes[each].hidden = !on
+        acctButtons[each].classList.toggle('active', on)
+        acctButtons[each].setAttribute('aria-selected', String(on))
+      }
+    }
+    const acctTabBar = el('div', 'dsw-subtabs')
+    acctTabBar.setAttribute('role', 'tablist')
+    for (const key of ACCT_KEYS) {
+      const btn = el('button', 'dsw-subtab', ACCT_LABELS[key]) as HTMLButtonElement
+      btn.type = 'button'
+      btn.setAttribute('role', 'tab')
+      btn.addEventListener('click', () => selectAcctTab(key))
+      acctButtons[key] = btn
+      acctTabBar.append(btn)
+      acctPanes[key].setAttribute('role', 'tabpanel')
+    }
+    accountPane.append(acctTabBar, acctStatusPane, acctLibraryPane)
+    // 和一级标签同一个原则：用 hidden 属性切，不靠 CSS 类 ——
+    // 万一样式没加载，退化成"两页都显示"（难看但能用），而不是"除了一页全空白"。
+    selectAcctTab('status')
+
     // ── 登录卡 ──
     const loginCard = el('div', 'dsw-card')
     const loginHead = el('div', 'dsw-cardhead')
@@ -394,7 +442,8 @@ function Panel(): any {
     const accountHint = el(
       'p',
       'dsw-hint',
-      '退出会同时清除本地凭证与浏览器分区里的 chat.deepseek.com 登录态（否则「从已登录窗口恢复」会把同一个账号原样抓回来，也无法换号）。',
+      '⚠️ 「退出」= 把该账号从账号库移除，不是"只登出"：本地凭证与浏览器登录态会一起清掉。' +
+        '想留住它就先「导出备份」；只是想换个号用，去「账号库 → 登录新账号」。',
     )
     accountCard.append(accountHint)
 
@@ -421,7 +470,7 @@ function Panel(): any {
         '「从已登录窗口恢复」= 复用上次登录过的窗口分区直接取凭证（免重新登录），凭证丢失时用它救急。',
       ),
     )
-    accountPane.append(loginCard, accountCard)
+    acctStatusPane.append(loginCard, accountCard)
 
     // ── 账号库：多账号并存 + 一键切换 ────────────────────────────────
     // 为什么值得有：以前换号的代价是「退出 → 清浏览器分区 → 重新登录 → 等捕获」，
@@ -451,15 +500,25 @@ function Panel(): any {
 
     const accountsIOPanel = el('div', 'dsw-row')
     accountsIOPanel.style.marginTop = '10px'
+    // 「登录新账号」：以前账号库**根本没有"再加一个号"的入口** ——
+    // 两个退出按钮都会先把这个号从库里删掉，所以库永远攒不到第二个账号。
+    const addAccountBtn = el('button', 'dsw-btn', '登录新账号（添加）') as HTMLButtonElement
     const exportBtn = el('button', 'dsw-btn ghost', '导出备份…') as HTMLButtonElement
     const importBtn = el('button', 'dsw-btn ghost', '导入备份…') as HTMLButtonElement
-    accountsIOPanel.append(exportBtn, importBtn)
+    accountsIOPanel.append(addAccountBtn, exportBtn, importBtn)
     accountsCard.append(accountsIOPanel)
     // 以前这里是个"要导入的备份文件路径"输入框 —— 让人手打路径本来就别扭。
     // 现在两个按钮都弹**系统对话框**（另存为 / 打开），位置和文件名由用户自己选。
     // 实现见 src/file-picker.ts（宿主是 utility 进程，拿不到 Electron 的 dialog，
     // 只能由渲染进程用 Chromium 自己的能力做）。
-    accountsCard.append(el('p', 'dsw-hint', '点按钮会弹出系统对话框，自己选位置和文件 —— 不用手打路径。'))
+    accountsCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——' +
+          '加完在列表里点「切换」即可使用。导出/导入会弹系统对话框，自己选位置和文件。',
+      ),
+    )
     const accountsMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     accountsCard.append(accountsMsg)
     accountsCard.append(
@@ -469,7 +528,7 @@ function Panel(): any {
         '导出的备份文件里是**可完整登录的凭证**（等同于账号本身），别分享、别提交到仓库。',
       ),
     )
-    accountPane.append(accountsCard)
+    acctLibraryPane.append(accountsCard)
 
     const renderAccounts = (data: any): void => {
       const items: any[] = Array.isArray(data?.accounts) ? data.accounts : []
@@ -606,6 +665,42 @@ function Panel(): any {
       await loadAccounts()
     }
 
+    addAccountBtn.addEventListener('click', () => {
+      void (async () => {
+        addAccountBtn.disabled = true
+        accountsMsg.textContent = '正在准备登录窗口（会清掉上次的浏览器登录态，不影响账号库里的账号）……'
+        try {
+          const prep = await api('/login/add', { method: 'POST', body: '{}' })
+          if (prep?.ok === false) {
+            accountsMsg.textContent = `准备失败：${prep?.error ?? '未知原因'}`
+            return
+          }
+          // 登录窗口是"打开后等用户操作"的，这里会一直等到捕获到凭证或超时；
+          // 期间保持轮询更密一点，万一捕获是异步落地的也能及时刷出来。
+          boostUntil = Date.now() + 300_000
+          accountsMsg.textContent = '登录窗口已打开：请在窗口里登录另一个账号（不要登当前这个，否则只是刷新凭证）……'
+          const result = await api('/login/browser', { method: 'POST', body: '{}' })
+          if (result?.started === false) {
+            accountsMsg.textContent = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
+            return
+          }
+          if (result?.added) {
+            accountsMsg.textContent = result.created
+              ? '已把新账号加入账号库 —— 当前账号没有改动，点列表里的「切换」才会用它。'
+              : '这个账号本来就在库里（凭证已更新）—— 当前账号未改动。'
+          } else {
+            accountsMsg.textContent = '已捕获并保存凭证。'
+          }
+          await loadAccounts()
+        } catch (error: any) {
+          accountsMsg.textContent = `添加账号失败：${error?.message ?? error}`
+        } finally {
+          addAccountBtn.disabled = false
+          await refresh(false).catch(() => undefined)
+        }
+      })()
+    })
+
     exportBtn.addEventListener('click', () => {
       void (async () => {
         exportBtn.disabled = true
@@ -698,7 +793,7 @@ function Panel(): any {
     const tokenBtn = el('button', 'dsw-btn', '保存并验证') as HTMLButtonElement
     tokenActions.append(tokenBtn)
     tokenCard.append(tokenActions)
-    accountPane.append(tokenCard)
+    acctLibraryPane.append(tokenCard)
 
     // ── 测试卡 ──
     const testCard = el('div', 'dsw-card')

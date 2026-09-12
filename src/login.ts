@@ -14,7 +14,8 @@
  * 非 Electron 环境（纯 web profile）自动降级为「手动粘贴 token」。
  */
 import { createRequire } from 'node:module'
-import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, writeAuth, type WebAuth } from './auth.ts'
+import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, type WebAuth } from './auth.ts'
+import { commitCapturedAuth } from './account-add.ts'
 import { clearBrowserLoginProfile } from './browser-login.ts'
 import { DS_BASE, DEFAULT_WASM_URL, FALLBACK_UA, validateAuth } from './webapi.ts'
 
@@ -535,15 +536,19 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
   }
 
   const finish = async (auth: WebAuth, verified: boolean): Promise<void> => {
-    writeAuth(auth)
+    // 走统一的落库动作：添加模式（点了「登录新账号」）下只入库、不切换当前账号，
+    // 否则每加一个号就把正在用的号顶掉了。见 account-add.ts。
+    const commit = commitCapturedAuth(auth)
+    const tail = commit.mode === 'add' ? '（已加入账号库，当前账号未改动）' : ''
     lastResult = {
       ok: true,
-      message: verified
-        ? `登录成功${auth.user?.display ? `（${maskIdentifier(auth.user.display)}）` : ''}，凭证已保存并校验通过`
-        : '已捕获并保存凭证，但服务端校验未通过（可用「发送测试」做真实判定）',
+      message:
+        (verified
+          ? `登录成功${auth.user?.display ? `（${maskIdentifier(auth.user.display)}）` : ''}，凭证已保存并校验通过`
+          : '已捕获并保存凭证，但服务端校验未通过（可用「发送测试」做真实判定）') + tail,
       at: new Date().toISOString(),
     }
-    logger?.info?.(`deepseek-web login: credentials saved (verified=${verified})`)
+    logger?.info?.(`deepseek-web login: credentials saved (verified=${verified}, mode=${commit.mode})`)
     progress = { ...progress, finished: true }
     if (!verified) {
       try {
@@ -635,16 +640,18 @@ export async function captureFromPartition(logger?: { info?: (m: string) => void
     const auth = buildAuth(buffer, token, false)
     const check = await validateAuth(auth)
     if (check.ok) {
-      writeAuth({ ...auth, ...(check.user ? { user: { ...auth.user, ...check.user } } : {}) })
-      lastResult = { ok: true, message: '已从已登录窗口恢复凭证（校验通过）', at: new Date().toISOString() }
-      logger?.info?.('deepseek-web login: recovered credentials from partition (verified)')
-      return { ok: true, verified: true, message: '已从已登录窗口恢复凭证（校验通过）' }
+      const commit = commitCapturedAuth({ ...auth, ...(check.user ? { user: { ...auth.user, ...check.user } } : {}) })
+      const tail = commit.mode === 'add' ? '（已加入账号库，当前账号未改动）' : ''
+      lastResult = { ok: true, message: '已从已登录窗口恢复凭证（校验通过）' + tail, at: new Date().toISOString() }
+      logger?.info?.(`deepseek-web login: recovered credentials from partition (verified, mode=${commit.mode})`)
+      return { ok: true, verified: true, message: '已从已登录窗口恢复凭证（校验通过）' + tail }
     }
   }
-  writeAuth(buildAuth(buffer, candidates[0], true))
-  lastResult = { ok: true, message: '已从已登录窗口恢复凭证（未通过服务端校验）', at: new Date().toISOString() }
-  logger?.info?.('deepseek-web login: recovered credentials from partition (unverified)')
-  return { ok: true, verified: false, message: '已恢复凭证，但服务端校验未通过（可用「发送测试」验证）' }
+  const fallback = commitCapturedAuth(buildAuth(buffer, candidates[0], true))
+  const tail = fallback.mode === 'add' ? '（已加入账号库，当前账号未改动）' : ''
+  lastResult = { ok: true, message: '已从已登录窗口恢复凭证（未通过服务端校验）' + tail, at: new Date().toISOString() }
+  logger?.info?.(`deepseek-web login: recovered credentials from partition (unverified, mode=${fallback.mode})`)
+  return { ok: true, verified: false, message: '已恢复凭证，但服务端校验未通过（可用「发送测试」验证）' + tail }
 }
 
 /** 手动粘贴 token 登录（非 Electron 环境 / 用户偏好）。 */
@@ -667,12 +674,13 @@ export async function loginWithToken(
   const check = await validateAuth(auth)
   if (!check.ok) {
     // fail-open：手工粘贴的凭证也落盘（校验端点可能不配合），真实判定交给「发送测试」
-    writeAuth({ ...auth, unverified: true })
+    // 手动粘 token 也尊重添加模式：用户点的是「登录新账号」，只是换了条路
+    commitCapturedAuth({ ...auth, unverified: true })
     lastResult = { ok: true, message: `凭证已保存，但服务端校验未通过：${check.error ?? ''}`, at: new Date().toISOString() }
     logger?.info?.('deepseek-web login: token saved (unverified)')
     return { ok: true, error: `已保存（未通过校验：${check.error ?? 'unknown'}）` }
   }
-  writeAuth({ ...auth, ...(check.user ? { user: check.user } : {}) })
+  commitCapturedAuth({ ...auth, ...(check.user ? { user: check.user } : {}) })
   lastResult = {
     ok: true,
     message: `token 校验通过，凭证已保存${check.user?.display ? `（${maskIdentifier(check.user.display)}）` : ''}`,
