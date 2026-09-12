@@ -163,6 +163,10 @@ font-size:12px;line-height:1.6;color:var(--fg)}
 .dsw-gate-row{display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap}
 .dsw-gate-label{color:var(--fg3);font-size:12px;min-width:52px;flex:0 0 auto}
 .dsw-gate-value{font-size:12px;color:var(--fg);min-width:56px;text-align:right;font-variant-numeric:tabular-nums}
+/* 「上下限」成对的一行：两个滑块并排，右边一个合成值（如「6~10 个」）。
+   —— 比"每个边界各占一行"省一半高度，而且两个边界的相对位置一眼能比出来。 */
+.dsw-range-pair{flex:1 1 240px;display:flex;gap:8px;align-items:center;min-width:190px}
+.dsw-gate-pair-value{font-size:12px;color:var(--fg);min-width:78px;text-align:right;font-variant-numeric:tabular-nums}
 .dsw-switch{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:var(--fg);cursor:pointer;user-select:none}
 .dsw-switch input{position:absolute;opacity:0;width:0;height:0}
 .dsw-switch-track{width:34px;height:20px;border-radius:999px;background:var(--bd2);position:relative;transition:background-color .15s ease;flex:0 0 auto}
@@ -1088,6 +1092,105 @@ function Panel(): any {
     const cleanupHint = el('p', 'dsw-hint', '')
     gateCard.append(cleanupHint)
 
+    // ── 会话清理的三个区间（只在「延迟」模式显示）──────────────────────
+    // 为什么这三个参数也要"上下限 + 随机"：它们原来都是**死值** —— 攒到第 8 个就动手、
+    // 正好等 90 秒、逐个删除时请求连发。固定值方差≈0，本身就是机器特征；真人不会这么精确。
+    // 所以每个参数给一对上下限，实际取值在区间内**随机抽**（阈值/等待每轮重抽，删除间隔每次重抽）。
+    const cleanupRanges = el('div')
+    cleanupRanges.style.display = 'none'
+    gateCard.append(cleanupRanges)
+
+    /** 一对「上下限」滑块：一行两个 range + 右侧合成值。拖动中只更新数字，松手才提交。 */
+    const rangePair = (
+      label: string,
+      bounds: { min: number; max: number },
+      step: string,
+      format: (lo: number, hi: number) => string,
+      commit: (lo: number, hi: number) => void,
+    ): { row: HTMLElement; set: (lo: number, hi: number) => void } => {
+      const row = el('div', 'dsw-gate-row')
+      row.append(el('span', 'dsw-gate-label', label))
+      const lo = el('input', 'dsw-range') as HTMLInputElement
+      const hi = el('input', 'dsw-range') as HTMLInputElement
+      for (const [input, which] of [[lo, '下限'], [hi, '上限']] as const) {
+        input.type = 'range'
+        input.min = String(bounds.min)
+        input.max = String(bounds.max)
+        input.step = step
+        input.setAttribute('aria-label', `${label}${which}`)
+        input.title = `${label}${which}`
+      }
+      const value = el('span', 'dsw-gate-pair-value', '—')
+      const paint = (): void => {
+        value.textContent = format(Number(lo.value), Number(hi.value))
+      }
+      const onInput = (): void => {
+        // 两个滑块允许被拖反 —— 当场收紧成「下限 <= 上限」。
+        // 后端也会纠正，但界面先纠更直观：总比"拖完看着不对、过一会儿自己跳回去"好。
+        if (Number(lo.value) > Number(hi.value)) {
+          const swap = lo.value
+          lo.value = hi.value
+          hi.value = swap
+        }
+        paint()
+      }
+      const onCommit = (): void => commit(Number(lo.value), Number(hi.value))
+      lo.addEventListener('input', onInput)
+      hi.addEventListener('input', onInput)
+      lo.addEventListener('change', onCommit)
+      hi.addEventListener('change', onCommit)
+      const pair = el('div', 'dsw-range-pair')
+      pair.append(lo, hi)
+      row.append(pair, value)
+      return {
+        row,
+        set: (lo2, hi2) => {
+          lo.value = String(lo2)
+          hi.value = String(hi2)
+          paint()
+        },
+      }
+    }
+
+    const batchPair = rangePair(
+      '攒够数量',
+      { min: 1, max: 50 },
+      '1',
+      (lo, hi) => `${lo}~${hi} 个`,
+      (lo, hi) => void saveGate({ cleanupBatch: { min: lo, max: hi } }),
+    )
+    const delayPair = rangePair(
+      '最长等待',
+      { min: 5, max: 600 },
+      '5',
+      (lo, hi) => `${lo}~${hi} 秒`,
+      (lo, hi) => void saveGate({ cleanupDelayMs: { min: Math.round(lo * 1000), max: Math.round(hi * 1000) } }),
+    )
+    const gapPair = rangePair(
+      '删除间隔',
+      { min: 0, max: 60 },
+      '0.1',
+      (lo, hi) => (hi <= 0 ? '不等待' : `${lo.toFixed(1)}~${hi.toFixed(1)} 秒`),
+      (lo, hi) => void saveGate({ cleanupGapMs: { min: Math.round(lo * 1000), max: Math.round(hi * 1000) } }),
+    )
+    cleanupRanges.append(batchPair.row, delayPair.row, gapPair.row)
+    cleanupRanges.append(
+      el(
+        'p',
+        'dsw-hint',
+        '上面三个都是「下限 ~ 上限」：实际取值每次在区间内随机抽 —— 攒批阈值与最长等待每轮清理重抽、' +
+          '删除间隔每删一个重抽。这样"什么时候动手删"就没有固定规律了。',
+      ),
+    )
+    cleanupRanges.append(
+      el(
+        'p',
+        'dsw-hint',
+        '「删除间隔」只在逐个删除时起作用：优先走一个请求批量删；若服务端不接受批量删（会自动退化为逐个删），' +
+          '相邻两个删除请求之间就按这个间隔停一下 —— 避免"一下子连发几十个删除请求"。',
+      ),
+    )
+
     gateCard.append(
       el(
         'p',
@@ -1474,13 +1577,25 @@ function Panel(): any {
       for (const key of Object.keys(cleanupBtns)) {
         cleanupBtns[key].classList.toggle('active', key === mode)
       }
+      // 三个区间只在「延迟」模式下有意义（立即 = 固定 1.5s/每次一个；不删 = 不清理）
+      const showRanges = mode === 'deferred'
+      cleanupRanges.style.display = showRanges ? '' : 'none'
+      if (showRanges) {
+        const batchRange = g.cleanup?.batchRange ?? g.cleanupDefaults?.batch
+        if (batchRange) batchPair.set(batchRange.min, batchRange.max)
+        const delayRange = g.cleanup?.delayRange ?? g.cleanupDefaults?.delayMs
+        if (delayRange) delayPair.set(Math.round(delayRange.min / 1000), Math.round(delayRange.max / 1000))
+        const gapRange = g.cleanup?.gapRange ?? g.cleanupDefaults?.gapMs
+        if (gapRange) gapPair.set(+(gapRange.min / 1000).toFixed(1), +(gapRange.max / 1000).toFixed(1))
+      }
       cleanupHint.textContent =
         mode === 'keep'
           ? '不删：请求最少，但网页端会留下临时会话记录。'
           : mode === 'immediate'
             ? '立即：调用结束后 1.5 秒删掉（老行为，每轮多一个删除请求）。'
-            : `延迟：攒够 ${g.cleanup?.batchSize ?? 8} 个、或 ${Math.round((g.cleanup?.delayMs ?? 90_000) / 1000)} 秒后集中清理，` +
-              '并优先用一个请求批量删 —— 减少「每轮建一个立刻删一个」的机器特征。'
+            : `延迟：这一轮攒够 ${g.cleanup?.batchSize ?? 8} 个、或最多等 ` +
+              `${Math.round((g.cleanup?.delayMs ?? 90_000) / 1000)} 秒就集中清理，并优先用一个请求批量删 ——` +
+              '减少「每轮建一个立刻删一个」的机器特征。上面三个区间决定"这一轮具体攒几个 / 等多久"。'
     }
 
     const saveGate = async (patch: {
@@ -1488,6 +1603,9 @@ function Panel(): any {
       minRequestIntervalMs?: number
       maxRequestIntervalMs?: number
       sessionCleanup?: string
+      cleanupBatch?: { min: number; max: number }
+      cleanupDelayMs?: { min: number; max: number }
+      cleanupGapMs?: { min: number; max: number }
     }): Promise<void> => {
       gateMsg.textContent = '保存中……'
       try {
@@ -1498,6 +1616,15 @@ function Panel(): any {
             `已生效：${result.allowConcurrent ? '允许并发（不推荐）' : '串行'} · ` +
             `间隔 ${result.minRequestIntervalMs}~${result.maxRequestIntervalMs}ms · ` +
             `清理 ${result.sessionCleanup ?? result.cleanup?.mode ?? '-'}` +
+            (result.cleanup?.batchRange
+              ? `（阈值 ${result.cleanup.batchRange.min}~${result.cleanup.batchRange.max} 个 · ` +
+                `等待 ${Math.round((result.cleanup.delayRange?.min ?? 0) / 1000)}~` +
+                `${Math.round((result.cleanup.delayRange?.max ?? 0) / 1000)}s · ` +
+                (result.cleanup.gapRange
+                  ? `删除间隔 ${(result.cleanup.gapRange.min / 1000).toFixed(1)}~${(result.cleanup.gapRange.max / 1000).toFixed(1)}s`
+                  : '删除间隔关') +
+                '）'
+              : '') +
             (result.persisted === false ? ` ⚠️ ${result.warning ?? '未能写入配置'}` : '（已写入配置，重启后仍生效）')
         } else {
           gateMsg.textContent = `保存失败：${result?.error ?? '未知原因'}`

@@ -92,6 +92,15 @@ const checks = {
   'host 账号显示名走 pickUserDisplay（别退回 ?? 链：空字符串会把整条回退挡住）': host.includes('pickUserDisplay'),
   'host 显示名候选含 mobile_number（手机号注册的账号靠它才有名字）': host.includes('mobile_number'),
   'host 实在拿不到名字时用「未识别账号」而不是把内部 id 当名字': host.includes('未识别账号'),
+  'host 会话清理的三个区间能落盘（sessionCleanup 之外还有 batch/delay/gap）':
+    host.includes('cleanupBatch') && host.includes('cleanupDelayMs') && host.includes('cleanupGapMs'),
+  'host 清理区间走 normalizeCleanupRange 做边界收敛（滑块越界也不会写出非法值）':
+    host.includes('normalizeCleanupRange'),
+  'client 清理模式旁提供三个区间滑块（攒够数量 / 最长等待 / 删除间隔）':
+    client.includes('攒够数量') && client.includes('最长等待') && client.includes('删除间隔'),
+  'client 三滑块初始隐藏（只有「延迟」模式才显示）': client.includes('cleanupRanges'),
+  'client 说明了取值随机（防止删除时机有固定规律）': client.includes('每次在区间内随机抽'),
+  'client 说明了删除间隔只作用于逐个删除': client.includes('一下子连发几十个删除请求'),
   'client 关于页（检查更新 + 数据位置 + 风险说明）': client.includes('检查更新') && client.includes('数据位置') && client.includes('为什么没有「自动换号」'),
   '源码注释写明为何不做自动换号（风险可见）': srcAccounts.includes('刻意**不做自动轮换**') && srcAccounts.includes('关联'),
   'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),

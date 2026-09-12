@@ -21,6 +21,13 @@ import {
   DEFAULT_MAX_REQUEST_INTERVAL_MS,
   INTERVAL_PRESETS,
   MAX_INTERVAL_MS,
+  CLEANUP_BATCH_BOUNDS,
+  CLEANUP_DELAY_BOUNDS_MS,
+  CLEANUP_GAP_BOUNDS_MS,
+  DEFAULT_CLEANUP_BATCH,
+  DEFAULT_CLEANUP_DELAY_MS,
+  DEFAULT_CLEANUP_GAP_MS,
+  normalizeCleanupRange,
   type GateSettings,
 } from './gate.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
@@ -217,11 +224,19 @@ export function apply(ctx: any, config: Config = {}): void {
   // immediate 用老参数（1.5s / 每次一个）；deferred 用可配的延迟与批量阈值。
   const cleanupMode: SessionCleanupMode =
     savedGate?.sessionCleanup ?? config.sessionCleanup ?? DEFAULT_SESSION_CLEANUP.mode
+  // 三个"区间"参数：设置页保存过就用保存的，否则用内置默认（均值都落在原来的固定值上）。
+  // 只在 deferred 模式生效 —— immediate 是"老行为"，固定 1.5s / 每次一个，不掺随机。
+  const cleanupBatchRange = savedGate?.cleanupBatch ?? DEFAULT_CLEANUP_BATCH
+  const cleanupDelayRange = savedGate?.cleanupDelayMs ?? DEFAULT_CLEANUP_DELAY_MS
+  const cleanupGapRange = savedGate?.cleanupGapMs ?? DEFAULT_CLEANUP_GAP_MS
   const sessionCleaner = createSessionCleaner({
     policy: {
       mode: cleanupMode,
       delayMs: cleanupMode === 'immediate' ? 1_500 : (config.sessionCleanupDelayMs ?? DEFAULT_SESSION_CLEANUP.delayMs),
       batchSize: cleanupMode === 'immediate' ? 1 : (config.sessionCleanupBatchSize ?? DEFAULT_SESSION_CLEANUP.batchSize),
+      ...(cleanupMode === 'immediate'
+        ? {}
+        : { batchRange: cleanupBatchRange, delayRange: cleanupDelayRange, gapRange: cleanupGapRange }),
     },
     logger,
   })
@@ -343,6 +358,17 @@ export function apply(ctx: any, config: Config = {}): void {
                 defaultMinIntervalMs: DEFAULT_MIN_REQUEST_INTERVAL_MS,
                 defaultMaxIntervalMs: DEFAULT_MAX_REQUEST_INTERVAL_MS,
                 cleanup: sessionCleaner.policy(),
+                // 界面的滑块边界/默认值由后端给 —— 免得两边各写一套数字、改了一边忘另一边
+                cleanupBounds: {
+                  batch: CLEANUP_BATCH_BOUNDS,
+                  delayMs: CLEANUP_DELAY_BOUNDS_MS,
+                  gapMs: CLEANUP_GAP_BOUNDS_MS,
+                },
+                cleanupDefaults: {
+                  batch: DEFAULT_CLEANUP_BATCH,
+                  delayMs: DEFAULT_CLEANUP_DELAY_MS,
+                  gapMs: DEFAULT_CLEANUP_GAP_MS,
+                },
               })
               return
             }
@@ -370,6 +396,21 @@ export function apply(ctx: any, config: Config = {}): void {
                 }
                 patch.sessionCleanup = body.sessionCleanup
               }
+              // 会话清理的三个区间（上下限）。非法输入直接报错，不静默吞掉 ——
+              // 用户拖了滑块却"没生效"，是最难查的一类问题。
+              for (const [field, bounds] of [
+                ['cleanupBatch', CLEANUP_BATCH_BOUNDS],
+                ['cleanupDelayMs', CLEANUP_DELAY_BOUNDS_MS],
+                ['cleanupGapMs', CLEANUP_GAP_BOUNDS_MS],
+              ] as const) {
+                if (body[field] === undefined) continue
+                const range = normalizeCleanupRange(body[field], bounds)
+                if (!range) {
+                  sendJson(res, 400, { ok: false, error: `${field} 需要 { min, max } 两个数字` })
+                  return
+                }
+                patch[field] = range
+              }
               if (Object.keys(patch).length === 0) {
                 sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
                 return
@@ -377,6 +418,12 @@ export function apply(ctx: any, config: Config = {}): void {
               const applied = gate.configure(patch)
               // 清理策略由 cleaner 执行 → 同步生效
               if (patch.sessionCleanup) sessionCleaner.configure({ mode: patch.sessionCleanup })
+              // 三个区间即时作用到清理器（它会用新区间重新随机取值）
+              const rangePatch: Record<string, { min: number; max: number }> = {}
+              if (patch.cleanupBatch) rangePatch.batchRange = patch.cleanupBatch
+              if (patch.cleanupDelayMs) rangePatch.delayRange = patch.cleanupDelayMs
+              if (patch.cleanupGapMs) rangePatch.gapRange = patch.cleanupGapMs
+              if (Object.keys(rangePatch).length > 0) sessionCleaner.configure(rangePatch)
               try {
                 writeGateSettings(applied)
               } catch (error: any) {

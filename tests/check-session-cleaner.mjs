@@ -245,7 +245,9 @@ await test('单删失败不抛错（清理失败不应影响主流程）', async
 
 await test('policy() 如实返回当前策略（设置页要显示）', () => {
   const cleaner = createSessionCleaner({ policy: { mode: 'deferred', delayMs: 30_000, batchSize: 4 } })
-  assert.deepEqual(cleaner.policy(), { mode: 'deferred', delayMs: 30_000, batchSize: 4 })
+  // gapMs 是 0.1.30 新增的字段（相邻两个删除请求之间的间隔）。
+    // 这个 cleaner 没传 gapRange → 间隔为 0，即**不加额外间隔**，与旧行为一致。
+    assert.deepEqual(cleaner.policy(), { mode: 'deferred', delayMs: 30_000, batchSize: 4, gapMs: 0 })
 })
 
 console.log()

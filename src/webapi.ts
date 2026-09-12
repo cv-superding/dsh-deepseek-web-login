@@ -21,6 +21,13 @@
  */
 import type { WebAuth } from './auth.ts'
 import { AdapterLlmError, httpErrorCode, parseRetryAfterMs } from './auth.ts'
+// 默认区间来自 gate.ts —— 设置页的滑块边界与这里的默认值必须是**同一份**，否则界面显示的和实际跑的不是一回事。
+import {
+  DEFAULT_CLEANUP_BATCH,
+  DEFAULT_CLEANUP_DELAY_MS,
+  DEFAULT_CLEANUP_GAP_MS,
+  type CleanupRange,
+} from './gate.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
 
@@ -526,17 +533,43 @@ export type SessionCleanupMode = 'immediate' | 'deferred' | 'keep'
 
 export interface SessionCleanupPolicy {
   mode: SessionCleanupMode
-  /** deferred：从第一个会话入队起最多等多久就清理（毫秒）。 */
+  /** 当前生效值：有区间时是"这一轮抽到的"，没有区间时就是固定值（毫秒）。 */
   delayMs: number
-  /** deferred：攒够多少个立即清理。 */
+  /** 当前生效值：攒够多少个立即清理（个）。 */
   batchSize: number
+  /** 当前生效的删除间隔（毫秒）—— 相邻两个删除请求之间停多久。 */
+  gapMs: number
+  /**
+   * 三对区间（可选）。给了就"每轮 / 每次重新随机抽"，没给就保持固定值语义 ——
+   * 这样老调用方（传死 batchSize / delayMs 的）行为完全不变。
+   *
+   * 为什么要有：**固定值本身就是机器特征** —— 每次都攒到第 8 个就动手、每次都正好等 90 秒、
+   * 逐个删除时请求连发（中间 0 间隔）。真人不会这么精确。
+   */
+  batchRange?: CleanupRange
+  delayRange?: CleanupRange
+  gapRange?: CleanupRange
 }
 
 export const DEFAULT_SESSION_CLEANUP: SessionCleanupPolicy = {
   mode: 'deferred',
-  delayMs: 90_000,
-  batchSize: 8,
+  // 均值落在旧默认值上（90s / 8 个 / 1.5s），所以升级后行为没有突变，只是多了方差
+  delayMs: Math.round((DEFAULT_CLEANUP_DELAY_MS.min + DEFAULT_CLEANUP_DELAY_MS.max) / 2),
+  batchSize: Math.round((DEFAULT_CLEANUP_BATCH.min + DEFAULT_CLEANUP_BATCH.max) / 2),
+  gapMs: Math.round((DEFAULT_CLEANUP_GAP_MS.min + DEFAULT_CLEANUP_GAP_MS.max) / 2),
+  batchRange: DEFAULT_CLEANUP_BATCH,
+  delayRange: DEFAULT_CLEANUP_DELAY_MS,
+  gapRange: DEFAULT_CLEANUP_GAP_MS,
 }
+
+/**
+ * 单个请求里最多塞多少个会话 id。
+ *
+ * 为什么要有：队列在"清理很慢"时可能积很多（比如你离开两小时后回来，一次 flush 要删几十个）。
+ * 「一次请求删掉一大批」正是用户担心的事 —— 所以超过这个数就拆成多次，
+ * 每次之间按随机间隔停一下。
+ */
+const MAX_IDS_PER_REQUEST = 20
 
 export interface SessionCleanerOptions {
   policy?: Partial<SessionCleanupPolicy>
@@ -545,6 +578,8 @@ export interface SessionCleanerOptions {
   fetchImpl?: typeof fetch
   setTimeoutImpl?: (fn: () => void, ms: number) => any
   clearTimeoutImpl?: (t: any) => void
+  /** 随机源。单测注入一个确定序列即可得到可重复的取值。默认 Math.random。 */
+  randomImpl?: () => number
 }
 
 export interface SessionCleaner {
@@ -562,6 +597,17 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
     mode: options.policy?.mode ?? DEFAULT_SESSION_CLEANUP.mode,
     delayMs: Math.max(0, Math.floor(options.policy?.delayMs ?? DEFAULT_SESSION_CLEANUP.delayMs)),
     batchSize: Math.max(1, Math.floor(options.policy?.batchSize ?? DEFAULT_SESSION_CLEANUP.batchSize)),
+    // 没给区间（老调用方 / 老配置）→ 间隔为 0，也就是**不加额外间隔**，保持老行为。
+    // 只有显式配了 gapRange 才启用"删一个歇一下"。
+    gapMs: Math.max(
+      0,
+      Math.floor(options.policy?.gapMs ?? (options.policy?.gapRange ? DEFAULT_SESSION_CLEANUP.gapMs : 0)),
+    ),
+    // 区间是**可选**的：老调用方只传死 batchSize / delayMs 时，这里保持"无区间"= 固定值语义
+    // （否则它们传的 3 会被默认区间 6~10 顶掉，单测与旧行为全乱）。
+    ...(options.policy?.batchRange ? { batchRange: options.policy.batchRange } : {}),
+    ...(options.policy?.delayRange ? { delayRange: options.policy.delayRange } : {}),
+    ...(options.policy?.gapRange ? { gapRange: options.policy.gapRange } : {}),
   }
   /** 策略切换时按模式给默认延迟/批量（immediate 用老参数）。 */
   function applyModeDefaults(): void {
@@ -569,8 +615,13 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
       policy.delayMs = 1_500
       policy.batchSize = 1
     } else if (policy.mode === 'deferred' && policy.batchSize <= 1) {
-      policy.delayMs = DEFAULT_SESSION_CLEANUP.delayMs
-      policy.batchSize = DEFAULT_SESSION_CLEANUP.batchSize
+      // 从「不删 / 立即」切回「延迟」时给一组新的随机值（不是写死的默认值）
+      policy.delayMs = policy.delayRange
+        ? pickInt(policy.delayRange)
+        : DEFAULT_SESSION_CLEANUP.delayMs
+      policy.batchSize = policy.batchRange
+        ? pickInt(policy.batchRange)
+        : DEFAULT_SESSION_CLEANUP.batchSize
     }
   }
   const doFetch = options.fetchImpl ?? fetch
@@ -582,6 +633,54 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
   let timer: any
   /** 探测到服务端不接受批量删除后置位 —— 之后一律逐个删，不再浪费请求。 */
   let batchUnsupported = false
+
+  const random = options.randomImpl ?? Math.random
+
+  /** 在 [min, max] 里取整数（闭区间）。random 可注入，单测因此可重复。 */
+  function pickInt(range: CleanupRange): number {
+    const lo = Math.min(range.min, range.max)
+    const hi = Math.max(range.min, range.max)
+    if (hi <= lo) return lo
+    // 注入的假随机源有可能返回 1，夹一下保证不越界
+    return Math.min(hi, lo + Math.floor(random() * (hi - lo + 1)))
+  }
+
+  /**
+   * 新的一轮清理开始（队列由空变非空）时重新抽：这一轮攒几个、最多等多久。
+   *
+   * 为什么按"轮"抽而不是每次都抽：阈值与等待时间要在一轮里保持稳定，
+   * 否则"攒够 6~10 个"会退化成"好像随时都在触发"。每轮换一组，既有方差又不失节奏。
+   */
+  function rollCycle(): void {
+    if (policy.mode !== 'deferred') return
+    if (policy.batchRange) policy.batchSize = Math.max(1, pickInt(policy.batchRange))
+    if (policy.delayRange) policy.delayMs = Math.max(0, pickInt(policy.delayRange))
+  }
+
+  /** 每次要发一个删除请求之前抽一次间隔（顺带记下当前值，供设置页显示）。 */
+  function rollGap(): number {
+    policy.gapMs = policy.gapRange ? Math.max(0, pickInt(policy.gapRange)) : Math.max(0, policy.gapMs)
+    return policy.gapMs
+  }
+
+  /** 用注入的定时器睡一会儿（单测里就是"等假表被触发"）。 */
+  function sleep(ms: number): Promise<void> {
+    if (!(ms > 0)) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const handle = setT(() => resolve(), ms)
+      ;(handle as any)?.unref?.()
+    })
+  }
+
+  /** 装一次「到点清理」的表（已经装了就不动）。 */
+  function armTimer(): void {
+    if (timer !== undefined) return
+    if (policy.mode === 'keep') return
+    timer = setT(() => {
+      void flush()
+    }, Math.max(0, policy.delayMs))
+    ;(timer as any)?.unref?.()
+  }
 
   async function deleteOne(auth: WebAuth, sessionId: string): Promise<void> {
     try {
@@ -596,15 +695,14 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
     }
   }
 
-  async function flush(): Promise<void> {
-    if (timer !== undefined) {
-      clearT(timer)
-      timer = undefined
-    }
-    const batch = queue
-    queue = []
+  /**
+   * 删一批：优先一个请求批量删；服务端不接受则**逐个删**。
+   *
+   * 逐个删时两个请求之间会停一个随机间隔 —— 原来这里是**连发**（一批 20 个就是 20 个连续请求），
+   * 那是最像脚本的部分。
+   */
+  async function deleteChunk(batch: { auth: WebAuth; sessionId: string }[]): Promise<void> {
     if (batch.length === 0) return
-
     if (batch.length > 1 && !batchUnsupported) {
       try {
         const resp = await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
@@ -634,12 +732,52 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
       }
     }
 
-    for (const item of batch) await deleteOne(item.auth, item.sessionId)
+    for (let i = 0; i < batch.length; i += 1) {
+      if (i > 0) await sleep(rollGap())
+      await deleteOne(batch[i].auth, batch[i].sessionId)
+    }
     logger?.debug?.(`deepseek-web: 已清理 ${batch.length} 个临时会话`)
+  }
+
+  /** 真正干活的清理。分片：队列积很多时也不一口气删完（见 MAX_IDS_PER_REQUEST 的说明）。 */
+  async function doFlush(): Promise<void> {
+    if (timer !== undefined) {
+      clearT(timer)
+      timer = undefined
+    }
+    const batch = queue
+    queue = []
+    try {
+      if (batch.length === 0) return
+      for (let i = 0; i < batch.length; i += MAX_IDS_PER_REQUEST) {
+        if (i > 0) await sleep(rollGap())
+        await deleteChunk(batch.slice(i, i + MAX_IDS_PER_REQUEST))
+      }
+    } catch (error: any) {
+      // 清理失败不影响主流程
+      logger?.debug?.(`deepseek-web: 会话清理出错（已忽略）：${error?.message ?? error}`)
+    } finally {
+      // 清理期间可能又攒了新的：重新装表，否则它们会一直躺在队列里没人管（直到下次有会话入队）
+      if (queue.length > 0) armTimer()
+    }
+  }
+
+  /**
+   * 立即清理队列。
+   *
+   * **串行化**：上一次还没删完时，这一次排在它后面等 —— 否则两轮 flush 的删除请求会交错发出，
+   * 正是我们要避免的"连发"。排队的 flush 轮到自己时才取队列，所以能带上期间新攒的会话。
+   */
+  let chain: Promise<void> = Promise.resolve()
+  function flush(): Promise<void> {
+    chain = chain.then(doFlush, doFlush)
+    return chain
   }
 
   function schedule(auth: WebAuth, sessionId: string): void {
     if (policy.mode === 'keep') return
+    // 队列由空变非空 = 新的一轮开始 → 重新抽本轮的阈值与最长等待
+    if (queue.length === 0) rollCycle()
     queue.push({ auth, sessionId })
     // 只有 deferred 才「攒够就立即清理」。immediate 始终走延迟 —— 保持老行为：
     // 调用结束后过一会儿才删，避免「流刚结束就紧跟一个 DELETE」这种过紧的节奏。
@@ -647,12 +785,7 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
       void flush()
       return
     }
-    if (timer === undefined) {
-      timer = setT(() => {
-        void flush()
-      }, policy.delayMs)
-      ;(timer as any)?.unref?.()
-    }
+    armTimer()
   }
 
   function configure(next: Partial<SessionCleanupPolicy>): SessionCleanupPolicy {
@@ -660,11 +793,23 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
     if (next.mode !== undefined) policy.mode = next.mode
     if (next.delayMs !== undefined) policy.delayMs = Math.max(0, Math.floor(next.delayMs))
     if (next.batchSize !== undefined) policy.batchSize = Math.max(1, Math.floor(next.batchSize))
+    if (next.gapMs !== undefined) policy.gapMs = Math.max(0, Math.floor(next.gapMs))
+    // 区间：给了就换；没给就保持原样（"缺省 = 不随机"的语义不能丢）
+    for (const key of ['batchRange', 'delayRange', 'gapRange'] as const) {
+      const value = next[key]
+      if (value && Number.isFinite(value.min) && Number.isFinite(value.max)) {
+        policy[key] = { min: Math.floor(Math.min(value.min, value.max)), max: Math.floor(Math.max(value.min, value.max)) }
+      }
+    }
     if (modeChanged) applyModeDefaults()
     if (policy.mode === 'keep') void flush() // 切到「不删」时把已排队的清掉，避免残留
     logger?.info?.(
       `deepseek-web: 会话清理策略已更新 —— ${policy.mode}` +
-        (policy.mode === 'deferred' ? `（攒 ${policy.batchSize} 个或 ${Math.round(policy.delayMs / 1000)}s 后清理）` : ''),
+        (policy.mode === 'deferred'
+          ? `（攒 ${policy.batchSize} 个或 ${Math.round(policy.delayMs / 1000)}s 后清理` +
+            (policy.gapRange ? `；批量删除不受支持时逐个删，间隔 ${policy.gapMs}ms` : '') +
+            '）'
+          : ''),
     )
     return { ...policy }
   }

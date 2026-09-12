@@ -58,7 +58,7 @@ The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so i
 
 The settings panel is split into **5 tabs** (one page at a time): **Account** (login status /
 current account / **account library** / manual token) · **Models** (available models /
-connectivity test) · **Anti-throttle** (request pacing / session cleanup / **call ledger**) ·
+connectivity test) · **Anti-throttle** (request pacing / session cleanup with three ranges / **call ledger**) ·
 **Transport** (fingerprint + one-click test) · **About** (version & updates / data locations / risks).
 The action-feedback strip sits above the tab bar, so it stays visible from any tab.
 
@@ -147,8 +147,11 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `maxRequestIntervalMs` | **`4000`** | Upper bound; the actual wait is picked **randomly** inside the range (equal bounds = fixed interval) |
 | `allowConcurrent` | **`false`** | Allow concurrent requests on one account. Off by default: calls queue (FIFO) |
 | `sessionCleanup` | **`deferred`** | Temp-session cleanup: `immediate` (delete 1.5s after each call) / `deferred` (batched, default) / `keep` (never delete) |
-| `sessionCleanupDelayMs` | `90000` | deferred: max wait before flushing the queue |
-| `sessionCleanupBatchSize` | `8` | deferred: flush as soon as this many sessions are queued |
+| `sessionCleanupDelayMs` | `90000` | deferred: max wait before flushing the queue (scalar fallback when no range is set) |
+| `sessionCleanupBatchSize` | `8` | deferred: flush as soon as this many sessions are queued (scalar fallback) |
+| `cleanupBatch` | `6~10` (random) | deferred: **range** for the queue threshold. How many this cycle = re-rolled at each flush |
+| `cleanupDelayMs` | `60000~120000` (random) | deferred: **range** for the max wait (ms). Re-rolled at each flush |
+| `cleanupGapMs` | `800~2500` (random) | deferred: **range** for the gap between two adjacent delete requests (ms). Re-rolled per delete |
 | `transport` | **`chromium`** | Transport: `chromium` = Electron `net.fetch` (browser-identical fingerprint) / `node` = Node fetch |
 | `probeIntervalMs` | `1800000` | Read-only login-state probe interval (ms); `0` disables. Uses `users/current`, zero quota |
 
@@ -198,6 +201,23 @@ none of that is fixable by tuning. Going through Electron's `net.fetch` uses Chr
 network stack — the cipher list hash matches Chrome byte for byte — with **zero new dependencies**
 (no uTLS, no curl-impersonate). The only residual gap is 16 vs 17 extensions (bundled Chromium 150
 vs local Chrome 152, a normal version difference).
+
+### Session cleanup: three ranges instead of hard-coded values
+
+One model call issues 4 requests (create session → PoW → completion → delete session), and
+"create one temp session, delete it right away, every single turn" is one of the strongest script
+signals. So the delete side is batched: flush once the queue reaches **6–10** sessions, or after at
+most **60–120 s**, whichever comes first — with **one batched delete request** whenever the server
+accepts it.
+
+The three numbers used to be dead constants, and a constant has a variance of ~0 — itself the
+clearest statistical tell (no human is that precise). Each is now a **range** and the actual value is
+drawn randomly: the threshold and the max wait are re-rolled **every flush**, and the gap between two
+adjacent delete requests is re-rolled **per delete**. That last one exists so that when the server
+rejects batched delete (the code then falls back to deleting one by one, permanently) you do not fire
+dozens of delete requests back to back. Set the upper bound to 0 to disable the gap. Both batched and
+one-by-one deletion are **serialised** — a flush that is still running makes the next one queue up
+instead of interleaving.
 
 Switchable in Settings, with a **zero-quota one-click test** (echoes fingerprint / streaming / auth).
 
