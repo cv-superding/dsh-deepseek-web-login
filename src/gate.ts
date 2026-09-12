@@ -17,8 +17,61 @@
  *     把请求密度压下来 —— 这是防风控真正起作用的那一项。
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 /** 推荐的调用间隔：3 秒。依据见 README 的「配置」一节。 */
 export const DEFAULT_MIN_REQUEST_INTERVAL_MS = 3_000
+
+/** 间隔可选的推荐档位（设置页的快捷按钮用）。 */
+export const INTERVAL_PRESETS = [1_500, 3_000, 8_000] as const
+/** 设置页滑块的取值上限。 */
+export const MAX_INTERVAL_MS = 30_000
+
+export interface GateSettings {
+  allowConcurrent: boolean
+  minRequestIntervalMs: number
+}
+
+/** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
+export function gateSettingsPath(): string {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return join(home, 'web-login', 'gate.json')
+}
+
+/**
+ * 读设置页保存过的值。文件不存在/损坏都返回 undefined（回落到 cordis config）。
+ * 优先级：**设置页（文件）> cordis config > 内置默认** —— 设置页是用户的显式操作，
+ * 不该被配置文件里的旧值盖掉。
+ */
+export function readGateSettings(): Partial<GateSettings> | undefined {
+  try {
+    const file = gateSettingsPath()
+    if (!existsSync(file)) return undefined
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    const out: Partial<GateSettings> = {}
+    if (typeof parsed?.allowConcurrent === 'boolean') out.allowConcurrent = parsed.allowConcurrent
+    if (Number.isFinite(parsed?.minRequestIntervalMs)) {
+      out.minRequestIntervalMs = clampInterval(Number(parsed.minRequestIntervalMs))
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function writeGateSettings(settings: GateSettings): void {
+  const file = gateSettingsPath()
+  mkdirSync(join(file, '..'), { recursive: true })
+  writeFileSync(file, JSON.stringify(settings, null, 2) + '\n', 'utf8')
+}
+
+/** 把任意输入规整成合法间隔：非数 → 默认，负 → 0，超上限 → 上限。 */
+export function clampInterval(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MIN_REQUEST_INTERVAL_MS
+  return Math.min(MAX_INTERVAL_MS, Math.max(0, Math.floor(value)))
+}
 
 export interface RequestGateOptions {
   /** 允许同一账号并发（默认 false）。开启会恢复「标题与主回答同时发」的高风险行为。 */
@@ -36,11 +89,16 @@ export interface RequestGate {
   acquire(label?: string): Promise<() => void>
   /** 当前状态（诊断/测试用）。 */
   stats(): { running: number; waiting: number; lastFinishedAt: number }
+  /** 读取当前生效的节流设置。 */
+  settings(): GateSettings
+  /** 运行时改设置（设置页保存后调用）；返回改完后的值。 */
+  configure(next: Partial<GateSettings>): GateSettings
 }
 
 export function createRequestGate(options: RequestGateOptions = {}): RequestGate {
-  const allowConcurrent = options.allowConcurrent === true
-  const minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? 0))
+  // 可运行时修改（设置页保存后立即生效，不必重启）
+  let allowConcurrent = options.allowConcurrent === true
+  let minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? 0))
   const now = options.now ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const logger = options.logger
@@ -97,8 +155,23 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     }
   }
 
+  function settings(): GateSettings {
+    return { allowConcurrent, minRequestIntervalMs: minIntervalMs }
+  }
+
+  function configure(next: Partial<GateSettings>): GateSettings {
+    if (typeof next.allowConcurrent === 'boolean') allowConcurrent = next.allowConcurrent
+    if (next.minRequestIntervalMs !== undefined) minIntervalMs = clampInterval(Number(next.minRequestIntervalMs))
+    logger?.info?.(
+      `deepseek-web: 请求节流设置已更新 —— ${allowConcurrent ? '允许并发（不推荐）' : '串行'} · 间隔 ${minIntervalMs}ms`,
+    )
+    return settings()
+  }
+
   return {
     acquire,
     stats: () => ({ running, waiting, lastFinishedAt }),
+    settings,
+    configure,
   }
 }

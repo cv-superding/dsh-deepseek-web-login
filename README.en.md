@@ -139,8 +139,14 @@ So the plugin now serialises calls (including title/compaction) and enforces a m
 | Experimental: restore native concurrency | any | `true` ⚠️ |
 
 > The gap is measured from when the previous call **finished**, so a long answer is never followed by an
-> extra pointless wait — it only affects genuinely dense back-to-back calls. Change the config and **restart
-> DSH**; the settings page shows the currently effective values.
+> extra pointless wait — it only affects genuinely dense back-to-back calls.
+>
+> **Two ways to change it**: ① the "Request throttling" card at the bottom of the settings page
+> (switch + slider + three presets) — takes effect immediately and is persisted;
+> ② the plugin entry config — needs a DSH restart.
+> Precedence: **settings page > entry config > built-in default** (the settings page is an explicit
+> user action, so a stale config value never overrides it). Stored at
+> `${DSH_HOME:-~/.dsh}/web-login/gate.json`.
 
 ## Known limitations
 

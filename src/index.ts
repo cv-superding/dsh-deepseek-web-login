@@ -11,7 +11,15 @@
  */
 import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
-import { DEFAULT_MIN_REQUEST_INTERVAL_MS } from './gate.ts'
+import {
+  createRequestGate,
+  readGateSettings,
+  writeGateSettings,
+  DEFAULT_MIN_REQUEST_INTERVAL_MS,
+  INTERVAL_PRESETS,
+  MAX_INTERVAL_MS,
+  type GateSettings,
+} from './gate.ts'
 import { browserLogin, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { validateAuth } from './webapi.ts'
@@ -73,15 +81,25 @@ function sendJson(res: any, status: number, payload: unknown): void {
 
 export function apply(ctx: any, config: Config = {}): void {
   const logger = normalizeLogger(ctx.logger)
+
+  // 节流设置：设置页保存过的值（gate.json）优先于 cordis config —— 设置页是用户的显式操作，
+  // 不该被配置文件里的旧值盖回去。闸门在这里创建并共享给适配器，设置页改完即时生效。
+  const savedGate = readGateSettings()
+  const gate = createRequestGate({
+    allowConcurrent: savedGate?.allowConcurrent ?? config.allowConcurrent === true,
+    minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    logger,
+  })
   const adapterConfig: AdapterConfig = {
     maxPromptChars: config.maxPromptChars ?? 1_500_000,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
     autoContinue: config.autoContinue !== false,
     maxContinuations: config.maxContinuations ?? 2,
-    // 防风控：默认串行 + 每次调用之间至少 3 秒（见 README「配置」）
-    allowConcurrent: config.allowConcurrent === true,
-    minRequestIntervalMs: config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    // 防风控：默认串行 + 每次调用之间至少 3 秒（见 README「配置」）。
+    // 取闸门的实际生效值（可能来自设置页保存的 gate.json）。
+    allowConcurrent: gate.settings().allowConcurrent,
+    minRequestIntervalMs: gate.settings().minRequestIntervalMs,
     logger,
   }
 
@@ -89,6 +107,7 @@ export function apply(ctx: any, config: Config = {}): void {
   // 附件服务（ctx.attachments）：图片输入所需。用 ctx.get 取（可选依赖，缺省则图片降级为文本）
   const adapter = createAdapter({
     getAuth,
+    gate,
     config: adapterConfig,
     readImage: async (ref: any, signal?: AbortSignal) => {
       const attachments = ctx.get?.('attachments')
@@ -119,6 +138,48 @@ export function apply(ctx: any, config: Config = {}): void {
           const route = url.pathname.slice(API_PREFIX.length) || '/'
 
           try {
+            // 请求节流设置（设置页的开关与滑块）——读写都即时生效，并持久化到 gate.json
+            if (req.method === 'GET' && route === '/gate') {
+              sendJson(res, 200, {
+                ...gate.settings(),
+                presets: [...INTERVAL_PRESETS],
+                maxIntervalMs: MAX_INTERVAL_MS,
+                defaultIntervalMs: DEFAULT_MIN_REQUEST_INTERVAL_MS,
+              })
+              return
+            }
+            if (req.method === 'POST' && route === '/gate') {
+              const body = await readJsonBody(req)
+              if (!body || typeof body !== 'object') {
+                sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+                return
+              }
+              const patch: Partial<GateSettings> = {}
+              if (typeof body.allowConcurrent === 'boolean') patch.allowConcurrent = body.allowConcurrent
+              if (body.minRequestIntervalMs !== undefined) {
+                const ms = Number(body.minRequestIntervalMs)
+                if (!Number.isFinite(ms)) {
+                  sendJson(res, 400, { ok: false, error: 'minRequestIntervalMs 必须是数字' })
+                  return
+                }
+                patch.minRequestIntervalMs = ms
+              }
+              if (Object.keys(patch).length === 0) {
+                sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
+                return
+              }
+              const applied = gate.configure(patch)
+              try {
+                writeGateSettings(applied)
+              } catch (error: any) {
+                // 落盘失败不影响本次生效，但要说清楚（重启后会回到旧值）
+                logger.warn?.(`deepseek-web: 节流设置落盘失败：${error?.message ?? error}`)
+                sendJson(res, 200, { ok: true, ...applied, persisted: false, warning: '已即时生效，但写入 gate.json 失败，重启后会回到旧值' })
+                return
+              }
+              sendJson(res, 200, { ok: true, ...applied, persisted: true })
+              return
+            }
             if (req.method === 'GET' && (route === '/status' || route === '/')) {
               const light = url.searchParams.get('light') === '1'
               const auth = getAuth()

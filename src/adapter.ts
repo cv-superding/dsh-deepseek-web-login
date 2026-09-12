@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
-import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS } from './gate.ts'
+import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
 import { collectImageRefs, serializePrompt, stripSystemMarkers, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
@@ -194,6 +194,11 @@ export interface AdapterDeps {
   readImage?: (ref: any, signal?: AbortSignal) => Promise<{ data: Uint8Array; mediaType?: string; name?: string }>
   /** 注入自定义流函数（单测用假流验证自动续写）；缺省用 streamWebCompletion。 */
   streamCompletion?: (auth: WebAuth, params: any) => AsyncGenerator<any>
+  /**
+   * 外部注入的请求闸门（宿主在设置页里要能改它的配置，所以由 index.ts 创建并共享）。
+   * 缺省时按 config 自建一个。
+   */
+  gate?: RequestGate
 }
 
 function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
@@ -288,12 +293,15 @@ export function createAdapter(deps: AdapterDeps) {
   // 流函数可注入（单测用假流验证自动续写）；缺省走真实网页端实现
   const runStream = deps.streamCompletion ?? streamWebCompletion
 
-  // 请求闸门：串行 + 最小间隔，覆盖**每一次**模型调用（含 DSH 的会话标题/压缩等辅助调用）
-  const gate = createRequestGate({
-    allowConcurrent: deps.config.allowConcurrent === true,
-    minIntervalMs: deps.config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
-    logger,
-  })
+  // 请求闸门：串行 + 最小间隔，覆盖**每一次**模型调用（含 DSH 的会话标题/压缩等辅助调用）。
+  // 宿主（index.ts）会注入一个共享实例，好让设置页改完立即生效；缺省自建。
+  const gate =
+    deps.gate ??
+    createRequestGate({
+      allowConcurrent: deps.config.allowConcurrent === true,
+      minIntervalMs: deps.config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+      logger,
+    })
 
   const adapter = {
     providerInfo(provider: string) {

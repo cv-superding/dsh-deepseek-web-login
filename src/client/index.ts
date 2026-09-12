@@ -132,6 +132,19 @@ font-size:12px;line-height:1.6;color:var(--fg)}
 .dsw-models .name{font-size:13px;font-weight:500;color:var(--fg)}
 .dsw-models .id{color:var(--fg3);font-size:12px;margin-top:1px;word-break:break-word}
 .dsw-hint{color:var(--fg3);font-size:12px;line-height:1.6;margin:8px 0 0}
+.dsw-gate-row{display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap}
+.dsw-gate-label{color:var(--fg3);font-size:12px;min-width:52px;flex:0 0 auto}
+.dsw-gate-value{font-size:12px;color:var(--fg);min-width:56px;text-align:right;font-variant-numeric:tabular-nums}
+.dsw-switch{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:var(--fg);cursor:pointer;user-select:none}
+.dsw-switch input{position:absolute;opacity:0;width:0;height:0}
+.dsw-switch-track{width:34px;height:20px;border-radius:999px;background:var(--bd2);position:relative;transition:background-color .15s ease;flex:0 0 auto}
+.dsw-switch-track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s ease}
+.dsw-switch input:checked + .dsw-switch-track{background:var(--err)}
+.dsw-switch input:checked + .dsw-switch-track::after{transform:translateX(14px)}
+.dsw-range{-webkit-appearance:none;appearance:none;flex:1 1 160px;height:4px;border-radius:999px;background:var(--bd2);outline:none;cursor:pointer}
+.dsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
+.dsw-preset{padding:4px 10px;font-size:12px}
+.dsw-gate-msg{color:var(--fg3);min-height:1.6em}
 .dsw-code{display:block;margin:6px 0;padding:7px 10px;background:var(--code-bg);border:1px solid var(--bd);
 border-radius:8px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);
 overflow-x:auto;white-space:pre}
@@ -473,6 +486,103 @@ function Panel(): any {
         showMessage(`状态读取失败：${error?.message ?? error}`, 'err')
       }
     }
+
+    // ── 请求节流卡：并发开关 + 间隔滑块 ──
+    // 这两项决定会不会被账号级限流（实测双窗口并发 6 分钟内被限制 1 天），
+    // 所以不该只藏在配置文件里 —— 界面上直接可调，改完即时生效并落盘。
+    const gateCard = el('div', 'dsw-card')
+    gateCard.append(el('div', 'dsw-cardhead', '请求节流（防风控）'))
+
+    const concRow = el('div', 'dsw-gate-row')
+    const concLabel = el('label', 'dsw-switch')
+    const concInput = el('input') as HTMLInputElement
+    concInput.type = 'checkbox'
+    const concTrack = el('span', 'dsw-switch-track')
+    concLabel.append(concInput, concTrack, el('span', undefined, '允许并发（同一账号同时发两条）'))
+    concRow.append(concLabel)
+    gateCard.append(concRow)
+
+    const intervalRow = el('div', 'dsw-gate-row')
+    intervalRow.append(el('span', 'dsw-gate-label', '最小间隔'))
+    const intervalRange = el('input', 'dsw-range') as HTMLInputElement
+    intervalRange.type = 'range'
+    intervalRange.min = '0'
+    intervalRange.max = '30000'
+    intervalRange.step = '500'
+    const intervalValue = el('span', 'dsw-gate-value', '—')
+    intervalRow.append(intervalRange, intervalValue)
+    gateCard.append(intervalRow)
+
+    const presetRow = el('div', 'dsw-gate-row')
+    gateCard.append(presetRow)
+
+    gateCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '间隔按「上一次请求结束」起算，所以长回答之后不会白等 —— 它只在密集连发时起作用。',
+      ),
+    )
+    gateCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '并发默认关闭：DSH 的会话标题生成会与主回答同时发往同一账号，网页端同一账号同时只能生成一条，' +
+          '实测双窗口并发不到 6 分钟即触发账号级限制（1 天）。',
+      ),
+    )
+    const gateMsg = el('p', 'dsw-hint dsw-gate-msg', '')
+    gateCard.append(gateMsg)
+    page.append(gateCard)
+
+    /** 渲染宿主返回的节流设置（含可选档位）。 */
+    const applyGate = (g: any): void => {
+      const interval = Number(g?.minRequestIntervalMs ?? 3000)
+      concInput.checked = !!g?.allowConcurrent
+      intervalRange.max = String(g?.maxIntervalMs ?? 30000)
+      intervalRange.value = String(interval)
+      intervalValue.textContent = `${interval}ms`
+      presetRow.textContent = ''
+      presetRow.append(el('span', 'dsw-gate-label', '快捷'))
+      for (const ms of g?.presets ?? [1500, 3000, 8000]) {
+        const isDefault = ms === (g?.defaultIntervalMs ?? 3000)
+        const preset = el('button', 'dsw-btn ghost dsw-preset', isDefault ? `${ms}ms（推荐）` : `${ms}ms`) as HTMLButtonElement
+        preset.addEventListener('click', () => void saveGate({ minRequestIntervalMs: ms }))
+        presetRow.append(preset)
+      }
+    }
+
+    const saveGate = async (patch: { allowConcurrent?: boolean; minRequestIntervalMs?: number }): Promise<void> => {
+      gateMsg.textContent = '保存中……'
+      try {
+        const result = await api('/gate', { method: 'POST', body: JSON.stringify(patch) })
+        if (result?.ok) {
+          applyGate(result)
+          gateMsg.textContent =
+            `已生效：${result.allowConcurrent ? '允许并发（不推荐）' : '串行'} · 间隔 ${result.minRequestIntervalMs}ms` +
+            (result.persisted === false ? ` ⚠️ ${result.warning ?? '未能写入配置'}` : '（已写入配置，重启后仍生效）')
+        } else {
+          gateMsg.textContent = `保存失败：${result?.error ?? '未知原因'}`
+        }
+      } catch (error: any) {
+        gateMsg.textContent = `保存失败：${error?.message ?? error}`
+      }
+    }
+
+    concInput.addEventListener('change', () => void saveGate({ allowConcurrent: concInput.checked }))
+    // 拖动中只更新数字，松手（change）才提交，避免一路发请求
+    intervalRange.addEventListener('input', () => {
+      intervalValue.textContent = `${intervalRange.value}ms`
+    })
+    intervalRange.addEventListener('change', () => void saveGate({ minRequestIntervalMs: Number(intervalRange.value) }))
+
+    void (async () => {
+      try {
+        applyGate(await api('/gate'))
+      } catch {
+        gateMsg.textContent = '节流设置读取失败（宿主未响应）'
+      }
+    })()
 
     let boostUntil = 0
 
