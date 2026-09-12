@@ -991,9 +991,54 @@ export function findXmlToolCallEnd(buffer: string): number {
     const match = closeRe.exec(slice)
     if (!match) return -1
     cursor += match.index + match[0].length
+    const rest = text.slice(cursor)
     // 后面的下一个非空白若是新的 invoke，则继续吞并
-    if (!isInvokeStart(text.slice(cursor))) return cursor
+    if (isInvokeStart(rest)) continue
+    // ⚠️ 2026-09-12 实测泄漏：模型常把**包裹开始标签写丢、只留下闭合标签**，
+    // 于是正文里冒出 `</|DSML|calls>`（甚至退化成 `</ calls>`）。
+    // 孤立的闭合标签属于这一批调用，不该上屏 —— 收全了就一起吞掉。
+    // 复现：连续裸 `<|DSML|invoke …>` 之后跟一个 `</|DSML|calls>`，旧代码会把它当正文吐出。
+    const strayClose = new RegExp(
+      `^\\s*<\\/\\s*${DSML_PREFIX}(?:dsml-)?(?:${WRAPPER_NAMES})\\s*>`,
+      'i',
+    )
+    const stray = strayClose.exec(rest)
+    if (stray) return cursor + stray[0].length
+    // 看起来"还在收"的残片（`<` / `</` / `</|DSM` / `</ calls` …）→ 继续等，
+    // 别急着当正文吐。真收不全时 flush() 会走 parseXmlToolCalls，整段不外泄。
+    const tail = rest.trim()
+    if (tail.startsWith('<') && /^<\/?\s*[|｜]?\s*[A-Za-z]{0,14}$/.test(tail)) return -1
+    return cursor
   }
+}
+
+/**
+ * 剥掉「孤立的工具调用标记残片」。
+ *
+ * ⚠️ 2026-09-12 实测泄漏（用户截图里那句 `voke> </ calls>`）：模型把**包裹开始标签写丢**，
+ * 只留下闭合标签，或者只留下标签的后半截。这些残片不属于回答，但会绕过捕获逻辑
+ * （识别器只认 `<…invoke` / `<…calls>` 这类**开始**形态）落进正文缓冲，最后被当正文吐出去。
+ *
+ * 触发路径是 `flush()`：残片通常很短（`</|DSML|calls>` 只有 16 字符），
+ * 小于 HOLD_BACK_CHARS 就会被一直 hold 住，流结束时无条件吐出。
+ *
+ * 三道规则，从明确到宽松：
+ *   1. 带 DSML 前缀的孤立闭合标签 —— `</|DSML|calls>` / `</ | DSML | invoke>`
+ *      （DSML 是 DeepSeek 私有的标记名，正文里不可能正常出现，剥掉零风险）
+ *   2. 前缀被吃光的退化形态 —— `</ calls>` / `</invoke>`
+ *   3. 只剩后半截的 —— 独占一行的 `voke>`（`invoke>` 掉了头）
+ * 正文里正常讨论 XML 时通常写在代码围栏或行内代码里，形态与这三条不同。
+ */
+export function stripStrayToolMarkup(text: string): string {
+  if (!text) return text
+  if (!/voke\s*>|calls?\s*>|tool_calls?\s*>|function_calls?\s*>|DSML/i.test(text)) return text
+  return text
+    .replace(
+      new RegExp(`<\\/\\s*(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)?(?:dsml-)?(?:${WRAPPER_NAMES}|invoke)\\s*>`, 'gi'),
+      '',
+    )
+    .replace(/<\/\s+(?:tool_calls?|function_calls|calls|invoke)\s*>/gi, '')
+    .replace(/(^|\n)[ \t]*(?:in)?voke\s*>\s*(?=\n|$)/gi, '$1')
 }
 
 /**
@@ -1036,7 +1081,8 @@ export class ToolCallStreamFilter {
       else out.text += captured.buffer // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出
       this.capture = null
     }
-    out.text += this.pending
+    // 流结束：把 hold 住的尾巴吐出去之前先剥掉孤立残片 —— 它们会在这里"逃逸"成正文
+    out.text += stripStrayToolMarkup(this.pending)
     this.pending = ''
     if (this.abandoned) out.rejected = this.abandoned
     return out
@@ -1113,7 +1159,8 @@ export class ToolCallStreamFilter {
         continue
       }
 
-      // 未见完整标记：保留末尾可能的标记前缀，其余立即透传
+      // 未见完整标记：先把夹在正文里的孤立残片剥掉，再保留末尾可能的标记前缀
+      this.pending = stripStrayToolMarkup(this.pending)
       if (this.pending.length <= HOLD_BACK_CHARS) return
       const hold = partialMarkerSuffixLength(this.pending)
       if (hold > 0) {
