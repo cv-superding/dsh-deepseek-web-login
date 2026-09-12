@@ -466,6 +466,9 @@ export function apply(ctx: any, config: Config = {}): void {
                   lastVerifiedAt: record.lastVerifiedAt ?? null,
                   lastVerifyError: record.lastVerifyError ?? null,
                   limit: record.limit ?? null,
+                  // cookie 的过期构成（捕获时记下）。老记录 / 手动粘 token 的账号是空数组，
+                  // 界面据此区分"没记录"和"记录到全是会话级"—— 这两种含义完全不同。
+                  cookieMeta: record.cookieMeta ?? [],
                   isActive: record.id === activeId,
                 })),
                 footprint: accountsFootprint(),
@@ -690,6 +693,30 @@ export function apply(ctx: any, config: Config = {}): void {
                 profileCleared,
                 partitionCleared,
                 hint: '登录窗口里登录另一个账号；它会加入账号库，但不会自动切换',
+              })
+              return
+            }
+
+            // 「重新登录这个账号」：给**凭证失效**（探活失败）的账号用。
+            //
+            // 与 /login/add 的唯一区别：**不清浏览器登录态**。
+            // 为什么：add 的目的是"加一个**别的**号"，所以要先把登录态清干净，否则新窗口
+            // 一打开就是旧账号、抓回来还是它；而这里是"**修好同一个**号" —— 正是要复用
+            // 浏览器里可能还在的登录态（还在的话一打开就能捕获，用户一个密码都不用敲）。
+            // 真掉了也没关系：窗口里重新登录一次即可，那条路和 add 完全相同。
+            //
+            // 落库仍然走「添加模式」（commitCapturedAuth → 只入库、不切换）：
+            // 修好它，但不顶掉你正在用的账号。若它本来就是当前账号，当前账号不会变、
+            // 只是凭证被换成新的 —— 这正是期望行为。
+            if (req.method === 'POST' && route === '/login/relogin') {
+              beginAddAccount()
+              logger.info?.(
+                'deepseek-web: 准备重新登录一个凭证可能失效的账号（**不清**浏览器登录态，能复用就直接复用）—— 捕获后原地更新，不改变当前账号',
+              )
+              sendJson(res, 200, {
+                ok: true,
+                keptBrowserSession: true,
+                hint: '登录窗口会打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次',
               })
               return
             }

@@ -12,6 +12,7 @@ import {
   saveWithPicker,
   suggestedExportName,
 } from '../file-picker.ts'
+import { describeCookieLife, summarizeCookieLife } from '../cookies.ts'
 
 type ClientContext = {
   slots: any
@@ -46,6 +47,13 @@ interface StatusPayload {
     lastVerifiedAt?: string | null
     /** 最近一次主动探活失败。 */
     lastVerifyError?: { at: string; message: string } | null
+    /** cookie 的过期构成（捕获时记下）。老记录 / 手动粘 token 时不存在。 */
+    cookieLife?: {
+      total: number
+      sessionCount: number
+      persistentCount: number
+      latest?: { name: string; expiresAt: number; daysLeft: number }
+    }
   }
   validation?: { ok: boolean; error?: string }
   /** 插件的本地状态目录（「关于」页展示用）。 */
@@ -222,6 +230,7 @@ border-radius:10px;padding:9px 11px;background:var(--bg1)}
 .dsw-account-main{flex:1 1 200px;min-width:0}
 .dsw-account-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;font-weight:500}
 .dsw-account-meta{font-size:11px;color:var(--fg3);margin-top:3px;word-break:break-all}
+.dsw-account-fix{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
 .dsw-account-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .dsw-labelinput{font:inherit;font-size:12px;padding:3px 7px;border-radius:6px;border:1px solid var(--bd2);
 background:var(--bg2);color:var(--fg);width:150px;margin-top:4px}
@@ -520,7 +529,8 @@ function Panel(): any {
         'p',
         'dsw-hint',
         '「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——' +
-          '加完在列表里点「切换」即可使用。导出/导入会弹系统对话框，自己选位置和文件。',
+          '加完在列表里点「切换」即可使用。某个账号标着「需要重新登录」时，用它自己那行上的按钮修 ——' +
+          '那条路不清浏览器登录态，能复用就直接复用。导出/导入会弹系统对话框，自己选位置和文件。',
       ),
     )
     const accountsMsg = el('p', 'dsw-hint dsw-gate-msg', '')
@@ -543,6 +553,42 @@ function Panel(): any {
       for (const item of items) accountsList.append(accountRow(item))
     }
 
+    /**
+     * 「重新登录这个账号」：给凭证失效（探活失败）的账号用。
+     *
+     * 与「登录新账号」的唯一区别是**不清浏览器登录态**：后者要先清干净才能加到别的号，
+     * 而修同一个号正相反 —— 留着才可能一打开就复用上。落库仍走添加模式（只入库、不切换），
+     * 所以修好它也不会顶掉你正在用的账号；若它本来就是当前账号，那正是你要的效果。
+     */
+    const reloginAccount = (id: string, title: string): void => {
+      void (async () => {
+        accountsMsg.textContent = `正在为「${title}」打开登录窗口（不清理浏览器登录态，能复用就直接复用）……`
+        try {
+          const prep = await api('/login/relogin', { method: 'POST', body: JSON.stringify({ id }) })
+          if (prep?.ok === false) {
+            accountsMsg.textContent = `准备失败：${prep?.error ?? '未知原因'}`
+            return
+          }
+          boostUntil = Date.now() + 300_000
+          accountsMsg.textContent =
+            '登录窗口已打开：浏览器里若还留着这个账号的登录态会立刻复用；否则在里面重新登录一次……'
+          const result = await api('/login/browser', { method: 'POST', body: '{}' })
+          if (result?.started === false) {
+            accountsMsg.textContent = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
+            return
+          }
+          accountsMsg.textContent = result?.added
+            ? `「${title}」的凭证已更新 —— 当前使用的账号没有改变。`
+            : '已捕获并保存凭证。'
+          await loadAccounts()
+        } catch (error: any) {
+          accountsMsg.textContent = `重新登录失败：${error?.message ?? error}`
+        } finally {
+          await refresh(false).catch(() => undefined)
+        }
+      })()
+    }
+
     const accountRow = (item: any): HTMLElement => {
       const row = el('li', `dsw-account${item.isActive ? ' active' : ''}`)
       const main = el('div', 'dsw-account-main')
@@ -554,14 +600,38 @@ function Panel(): any {
       if (limited) {
         title.append(el('span', 'dsw-badge off', `受限至 ${shortTime(item.limit.untilMs)}`))
       }
-      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '校验失败'))
+      // 徽章从「校验失败」改成**明确的行动指令**：原来只写"失败"，用户不知道该干嘛，
+      // 也看不出这号还能不能用。探活失败基本只有一种可能 —— 凭证失效，要重新登录。
+      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '需要重新登录'))
       main.append(title)
 
       const meta: string[] = []
       if (item.display) meta.push(item.display)
       if (item.capturedAt) meta.push(`${shortTime(item.capturedAt)} 捕获`)
       meta.push(item.lastVerifiedAt ? `最近校验 ${relTime(item.lastVerifiedAt)}` : '尚未校验')
+      const cookieMeta: any[] = Array.isArray(item.cookieMeta) ? item.cookieMeta : []
+      meta.push(`cookie：${describeCookieLife(summarizeCookieLife(cookieMeta))}`)
       main.append(el('div', 'dsw-account-meta', meta.join(' · ')))
+
+      // 探活失败 → 不只报状态，给一条可执行的路径。
+      // 为什么这里用「重新登录」而不是让用户自己点「登录新账号」：后者会**先清掉浏览器
+      // 登录态**（因为它的目标是加一个*别的*号），而修同一个号正相反 —— 浏览器里可能还
+      // 留着登录态，不清就能一打开直接复用，一个密码都不用敲。见宿主 /login/relogin。
+      if (item.lastVerifyError) {
+        const fix = el('div', 'dsw-account-fix')
+        fix.append(
+          el(
+            'span',
+            'dsw-hint',
+            `${relTime(item.lastVerifyError.at)}校验失败：${item.lastVerifyError.message}` +
+              '（凭证多半已失效；重新登录会原地更新它，不改变当前账号）',
+          ),
+        )
+        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重新登录这个账号') as HTMLButtonElement
+        reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
+        fix.append(reloginBtn)
+        main.append(fix)
+      }
       row.append(main)
 
       const actions = el('div', 'dsw-account-actions')
@@ -878,6 +948,16 @@ function Panel(): any {
             ? '✅ 已捕获'
             : '未捕获 —— 手动 token 模式本就没有（已验证不影响请求；若日后频繁遇到 AUTH/40003，改用「浏览器登录」）',
         ])
+        if (status.auth.hasCookie) {
+          // 把"登录态到底还能撑多久"从完全不可观察变成至少能看一半。
+          // ⚠️ 措辞必须诚实：实测真正鉴权用的是 token（只发 token 不带 cookie 能通过，
+          // 只发 cookie 不带 token 直接被拒 40002），所以这里只是**浏览器侧的上界**，
+          // 不能让人读成"到这天就掉线"。
+          rows.push([
+            'Cookie 过期',
+            `${describeCookieLife(status.auth.cookieLife)}（会话级 = 浏览器关掉就没了；这是浏览器侧的上界，不是登录态寿命）`,
+          ])
+        }
         rows.push(['指纹头', status.auth.hasFingerprint ? '✅ 已捕获（x-hif-* / x-client-*）' : '未捕获 —— 同上，已实测可用'])
         rows.push(['PoW WASM', status.auth.wasmHost || '默认地址'])
         rows.push(['token 长度', `${status.auth.tokenLength ?? 0} 字符`])

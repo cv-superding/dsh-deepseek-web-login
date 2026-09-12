@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
+import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
 import {
   scheduleDeleteSession,
   streamWebCompletion,
@@ -857,6 +858,14 @@ export function describeAuth(auth: WebAuth | undefined): {
   wasmHost?: string
   unverified?: boolean
   tokenLength?: number
+  /**
+   * cookie 的过期构成（捕获时记下的）。没有记录时为 `undefined`。
+   *
+   * ⚠️ 展示时务必说清它**不是登录态寿命**：实测真正鉴权用的是 `token`
+   * （只发 token 不带 cookie 能通过，只发 cookie 不带 token 直接被拒），
+   * 所以这里最晚的到期时间只是"浏览器侧的上界"。
+   */
+  cookieLife?: CookieLifeSummary
 } {
   if (!hasUsableAuth(auth)) return { loggedIn: false, hasCookie: false, hasFingerprint: false }
   let wasmHost: string | undefined
@@ -874,5 +883,9 @@ export function describeAuth(auth: WebAuth | undefined): {
     ...(wasmHost ? { wasmHost } : {}),
     ...(auth.unverified ? { unverified: true } : {}),
     tokenLength: auth.token.length,
+    ...(() => {
+      const life = summarizeCookieLife(auth.cookieMeta)
+      return life ? { cookieLife: life } : {}
+    })(),
   }
 }

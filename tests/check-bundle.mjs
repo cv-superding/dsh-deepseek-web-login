@@ -101,6 +101,20 @@ const checks = {
   'client 三滑块初始隐藏（只有「延迟」模式才显示）': client.includes('cleanupRanges'),
   'client 说明了取值随机（防止删除时机有固定规律）': client.includes('每次在区间内随机抽'),
   'client 说明了删除间隔只作用于逐个删除': client.includes('一下子连发几十个删除请求'),
+  'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
+    host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
+  'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':
+    host.includes('cookieMeta: record.cookieMeta'),
+  'host 提供「重新登录这个账号」的路由': host.includes('login/relogin'),
+  'host 探活结果里带 cookie 寿命摘要': host.includes('cookieLife'),
+  'client 用 describeCookieLife 展示 cookie 寿命': client.includes('describeCookieLife'),
+  'client 账号卡的失败徽章是行动指令「需要重新登录」（不是只写"校验失败"）':
+    client.includes('需要重新登录'),
+  'client 失败账号上有「重新登录这个账号」按钮，且走 relogin 路由':
+    client.includes('重新登录这个账号') && client.includes('login/relogin'),
+  'client 为失败那一行提供了样式': client.includes('dsw-account-fix'),
+  'client 说明了 cookie 过期时间不是登录态寿命':
+    client.includes('Cookie 过期') && client.includes('不是登录态寿命'),
   'client 关于页（检查更新 + 数据位置 + 风险说明）': client.includes('检查更新') && client.includes('数据位置') && client.includes('为什么没有「自动换号」'),
   '源码注释写明为何不做自动换号（风险可见）': srcAccounts.includes('刻意**不做自动轮换**') && srcAccounts.includes('关联'),
   'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),

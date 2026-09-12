@@ -226,6 +226,22 @@ points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch b
 
 ### Account library, call ledger, login probe
 
+**When credentials die, the panel tells you what to do.** An account that fails the probe is
+flagged **"needs re-login"** and gets a **"re-login this account"** button on its own row. The only
+difference from "add new account" is that re-login **does not clear the browser session**: adding must
+clear it (otherwise the window opens already logged in as the old account and you capture that one
+again), whereas repairing the *same* account is the opposite — keeping it means the window may reuse
+it immediately with no password at all. The record is updated **in place**, so whichever account you
+are currently using does not change.
+
+**Cookie expiry composition is recorded at capture time** — per cookie, whether it is session-scoped
+or persistent, and when the latest one expires; shown as
+`5 items · 1 session · 4 persistent · smidV2 399 days left`.
+⚠️ This is **not** the lifetime of your login. Measured: the real credential is the `token`
+(token alone works; token-less requests are rejected with `40002 Missing Token`), so cookie expiry is
+only an **upper bound on the browser side**. Older records and manually pasted tokens have no such
+info and the panel says "not recorded (will be filled in on your next login)".
+
 - **Account library** (`~/.dsh/web-login/accounts/`): keep several DeepSeek web accounts, switch with
   one click, rename, remove, export/import backups (both open a **native OS dialog** so you pick the location and file yourself). Switching takes effect on the **next** request.
   **Switching accounts does not lose your conversation** — the transcript lives locally in DSH and

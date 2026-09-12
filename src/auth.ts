@@ -12,6 +12,7 @@
  * 不进 settings/credentials 缝合口，避免敏感凭据落入通用配置面）。
  */
 import { existsSync } from 'node:fs'
+import type { CookieMeta } from './cookies.ts'
 import {
   activeAccount,
   clearActiveAccount,
@@ -49,6 +50,17 @@ export interface WebAuth {
   unverified?: boolean
   /** 已掩码的账号展示信息（可选）。 */
   user?: { id?: string; display?: string }
+  /**
+   * 捕获时顺手记下的 cookie 过期构成（可选）。
+   *
+   * 用途只有一个：把"登录态到底还能撑多久"从**完全不可观察**变成**至少能看一半**。
+   * ⚠️ 别把它当登录态寿命来读 —— 实测真正鉴权用的是 `token`：
+   * 只发 token 不带 cookie 能通过，只发 cookie 不带 token 直接被拒。
+   * 所以这里面最晚的到期时间**只是浏览器侧的上界**，不是凭证失效时间。
+   *
+   * 老记录 / 手动粘 token 的账号没有这个字段（界面会说明"未记录"）。
+   */
+  cookieMeta?: CookieMeta[]
 }
 
 /** 当前生效的登录凭证（没有选择账号 → undefined）。 */

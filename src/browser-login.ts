@@ -25,6 +25,7 @@
  *   3) 用**独立 profile**（`<DSH_HOME>/web-login/browser-profile`）：既避免和用户正在用的浏览器
  *      抢单实例（同 user-data-dir 会转发给已有实例、调试端口根本不起来），也让登录态可复用。
  */
+import { pickCookieMeta, type CookieMeta } from './cookies.ts'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -366,9 +367,14 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
       if (token) {
         progress('已捕获 token，正在读取 cookie 与指纹头……')
         let cookie = ''
+        let cookieMeta: CookieMeta[] = []
         try {
           const cookies = await cdp.send('Storage.getCookies', {})
-          cookie = buildCookieHeader(cookies?.cookies ?? [])
+          const raw = cookies?.cookies ?? []
+          cookie = buildCookieHeader(raw)
+          // 过滤条件与 buildCookieHeader 内**逐字一致**（都是 `includes('deepseek')`）——
+          // 元信息要描述的正是请求头上实际带的那批 cookie，不能多也不能少。
+          cookieMeta = pickCookieMeta(raw, (domain) => String(domain ?? '').includes('deepseek'))
         } catch {}
         const auth: WebAuth = {
           token,
@@ -378,6 +384,7 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
           wasmUrl: '',
           userAgent: apiUserAgent || pageUserAgent,
           ...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
+          ...(cookieMeta.length > 0 ? { cookieMeta } : {}),
           capturedAt: new Date().toISOString(),
           unverified: true,
         }

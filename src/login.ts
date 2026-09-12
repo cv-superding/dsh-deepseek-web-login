@@ -13,6 +13,7 @@
  *        「用户已登录成功、但校验端点不配合 → 凭证永远拿不到」的死局。
  * 非 Electron 环境（纯 web profile）自动降级为「手动粘贴 token」。
  */
+import { pickCookieMeta, type CookieMeta } from './cookies.ts'
 import { createRequire } from 'node:module'
 import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, type WebAuth } from './auth.ts'
 import { commitCapturedAuth } from './account-add.ts'
@@ -358,6 +359,7 @@ interface CaptureBuffer {
   /** 来自 localStorage.userToken（解包后） */
   localToken: string
   cookie: string
+  cookieMeta: CookieMeta[]
   hifDliq: string
   hifLeim: string
   wasmUrl: string
@@ -371,6 +373,7 @@ function newBuffer(): CaptureBuffer {
     headerToken: '',
     localToken: '',
     cookie: '',
+    cookieMeta: [],
     hifDliq: '',
     hifLeim: '',
     wasmUrl: '',
@@ -389,6 +392,7 @@ function buildAuth(buffer: CaptureBuffer, token: string, unverified: boolean): W
   return {
     token,
     cookie: buffer.cookie,
+    cookieMeta: buffer.cookieMeta,
     hifDliq: buffer.hifDliq,
     hifLeim: buffer.hifLeim,
     wasmUrl: buffer.wasmUrl || DEFAULT_WASM_URL,
@@ -413,7 +417,14 @@ async function readCookies(ses: any, buffer: CaptureBuffer): Promise<void> {
   try {
     const cookies: any[] = await ses.cookies.get({})
     const relevant = cookies.filter((cookie) => String(cookie?.domain ?? '').includes('deepseek.com'))
-    if (relevant.length > 0) buffer.cookie = relevant.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ')
+    if (relevant.length > 0) {
+      buffer.cookie = relevant.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ')
+      // 过滤条件与上面拼 cookie 头时**逐字一致**（同一批 relevant）。
+      // Electron 的 cookie 对象用 `expirationDate`（秒），会话级不出现该字段。
+      buffer.cookieMeta = pickCookieMeta(relevant, (domain) =>
+        String(domain ?? '').includes('deepseek.com'),
+      )
+    }
   } catch {}
 }
 

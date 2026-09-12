@@ -31,6 +31,7 @@
  * 换句话说：这个功能的目标是「**在你自己的多个正常账号之间切换得更省事**」
  * （比如工作号/个人号），**不是**「靠轮换把限流绕过去」。
  */
+import { normalizeCookieMetaList } from './cookies.ts'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -153,6 +154,11 @@ function normalizeRecord(raw: any, fallbackId?: string): AccountRecord | undefin
     capturedAt: typeof raw.capturedAt === 'string' ? raw.capturedAt : '',
     ...(raw.unverified === true ? { unverified: true } : {}),
     ...(raw.user && typeof raw.user === 'object' ? { user: raw.user } : {}),
+    // cookie 过期构成：形状不对的条目在 cookies.ts 里被丢掉，不会让整条记录读不出来
+    ...(() => {
+      const meta = normalizeCookieMetaList(raw.cookieMeta)
+      return meta ? { cookieMeta: meta } : {}
+    })(),
     ...(typeof raw.label === 'string' && raw.label ? { label: raw.label } : {}),
     ...(typeof raw.serverId === 'string' && raw.serverId ? { serverId: raw.serverId } : {}),
     ...(typeof raw.lastVerifiedAt === 'string' ? { lastVerifiedAt: raw.lastVerifiedAt } : {}),
