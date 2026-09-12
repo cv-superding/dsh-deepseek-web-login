@@ -31,6 +31,29 @@ free web quota.
 
 <img src="docs/assets/architecture.svg" alt="Architecture and data flow" width="1000">
 
+### Diagnostics: transport layer (`net.fetch` / TLS fingerprint)
+
+Web requests currently go out through Node's `fetch` (undici), whose TLS/HTTP2 fingerprint differs
+**structurally** from a real browser (measured: JA4 `h1` vs `h2`, no GREASE at all, 3x more ciphers).
+To check whether switching to Chromium's network stack is viable, run the probe — **zero quota by
+default** (no generation, no messages):
+
+```bash
+# The host process HTTP endpoint is only reachable from DSH's own same-origin page,
+# so this path goes through a file instead:
+echo '{"mode":"probe"}' > "$HOME/.dsh/web-login/probe-request.json"
+# Restart DSH; the log will contain  deepseek-web: [net-fetch 探测] {...}
+```
+
+| Step | Fields | Pass condition |
+|---|---|---|
+| ① fingerprint | `ja4` / `http_version` / `http2_hash` | becomes `t13d…h2…` with GREASE = matches Chrome |
+| ② streaming | `hasBody` / `chunks` / `abortedEarly` | all true, otherwise SSE is impossible |
+| ③ auth | `status` / `body` | 200 with the account readable = headers/cookies pass through |
+
+Use `"mode":"stream"` instead to also verify DeepSeek's SSE end-to-end (**consumes a little quota**).
+The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so it runs only once.
+
 ## Screenshots
 
 Settings panel (real screenshot): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.

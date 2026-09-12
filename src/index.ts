@@ -10,6 +10,7 @@
  * 不依赖 DSH 内部包的可解析性 —— 任何装配路径（注入 / bundle / patch）都能加载。
  */
 import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
+import { createRequire } from 'node:module'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
 import {
   createRequestGate,
@@ -29,6 +30,7 @@ import {
   DEFAULT_SESSION_CLEANUP,
   type SessionCleanupMode,
 } from './webapi.ts'
+import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
 
 export const name = 'dsh-deepseek-web-login'
 export const inject = ['llm', 'webServer']
@@ -87,6 +89,44 @@ function sendJson(res: any, status: number, payload: unknown): void {
 
 export function apply(ctx: any, config: Config = {}): void {
   const logger = normalizeLogger(ctx.logger)
+
+  // ── 运行时能力探测（每次启动打印一次）──────────────────────────────
+  // 为什么需要：插件宿主是 Electron 的 **utility 进程**，能拿到的 API 与主进程不同
+  // （已知 shell 可用；session / BrowserWindow 属主进程专属，不可用）。
+  // 最关心 `electron.net`：官方文档写明 net 模块适用于 Main + Utility 两个进程，
+  // 且 utility 的网络请求默认走 Chromium 的 system network context —— 若 net.fetch 可用，
+  // 就能把网页端请求从 Node 网络栈换成 **Chromium 网络栈**，从而获得与真实浏览器一致的
+  // TLS / HTTP2 指纹（实测 Node fetch 的 JA3/JA4 与 Chrome 是结构性差异：h1 vs h2、无 GREASE 等）。
+  try {
+    const electron: any = createRequire(import.meta.url)('electron')
+    const net = electron?.net
+    const keys = electron && typeof electron === 'object' ? Object.keys(electron).sort() : []
+    logger.info?.(
+      `deepseek-web: [能力探测] process.type=${(process as any).type ?? '-'}` +
+        ` electron=${process.versions?.electron ?? '-'}` +
+        ` | electron:${typeof electron} keys=[${keys.join(',')}]` +
+        ` | net=${typeof net} net.fetch=${typeof net?.fetch} net.request=${typeof net?.request}` +
+        ` | shell=${typeof electron?.shell} session=${typeof electron?.session}` +
+        ` BrowserWindow=${typeof electron?.BrowserWindow}`,
+    )
+  } catch (error: any) {
+    logger.info?.(`deepseek-web: [能力探测] require('electron') 失败：${error?.message ?? error}`)
+  }
+
+  // 启动时的一次性 net.fetch 诊断：往 <DSH_HOME>/web-login/probe-request.json 写
+  // {"mode":"probe"} 或 {"mode":"stream"} 后重启 DSH 即会执行（宿主进程不接受 HTTP 时走这条路）。
+  // 平时这个文件不存在 → 零开销；执行完会改名为 *.done-<时间戳>，不删文件。
+  const startupProbe = consumeProbeRequest()
+  if (startupProbe) {
+    void (async () => {
+      try {
+        const result = await runNetFetchDiagnostics(readAuth(), startupProbe)
+        logger.info?.(`deepseek-web: [net-fetch 探测] ${JSON.stringify(result)}`)
+      } catch (error: any) {
+        logger.info?.(`deepseek-web: [net-fetch 探测] 失败：${error?.message ?? error}`)
+      }
+    })()
+  }
 
   // 节流设置：设置页保存过的值（gate.json）优先于 cordis config —— 设置页是用户的显式操作，
   // 不该被配置文件里的旧值盖回去。闸门在这里创建并共享给适配器，设置页改完即时生效。
@@ -210,6 +250,15 @@ export function apply(ctx: any, config: Config = {}): void {
                 return
               }
               sendJson(res, 200, { ok: true, ...applied, persisted: true })
+              return
+            }
+            // 诊断：用 Electron 的 net.fetch（Chromium 网络栈）对比指纹与连通性。
+            // 实现与取舍见 src/net-diagnostics.ts 的模块注释。
+            if (req.method === 'POST' && route === '/diagnostics/net-fetch') {
+              const body = await readJsonBody(req)
+              const mode: NetFetchMode = body?.mode === 'stream' ? 'stream' : 'probe'
+              const result = await runNetFetchDiagnostics(getAuth(), mode)
+              sendJson(res, result.ok ? 200 : 500, result)
               return
             }
             if (req.method === 'GET' && (route === '/status' || route === '/')) {

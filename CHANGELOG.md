@@ -2,6 +2,43 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.22 — 2026-09-12
+
+### 新增：可注入传输层 + `net.fetch` 诊断（为「请求从哪出去」做验证）
+
+**为什么**：实测 Node 的 `fetch`（undici）与 Chrome 的 TLS / HTTP2 指纹是**结构性差异** ——
+JA4 的 `h1` vs `h2`、Node 完全不带 GREASE、cipher 55 个 vs 15 个、扩展集合完全不同。
+也就是说请求在 **TLS 层**就能被判定为「非浏览器客户端」，而这几项**调参修不了**。
+参考项目 cuckoo-code（106★）与 deepseek-pp（1849★）都**不让 Node 发请求**（前者内嵌浏览器、
+后者 hook 用户浏览器），从未被风控 —— 印证「请求从哪出去」才是关键差异。
+
+**发现**：DSH 本体是 Electron，插件宿主是 **utility 进程**。官方文档写明 `net` 模块适用
+Main + Utility，且 utility 的网络请求默认走 Chromium 的 system network context。
+实测能力探测确认：utility 进程里 `require('electron')` 只暴露 `net` 与 `systemPreferences`，
+其中 **`net.fetch` 是 function** —— 于是不必引入 uTLS / curl-impersonate，换一处传输层即可。
+
+本次只做**验证**，不动主请求路径：
+
+- `src/webapi.ts`：新增 `setFetchImpl()` / `fetchImplKind()`，9 处请求统一改走可注入的 `activeFetch`。
+  ⚠️ 它是**每次现取**（`injectedFetch ?? fetch`），而不是在模块加载那一刻固化 —— 固化写法会让
+  「模块加载后再替换 `globalThis.fetch`」失效（单测正是这么打桩的），请求会绕过桩件**真的出网**；
+  这类回归**不会让任何功能报错**，只会让一批测试静默失去意义。已单独加测试守住。
+- `src/net-diagnostics.ts`（新）：三步**零额度**探测 ——
+  ① TLS/HTTP2 指纹 ② **能否读流式响应**（`response.body` + AbortSignal，用本地分块服务确定性验证；
+  拿不到 body 就等于整条改造路线不成立）③ 鉴权（只读 `users/current`，不生成内容）。
+  另有一档 `stream`：额外来一次迷你 completion，端到端验证 DeepSeek 的 SSE（会消耗一点额度）。
+- 触发方式：`POST /deepseek-web-login/api/diagnostics/net-fetch`（body `{"mode":"probe"|"stream"}`）；
+  或往 `<DSH_HOME>/web-login/probe-request.json` 写 `{"mode":"probe"}` 后重启 DSH ——
+  宿主进程的 HTTP 端点只有 DSH 自己的同源页面打得通（从外部 curl 会撞同源守卫，实测任何路径都 403），
+  这条路不依赖 HTTP。读完把文件改名为 `*.done-<时间戳>`（不删文件）。
+- 启动时打印一次能力清单（`process.type` / Electron 版本 / `require('electron')` 暴露了哪些 API），
+  排查环境问题时一眼可见。
+
+测试：新增 `check-fetch-injection`（5 项）与 `check-net-diagnostics`（13 项）。
+后者对流式探针做了**正反两向**验证（"整体缓冲的响应必须被判为不可用"），避免出现永远绿灯的假判据。
+
+**主请求路径仍未改动** —— 是否切到 `net.fetch`，等诊断结果确认后再决定。
+
 ## 0.1.21 — 2026-09-12
 
 ### 改进：把「机器特征」压下去（行为侧）

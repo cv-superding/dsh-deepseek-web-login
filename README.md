@@ -210,6 +210,9 @@ prompt 字符上限默认 1,200,000（可配）。
 - `temperature` / `stop` / `max_tokens` 网页端无对应字段，会被忽略；usage 为**估算值**（网页端不返回 token 计数）
 - 免费额度有频控；`429` 会带上 `providerRetryAfterMs` 交给 DSH 的重试策略
 - `describe_image` 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它
+- **请求从 Node 的网络栈发出**：TLS/HTTP2 指纹与真实浏览器不同（实测 JA4 的 `h1` vs `h2`、完全不带 GREASE、
+  cipher 数量差 3 倍多）——这是「可能被识别为脚本」的底层原因之一。已在验证把传输层切到 Electron 的
+  `net.fetch`（Chromium 网络栈），见「故障排查 → 传输层诊断」
 
 ## 测试与验证
 
@@ -222,6 +225,8 @@ node tests/probe-batch-live.mjs     # 线上复现事故 #4 的触发条件（�
 node tools/changelog-section.mjs    # 从 CHANGELOG 取某版本段落（发布流程复用）
 node tests/check-bundle.mjs          # 产物核对（关键修复是否都进了 lib）
 node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
+node tests/check-fetch-injection.mjs  # 传输层注入必须"每次现取"（防单测静默打到线上）
+node tests/check-net-diagnostics.mjs  # net.fetch 诊断通道（标记文件生命周期 + 流式探针正反向）
 ```
 
 CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个 PR 上跑上面两条命令；
@@ -288,6 +293,29 @@ node tools/inspect-session.mjs --search "关键词" # 按关键词找会话
 
 > **报 bug 时请附这段输出**（它不含凭证；如有敏感内容请先自行删减）。
 > 上面三个真实事故（工具调用 JSON 泄漏、回答丢成碎片、合法 JSON 泄漏）都是靠它定位的。
+
+### 诊断：传输层（`net.fetch` / TLS 指纹）
+
+网页端请求默认由 Node 的 `fetch`（undici）发出，指纹与真实浏览器**结构性不同**。
+想确认「换成 Chromium 网络栈」是否可行时，跑一次探测 —— **默认零额度**，不生成、不发消息：
+
+```bash
+# 宿主进程的 HTTP 端点只有 DSH 自己的页面打得通（外部 curl 会撞同源守卫），所以走文件这条路：
+echo '{"mode":"probe"}' > "$HOME/.dsh/web-login/probe-request.json"
+# 重启 DSH，日志里会打出  deepseek-web: [net-fetch 探测] {...}
+```
+
+三步各看一个结论：
+
+| 步骤 | 看什么 | 判定 |
+|---|---|---|
+| ① 指纹 | `ja4` / `http_version` / `http2_hash` | 变成 `t13d…h2…` 且带 GREASE ＝ 与 Chrome 一致 |
+| ② 流式 | `hasBody` / `chunks` / `abortedEarly` | 三项都为真才能读 SSE（否则改造路线不成立） |
+| ③ 鉴权 | `status` / `body` | 200 且能读出账号 ＝ header/cookie 原样透传 |
+
+想连 DeepSeek 的 SSE 一起端到端验证（**会消耗一点额度**）：把 `probe` 换成 `stream`。
+文件被读取后会改名为 `probe-request.json.done-<时间戳>`，不会每次启动都重跑。
+
 
 ## 开发
 

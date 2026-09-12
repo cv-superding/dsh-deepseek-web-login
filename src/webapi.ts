@@ -141,6 +141,41 @@ export function isBusyGenerating(message: string): boolean {
  * 连续节流的状态：被限一次就退避久一点，别在限流窗口里反复撞。
  * （实测 2026-09-11 下午：同一个账号连续被限，5 次重试全落在窗口里 → 整轮失败。）
  */
+/**
+ * 当前使用的 fetch 实现。
+ *
+ * 默认是 Node 的全局 fetch（undici）。宿主可以注入 **Electron 的 `net.fetch`** ——
+ * 后者走 Chromium 原生网络库，能带来与真实浏览器一致的 TLS / HTTP2 指纹。
+ * 为什么在意：实测 Node fetch 与 Chrome 的指纹差异是**结构性**的
+ * （JA4 的 h1 vs h2、Node 无 GREASE、cipher 55 个 vs 15 个、扩展集合完全不同）。
+ *
+ * 注意：Electron 的 utility 进程里 `require('electron')` 只暴露 `net` 与 `systemPreferences`
+ * （实测 2026-09-12），所以宿主只能注入 net.fetch，拿不到别的网络相关能力。
+ */
+let injectedFetch: typeof fetch | undefined
+
+/**
+ * 实际发请求用的 fetch —— 刻意做成**每次现取**（`injectedFetch ?? fetch`），
+ * 而不是在模块加载那一刻把全局 fetch 固化下来。
+ *
+ * 原因（2026-09-12 实测踩到）：固化写法会让「模块加载之后再替换 globalThis.fetch」失效 ——
+ * 单测正是用这种方式打桩，结果请求绕过了桩件、**真的发到了线上**
+ * （拿回一个 INVALID_TOKEN，测试看着在验证错误分类，实际在打网络）。
+ */
+function activeFetch(input: any, init?: any): Promise<Response> {
+  return (injectedFetch ?? fetch)(input, init)
+}
+
+/** 注入 fetch 实现；传 undefined 还原为 Node 全局 fetch。 */
+export function setFetchImpl(impl?: typeof fetch): void {
+  injectedFetch = impl
+}
+
+/** 当前用的是注入实现还是 Node 原生（诊断用）。 */
+export function fetchImplKind(): 'injected' | 'node' {
+  return injectedFetch ? 'injected' : 'node'
+}
+
 let throttleStreak = 0
 let lastThrottleAt = 0
 
@@ -221,7 +256,7 @@ let resolvedWasmUrl: { key: string; url: string } | null = null
 
 async function isReachable(url: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    const resp = await fetch(url, { method: 'GET', headers: { range: 'bytes=0-0' }, signal: signal ?? AbortSignal.timeout(10_000) })
+    const resp = await activeFetch(url, { method: 'GET', headers: { range: 'bytes=0-0' }, signal: signal ?? AbortSignal.timeout(10_000) })
     return resp.ok || resp.status === 206
   } catch {
     return false
@@ -231,14 +266,14 @@ async function isReachable(url: string, signal?: AbortSignal): Promise<boolean> 
 /** 从网页端首页/JS chunk 里发现当前构建的 sha3 wasm 地址（哈希随版本变化）。 */
 async function discoverWasmUrl(signal?: AbortSignal): Promise<string | undefined> {
   try {
-    const html = await (await fetch(`${DS_BASE}/`, { signal: signal ?? AbortSignal.timeout(15_000) })).text()
+    const html = await (await activeFetch(`${DS_BASE}/`, { signal: signal ?? AbortSignal.timeout(15_000) })).text()
     const direct = html.match(/https?:\/\/[^"'\s]*sha3[_a-z0-9.]*\.wasm/i)
     if (direct) return direct[0]
     const scripts = [...html.matchAll(/(?:src|href)="([^"]+\.js)"/g)].map((match) => match[1]).slice(0, 8)
     for (const src of scripts) {
       const url = src.startsWith('http') ? src : new URL(src, `${DS_BASE}/`).href
       try {
-        const js = await (await fetch(url, { signal: AbortSignal.timeout(15_000) })).text()
+        const js = await (await activeFetch(url, { signal: AbortSignal.timeout(15_000) })).text()
         const found = js.match(/[^"'\s]*sha3[_a-z0-9.]*\.wasm/i)
         if (found) return found[0].startsWith('http') ? found[0] : new URL(found[0], url).href
       } catch {}
@@ -272,7 +307,7 @@ export async function resolveWasmUrl(auth: WebAuth, signal?: AbortSignal): Promi
 async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
   if (wasmModuleCache?.url === wasmUrl) return wasmModuleCache.promise
   const promise = (async () => {
-    const resp = await fetch(wasmUrl, { signal: AbortSignal.timeout(15_000) })
+    const resp = await activeFetch(wasmUrl, { signal: AbortSignal.timeout(15_000) })
     if (!resp.ok) throw new Error(`PoW WASM fetch failed (HTTP ${resp.status})`)
     return WebAssembly.compile(await resp.arrayBuffer())
   })()
@@ -316,7 +351,7 @@ async function solvePoW(challenge: PoWChallenge, wasmUrl: string): Promise<numbe
 export async function createPowHeader(auth: WebAuth, targetPath: string, signal?: AbortSignal): Promise<string> {
   let resp: Response
   try {
-    resp = await fetch(`${DS_BASE}/api/v0/chat/create_pow_challenge`, {
+    resp = await activeFetch(`${DS_BASE}/api/v0/chat/create_pow_challenge`, {
       method: 'POST',
       headers: buildDsHeaders(auth),
       body: JSON.stringify({ target_path: targetPath }),
@@ -396,7 +431,7 @@ export async function uploadImageFile(
 
   let resp: Response
   try {
-    resp = await fetch(`${DS_BASE}${targetPath}`, { method: 'POST', headers, body: form, signal })
+    resp = await activeFetch(`${DS_BASE}${targetPath}`, { method: 'POST', headers, body: form, signal })
   } catch (error: any) {
     throw new AdapterLlmError(`DeepSeek 图片上传失败：${error?.message ?? error}`, 'TRANSPORT', { cause: error })
   }
@@ -429,7 +464,7 @@ export async function uploadImageFile(
 export async function createChatSession(auth: WebAuth, signal?: AbortSignal): Promise<string> {
   let resp: Response
   try {
-    resp = await fetch(`${DS_BASE}/api/v0/chat_session/create`, {
+    resp = await activeFetch(`${DS_BASE}/api/v0/chat_session/create`, {
       method: 'POST',
       headers: buildDsHeaders(auth),
       body: '{}',
@@ -650,7 +685,7 @@ export async function validateAuth(
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; user?: { id?: string; display?: string }; error?: string }> {
   try {
-    const resp = await fetch(`${DS_BASE}/api/v0/users/current`, { headers: buildDsHeaders(auth), signal })
+    const resp = await activeFetch(`${DS_BASE}/api/v0/users/current`, { headers: buildDsHeaders(auth), signal })
     if (resp.ok) {
       let json: any
       try {
@@ -1079,7 +1114,7 @@ async function openCompletion(
     const sessionId = await transport.createSession(auth, signal)
     let resp: Response
     try {
-      resp = await fetch(`${DS_BASE}/api/v0/chat/completion`, {
+      resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {
         method: 'POST',
         headers: {
           ...buildDsHeaders(auth, `${DS_BASE}/a/chat/s/${sessionId}`),
