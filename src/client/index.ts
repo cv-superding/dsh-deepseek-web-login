@@ -152,6 +152,22 @@ overflow-x:auto;white-space:pre}
 .dsw-msg::-webkit-scrollbar,.dsw-code::-webkit-scrollbar,.dsw-area::-webkit-scrollbar{width:8px;height:8px}
 .dsw-msg::-webkit-scrollbar-thumb,.dsw-code::-webkit-scrollbar-thumb,.dsw-area::-webkit-scrollbar-thumb{
 background:var(--bd2);border-radius:4px}
+/* ── 标签页：把原来一页到底的 7 张卡拆成 4 页 ────────────────────────
+   标签栏做成带边框的圆角容器；未选中 70% 透明度 + 下划线指示当前页。
+   颜色全部走设计令牌，浅色/深色自动跟随，不用写第二份。 */
+.dsw-tabs{display:inline-flex;gap:4px;border:1px solid var(--bd);border-radius:8px;
+padding:0 10px;margin:4px 0 14px;background:var(--bg1)}
+.dsw-tab{appearance:none;background:transparent;border:none;border-bottom:2px solid transparent;
+padding:8px 14px;font:inherit;font-size:13px;color:var(--fg2);opacity:.7;cursor:pointer;
+transition:opacity .15s ease,border-color .15s ease}
+.dsw-tab:hover{opacity:1}
+.dsw-tab.active{opacity:1;color:var(--fg);border-bottom-color:var(--fg)}
+.dsw-pane[hidden]{display:none}
+/* 操作反馈：不归属任何一页，常驻在标签栏之上 */
+.dsw-alert{margin:0 0 12px;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);
+background:var(--bg1);white-space:pre-wrap;font-size:12px}
+.dsw-alert.ok{border-left:3px solid var(--ok);color:var(--ok)}
+.dsw-alert.err{border-left:3px solid var(--err);color:var(--err)}
 `
 
 function el(tag: string, cls?: string, text?: string): HTMLElement {
@@ -178,6 +194,61 @@ function Panel(): any {
     const title = el('h3', 'dsw-title', 'DeepSeek 网页登录（免费模型）')
     const sub = el('p', 'dsw-sub', '用 chat.deepseek.com 网页版登录态驱动 DSH agent —— 不需要 API Key。provider 路由：deepseek-web')
     page.append(style, title, sub)
+
+    // ── 操作反馈：常驻在标签栏之上 ──────────────────────────────
+    // 拆成标签页后，在「账号」页点按钮的反馈若落在别的页里就等于看不见，所以它不归属任何一页。
+    const message = el('div', 'dsw-alert')
+    message.style.display = 'none'
+    page.append(message)
+
+    const showMessage = (text: string, kind: 'ok' | 'err' | '' = ''): void => {
+      message.textContent = text
+      message.className = `dsw-alert${kind ? ` ${kind}` : ''}`
+      message.style.display = 'block'
+    }
+
+    // ── 标签栏 + 四个页 ────────────────────────────────────────
+    // 原来 7 张卡堆在一页，「找某一项」要滚很久。分组按"什么时候会用它"：
+    //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
+    const TAB_KEYS = ['account', 'model', 'gate', 'transport'] as const
+    const TAB_LABELS: Record<string, string> = {
+      account: '账号',
+      model: '模型',
+      gate: '防风控',
+      transport: '传输层',
+    }
+    const accountPane = el('div', 'dsw-pane')
+    const modelPane = el('div', 'dsw-pane')
+    const gatePane = el('div', 'dsw-pane')
+    const transportPane = el('div', 'dsw-pane')
+    const panes: Record<string, HTMLElement> = {
+      account: accountPane,
+      model: modelPane,
+      gate: gatePane,
+      transport: transportPane,
+    }
+    const tabButtons: Record<string, HTMLButtonElement> = {}
+    const selectTab = (key: string): void => {
+      for (const each of TAB_KEYS) {
+        const on = each === key
+        panes[each].hidden = !on
+        tabButtons[each].classList.toggle('active', on)
+        tabButtons[each].setAttribute('aria-selected', String(on))
+      }
+    }
+    const tabBar = el('div', 'dsw-tabs')
+    tabBar.setAttribute('role', 'tablist')
+    for (const key of TAB_KEYS) {
+      const btn = el('button', 'dsw-tab', TAB_LABELS[key]) as HTMLButtonElement
+      btn.type = 'button'
+      btn.setAttribute('role', 'tab')
+      btn.addEventListener('click', () => selectTab(key))
+      tabButtons[key] = btn
+      tabBar.append(btn)
+      panes[key].setAttribute('role', 'tabpanel')
+    }
+    page.append(tabBar, ...TAB_KEYS.map((key) => panes[key]))
+    selectTab('account')
 
     // ── 登录卡 ──
     const loginCard = el('div', 'dsw-card')
@@ -211,7 +282,6 @@ function Panel(): any {
       '退出会同时清除本地凭证与浏览器分区里的 chat.deepseek.com 登录态（否则「从已登录窗口恢复」会把同一个账号原样抓回来，也无法换号）。',
     )
     accountCard.append(accountHint)
-    page.append(accountCard)
 
     const loginActions = el('div', 'dsw-row')
     loginActions.style.marginTop = '10px'
@@ -236,7 +306,7 @@ function Panel(): any {
         '「从已登录窗口恢复」= 复用上次登录过的窗口分区直接取凭证（免重新登录），凭证丢失时用它救急。',
       ),
     )
-    page.append(loginCard)
+    accountPane.append(loginCard, accountCard)
 
     // ── 手动 token 卡 ──
     const tokenCard = el('div', 'dsw-card')
@@ -265,7 +335,7 @@ function Panel(): any {
     const tokenBtn = el('button', 'dsw-btn', '保存并验证') as HTMLButtonElement
     tokenActions.append(tokenBtn)
     tokenCard.append(tokenActions)
-    page.append(tokenCard)
+    accountPane.append(tokenCard)
 
     // ── 测试卡 ──
     const testCard = el('div', 'dsw-card')
@@ -281,7 +351,6 @@ function Panel(): any {
     const testOut = el('div', 'dsw-msg')
     testOut.style.display = 'none'
     testCard.append(testOut)
-    page.append(testCard)
 
     // ── 模型卡 ──
     const modelsCard = el('div', 'dsw-card')
@@ -290,17 +359,9 @@ function Panel(): any {
     modelsCard.append(modelsList)
     const modelsHint = el('p', 'dsw-hint', '')
     modelsCard.append(modelsHint)
-    page.append(modelsCard)
+    modelPane.append(modelsCard, testCard)
 
-    const message = el('div', 'dsw-msg')
-    message.style.display = 'none'
-    page.append(message)
-
-    const showMessage = (text: string, kind: 'ok' | 'err' | '' = ''): void => {
-      message.textContent = text
-      message.className = `dsw-msg${kind ? ` ${kind}` : ''}`
-      message.style.display = 'block'
-    }
+    // （操作反馈条与 showMessage 已提到页头、标签栏之上）
 
     let loggedIn = false
     let electron = false
@@ -560,7 +621,7 @@ function Panel(): any {
     )
     const gateMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     gateCard.append(gateMsg)
-    page.append(gateCard)
+    gatePane.append(gateCard)
 
     // ── 传输层卡：请求从哪个网络栈出去（决定 TLS/HTTP2 指纹像不像浏览器）──
     // 实测：Node fetch 的 JA4 是 `t13d…h1`（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE）；
@@ -600,7 +661,7 @@ function Panel(): any {
 
     const transportMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     transportCard.append(transportMsg)
-    page.append(transportCard)
+    transportPane.append(transportCard)
 
     const applyTransportCard = (info: any): void => {
       if (!info) return

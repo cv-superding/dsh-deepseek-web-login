@@ -56,7 +56,12 @@ The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so i
 
 ## Screenshots
 
-Settings panel (real screenshot): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.
+The settings panel is split into **4 tabs** (one page at a time): **Account** (login status /
+current account / manual token) · **Models** (available models / connectivity test) ·
+**Anti-throttle** (request pacing / session cleanup) · **Transport** (fingerprint + one-click test).
+The action-feedback strip sits above the tab bar, so it stays visible from any tab.
+
+Settings panel (real screenshot, taken before the tab split): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.
 
 <img src="docs/assets/screenshot-settings.png" alt="DSH settings panel · DeepSeek web login (real screenshot)" width="820">
 
