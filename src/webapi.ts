@@ -703,7 +703,13 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
    */
   async function deleteChunk(batch: { auth: WebAuth; sessionId: string }[]): Promise<void> {
     if (batch.length === 0) return
-    if (batch.length > 1 && !batchUnsupported) {
+    // ⚠️ F07（2026-09-12 审计）：批量删除**只发一个凭证**（HTTP 请求只有一个 Authorization 头），
+    // 若这一批里混了不同账号的会话，就等于「拿 A 的凭证去删 B 的会话」——
+    // 轻则整批被服务端拒绝，重则 resp.ok 时被当成全部成功（旧代码 ok 就直接 return，
+    // 不校验每个 id 是否真的删掉）。混号时退化为逐个删，逐个删用的是各自的 auth。
+    const firstToken = batch[0].auth?.token
+    const sameAccount = batch.every((item) => item.auth?.token === firstToken)
+    if (batch.length > 1 && !batchUnsupported && sameAccount) {
       try {
         const resp = await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
           method: 'POST',

@@ -86,8 +86,26 @@ export function accountsIndexPath(): string {
   return join(webLoginDir(), 'accounts.json')
 }
 
+/**
+ * 挡住"能跑出账号目录"的 id。
+ *
+ * ⚠️ F01（2026-09-12 审计）：旧实现直接 `join(accountsDir(), `${id}.json`)`，**没有任何校验**；
+ * 而 `importAccounts` 会把**备份文件里的 id 原样当主键**，HTTP 路由也直接吃调用方传的 id。
+ * 于是 id 写成 `../../../../Users/me/evil` 就能越界读、写、删账号目录之外的 JSON。
+ *
+ * 这里只挡"危险字符"而不强求格式：历史 id 形态不止一种（acc_ 前缀 + 8/16 位十六进制、
+ * 迁移期还可能有过别的），按白名单收紧会误伤老账号。真正要拦的只有能穿越路径的那些。
+ */
+function assertSafeAccountId(id: string): string {
+  const text = String(id ?? '')
+  if (!text || text.includes('\0') || text === '.' || text === '..' || /[/\\]/.test(text)) {
+    throw new Error(`账号 id 不合法（含路径分隔符或相对路径段）：${JSON.stringify(text)}`)
+  }
+  return text
+}
+
 export function accountFilePath(id: string): string {
-  return join(accountsDir(), `${id}.json`)
+  return join(accountsDir(), `${assertSafeAccountId(id)}.json`)
 }
 
 /** 新账号 id。用随机 id 而不是 token 哈希：token 会刷新，id 不该跟着变。 */
@@ -208,8 +226,13 @@ export function saveAccount(record: AccountRecord): void {
 export function activeAccountId(): string | undefined {
   const { activeId } = readIndex()
   if (!activeId) return undefined
-  // 索引指向的账号可能已被移除 —— 那就当"未选择"，不要让调用方拿到悬空 id
-  return existsSync(accountFilePath(activeId)) ? activeId : undefined
+  // 索引指向的账号可能已被移除 —— 那就当"未选择"，不要让调用方拿到悬空 id。
+  // 也可能 id 本身不合法（索引文件被外部改过）→ 同理当"未选择"，而不是让异常炸穿调用方。
+  try {
+    return existsSync(accountFilePath(activeId)) ? activeId : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** 当前生效的账号（没有就返回 undefined）。 */

@@ -116,6 +116,9 @@ const checks = {
   'host 会剥掉孤立的工具调用标记残片（`</|DSML|calls>` 那类漏上屏过）': host.includes('stripStrayToolMarkup'),
   'host 认证响应有形状校验（反爬页不会被当成验证通过）': host.includes('classifyAuthEnvelope'),
   'host 写凭证不再先删目标文件（Windows rename 可直接覆盖）': !/rmSync\(file,\s*\{\s*force:\s*true\s*\}\)\s*\n\s*renameSync/.test(host),
+  'host 账号路径拼装带 id 安全校验（防路径穿越）': host.includes('assertSafeAccountId'),
+  'host 调用上报带「发起时的账号 id」（防飞行途中切号记错人）': /accountId:\s*accountIdAtStart/.test(host),
+  'host 批量清理只在同账号下用（混号退化为逐个删）': host.includes('sameAccount'),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':

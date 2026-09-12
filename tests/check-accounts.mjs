@@ -25,6 +25,7 @@ const {
   importAccounts,
   listAccounts,
   migrateLegacyAuthIfNeeded,
+  newAccountId,
   removeAccount,
   setActiveAccount,
   updateAccount,
@@ -266,6 +267,26 @@ test('F02：写入失败时原文件必须保留（旧实现先 rmSync，凭证�
   // 也不该留下临时文件
   const leftovers = readdirSync(accountsDir()).filter((n) => n.includes('.tmp-'))
   assert.equal(leftovers.length, 0, `残留临时文件：${leftovers.join(', ')}`)
+})
+
+test('F01：账号 id 含路径分隔符/相对路径段一律拒绝（防越界读写）', () => {
+  // 旧实现直接 join(accountsDir(), `${id}.json`)，而 importAccounts 会用备份文件里的 id
+  for (const bad of ['../../../../Users/me/evil', 'a/b', 'C:/x', '..', '.', '', 'acc_x/../y']) {
+    assert.throws(
+      () => accountFilePath(bad),
+      /账号 id 不合法/,
+      `应当拒绝 ${JSON.stringify(bad)}`,
+    )
+  }
+})
+
+test('F01：正常 id 不受影响（别矫枉过正）', () => {
+  const file = accountFilePath('acc_ab12cd34')
+  assert.ok(file.endsWith(join('accounts', 'acc_ab12cd34.json')), file)
+  // 生成的 id 也必须能过校验
+  const fresh = newAccountId()
+  assert.doesNotThrow(() => accountFilePath(fresh))
+  assert.ok(accountFilePath(fresh).startsWith(accountsDir()))
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

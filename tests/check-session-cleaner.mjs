@@ -61,6 +61,9 @@ function fakeTimers() {
   }
 }
 
+/** 让 flush 的异步链跑完（逐个删是串行的，runAll 之后还要再让出一次事件循环）。 */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30))
+
 console.log('会话清理策略：')
 
 await test('默认策略是 deferred（攒批延迟），不是每轮立即删', () => {
@@ -248,6 +251,49 @@ await test('policy() 如实返回当前策略（设置页要显示）', () => {
   // gapMs 是 0.1.30 新增的字段（相邻两个删除请求之间的间隔）。
     // 这个 cleaner 没传 gapRange → 间隔为 0，即**不加额外间隔**，与旧行为一致。
     assert.deepEqual(cleaner.policy(), { mode: 'deferred', delayMs: 30_000, batchSize: 4, gapMs: 0 })
+})
+
+await test('F07：一批里混了不同账号时，不许拿其中一个凭证去批量删', async () => {
+  // 批量删除只发一个 Authorization 头。混号时用 A 的凭证删 B 的会话 ——
+  // 轻则整批被拒，重则 resp.ok 时被当成全部成功（旧代码 ok 就 return，不逐个校验）。
+  const f = fakeFetch()
+  const t = fakeTimers()
+  const cleaner = createSessionCleaner({
+    policy: { mode: 'deferred', delayMs: 60_000, batchSize: 4, gapMs: 0 },
+    fetchImpl: f,
+    setTimeoutImpl: t.set,
+    clearTimeoutImpl: t.clear,
+  })
+  const authA = { ...AUTH, token: 'A'.repeat(64) }
+  const authB = { ...AUTH, token: 'B'.repeat(64) }
+  cleaner.schedule(authA, 'S1')
+  cleaner.schedule(authB, 'S2')
+  await t.runAll()
+  await settle()
+  // 关键：不能出现"一次请求删多个 id"的批量调用
+  const batched = f.calls.filter((c) => Array.isArray(c.body?.chat_session_ids) && c.body.chat_session_ids.length > 1)
+  assert.equal(batched.length, 0, `混号却发了批量删除：${JSON.stringify(batched[0]?.body)}`)
+  // 应当退化为逐个删（各自用自己的 auth）
+  assert.equal(f.calls.length, 2, `应当是 2 次逐个删除，实际 ${f.calls.length} 次`)
+})
+
+await test('F07：同一账号的一批仍然走批量（1 个请求删多个）', async () => {
+  const f = fakeFetch()
+  const t = fakeTimers()
+  const cleaner = createSessionCleaner({
+    policy: { mode: 'deferred', delayMs: 60_000, batchSize: 3, gapMs: 0 },
+    fetchImpl: f,
+    setTimeoutImpl: t.set,
+    clearTimeoutImpl: t.clear,
+  })
+  cleaner.schedule(AUTH, 'S1')
+  cleaner.schedule(AUTH, 'S2')
+  cleaner.schedule(AUTH, 'S3')
+  await t.runAll()
+  await settle()
+  const batched = f.calls.filter((c) => Array.isArray(c.body?.chat_session_ids) && c.body.chat_session_ids.length > 1)
+  assert.equal(batched.length, 1, '同账号的一批应当合并成 1 个请求')
+  assert.equal(batched[0].body.chat_session_ids.length, 3)
 })
 
 console.log()

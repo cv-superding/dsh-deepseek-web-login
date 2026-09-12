@@ -273,9 +273,12 @@ export function apply(ctx: any, config: Config = {}): void {
     message?: string
     mutedUntilMs?: number
     throttled?: boolean
+    /** 发起调用那一刻的账号 id（由适配器在起飞前捕获）。 */
+    accountId?: string
   }): void => {
     try {
-      const accountId = activeAccountId()
+      // 优先用**发起时**捕获的 id；只在拿不到时才回退到"此刻"的当前账号。
+      const accountId = info.accountId ?? activeAccountId()
       const muted = Number.isFinite(info.mutedUntilMs)
       if (!info.ok && muted && accountId) {
         updateAccount(accountId, {
@@ -324,6 +327,7 @@ export function apply(ctx: any, config: Config = {}): void {
   const adapter = createAdapter({
     getAuth,
     noteCall: recordCallOutcome,
+    currentAccountId: activeAccountId,
     gate,
     sessionCleaner,
     config: adapterConfig,

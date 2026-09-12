@@ -231,7 +231,17 @@ export interface AdapterDeps {
     mutedUntilMs?: number
     /** 是否属于"限流"（发太频繁）而非"账号被限制"。 */
     throttled?: boolean
+    /**
+     * **发起这次调用时**的账号 id。
+     * ⚠️ 不能由宿主在收到上报时现取 —— 见 F05 的说明。
+     */
+    accountId?: string
   }) => void
+  /**
+   * 取"当前账号 id"。宿主注入；适配器在**发起请求前**调一次，
+   * 结果随 noteCall 回传，避免请求飞行途中切号导致记错账号。
+   */
+  currentAccountId?: () => string | undefined
   /** 注入自定义流函数（单测用假流验证自动续写）；缺省用 streamWebCompletion。 */
   streamCompletion?: (auth: WebAuth, params: any) => AsyncGenerator<any>
   /**
@@ -454,13 +464,18 @@ export function createAdapter(deps: AdapterDeps) {
     const purpose = typeof options?.purpose === 'string' && options.purpose ? options.purpose : 'chat'
     const release = await gate.acquire(purpose)
     const startedAt = Date.now()
+    // ⚠️ F05（2026-09-12 审计）：在**起飞前**就把账号 id 定下来。
+    // 旧实现由宿主在上报时现取 `activeAccountId()`，而这次调用可能飞几十秒 ——
+    // 期间用户若切了号，失败/限制就会被记到**切换后的账号**上：
+    // 被限制的号反而清白，正在用的号却背了别人的处罚。
+    const accountIdAtStart = deps.currentAccountId?.()
     let reported = false
     /** 上报一次结果。钩子是宿主给的，它自己负责不抛错；这里再兜一层，别让它影响调用。 */
     const report = (info: { ok: boolean; code?: string; message?: string; mutedUntilMs?: number; throttled?: boolean }): void => {
       if (reported) return
       reported = true
       try {
-        deps.noteCall?.({ purpose, ms: Date.now() - startedAt, ...info })
+        deps.noteCall?.({ purpose, ms: Date.now() - startedAt, accountId: accountIdAtStart, ...info })
       } catch {}
     }
     try {
