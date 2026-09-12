@@ -30,6 +30,25 @@ import { join } from 'node:path'
 export const DEFAULT_MIN_REQUEST_INTERVAL_MS = 2_000
 export const DEFAULT_MAX_REQUEST_INTERVAL_MS = 4_000
 
+/**
+ * 长任务保护：连续跑这么多次之后，强制长休一次。0 = 关闭。
+ *
+ * 为什么需要它：间隔只管"两次之间空多久"，管不了"一刻不停跑了多久"。
+ * 实测 2026-09-12 一个 SSH 插件开发任务，12 分钟里发了约 70 次请求（大量是只调工具、
+ * 不说话的轮次），间隔设到 2~4 秒仍然全程零停顿 —— 那种形态比间隔大小更像脚本，
+ * 当天该账号两次被临时限制（第二次长达 3 天）。
+ */
+export const DEFAULT_LONG_RUN_THRESHOLD = 15
+/** 长休时长区间（1~3 分钟）。 */
+export const DEFAULT_LONG_RUN_BREAK_MS: CleanupRange = { min: 60_000, max: 180_000 }
+/** 长休区间的合法范围（30 秒 ~ 10 分钟）。 */
+export const LONG_RUN_BREAK_BOUNDS_MS: CleanupRange = { min: 30_000, max: 600_000 }
+/** 长休阈值的合法范围（0 = 关闭，上限 100 次）。 */
+export const LONG_RUN_THRESHOLD_BOUNDS = { min: 0, max: 100 }
+
+/** 距上次请求超过这么久就算"歇过了"，连续计数归零。 */
+const LONG_RUN_IDLE_RESET_MS = 120_000
+
 /** 间隔可选的推荐档位（设置页的快捷按钮用）：[下限, 上限]。 */
 export const INTERVAL_PRESETS = [
   [1_500, 2_500],
@@ -86,6 +105,10 @@ export function normalizeCleanupRange(
 
 export interface GateSettings {
   allowConcurrent: boolean
+  /** 长任务保护：连续多少次请求后强制长休（0 = 关闭）。 */
+  longRunThreshold: number
+  /** 长休时长区间（毫秒）；未设置时用内置默认。 */
+  longRunBreakMs?: CleanupRange
   /** 间隔下限（毫秒）。与上限相等时退化为固定间隔。 */
   minRequestIntervalMs: number
   /** 间隔上限（毫秒）。实际等待在 [下限, 上限] 之间**随机**取值。 */
@@ -141,6 +164,15 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     if (delay) out.cleanupDelayMs = delay
     const gap = normalizeCleanupRange(parsed?.cleanupGapMs, CLEANUP_GAP_BOUNDS_MS)
     if (gap) out.cleanupGapMs = gap
+    if (Number.isFinite(parsed?.longRunThreshold)) {
+      const n = Math.round(Number(parsed.longRunThreshold))
+      out.longRunThreshold = Math.max(
+        LONG_RUN_THRESHOLD_BOUNDS.min,
+        Math.min(LONG_RUN_THRESHOLD_BOUNDS.max, n),
+      )
+    }
+    const lrb = normalizeCleanupRange(parsed?.longRunBreakMs, LONG_RUN_BREAK_BOUNDS_MS)
+    if (lrb) out.longRunBreakMs = lrb
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
     return undefined
@@ -166,6 +198,10 @@ export interface RequestGateOptions {
   minIntervalMs?: number
   /** 间隔上限（毫秒）。缺省且未给 minIntervalMs 时用默认上限；给了 minIntervalMs 则取同值（保持「固定间隔」老语义）。 */
   maxIntervalMs?: number
+  /** 长任务保护：连续多少次请求后强制长休一次（0 = 关闭）。缺省 DEFAULT_LONG_RUN_THRESHOLD。 */
+  longRunThreshold?: number
+  /** 长休时长区间（毫秒）。缺省 DEFAULT_LONG_RUN_BREAK_MS。 */
+  longRunBreakMs?: CleanupRange
   /** 随机源（单测注入用）。 */
   random?: () => number
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
@@ -188,6 +224,11 @@ export interface RequestGate {
 export function createRequestGate(options: RequestGateOptions = {}): RequestGate {
   // 可运行时修改（设置页保存后立即生效，不必重启）
   let allowConcurrent = options.allowConcurrent === true
+  let longRunThreshold = options.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD
+  let longRunBreakMs: CleanupRange | undefined = options.longRunBreakMs
+  /** 连续请求计数（长休后、或歇够了之后归零）。 */
+  let consecutive = 0
+
   let minIntervalMs = clampInterval(
     options.minIntervalMs ?? (options.maxIntervalMs !== undefined ? options.maxIntervalMs : DEFAULT_MIN_REQUEST_INTERVAL_MS),
   )
@@ -229,16 +270,30 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       waiting -= 1
     }
 
+    // 长任务保护：先算"是不是已经连着跑了很久"。
+    // 距上次结束已经过了很久 → 说明人是歇过的，连续计数归零。
+    if (hasFinished && now() - lastFinishedAt > LONG_RUN_IDLE_RESET_MS) consecutive = 0
+    const breakRange = longRunBreakMs ?? DEFAULT_LONG_RUN_BREAK_MS
+    const needsBreak = longRunThreshold > 0 && consecutive > 0 && consecutive >= longRunThreshold
+
     // 间隔：在 [下限, 上限] 之间**随机**取值，按「上一次结束」时刻算
     // （不是上一次开始 —— 否则长回答之后的连环请求仍然很密）。每一次的等待都不同，避免定时器特征。
-    if (maxIntervalMs > 0 && hasFinished) {
-      const gap = nextGap()
+    const gap = needsBreak ? Math.round(breakRange.min + random() * Math.max(0, breakRange.max - breakRange.min)) : nextGap()
+    if (hasFinished && (needsBreak || maxIntervalMs > 0)) {
       const waitMs = lastFinishedAt + gap - now()
-      if (waitMs > 0) {
+      if (needsBreak) {
+        consecutive = 0
         logger?.info?.(
-          `deepseek-web: 距上次请求不足 ${gap}ms（区间 ${minIntervalMs}~${maxIntervalMs}），` +
-            `等 ${Math.round(waitMs)}ms 再发「${label}」（防账号级限流）`,
+          `deepseek-web: 已连续 ${longRunThreshold} 次请求 —— 长休 ${Math.round(gap / 1000)}s 再继续（长任务保护：连续跑比间隔小更像脚本）`,
         )
+      }
+      if (waitMs > 0) {
+        if (!needsBreak) {
+          logger?.info?.(
+            `deepseek-web: 距上次请求不足 ${gap}ms（区间 ${minIntervalMs}~${maxIntervalMs}），` +
+              `等 ${Math.round(waitMs)}ms 再发「${label}」（防账号级限流）`,
+          )
+        }
         await sleep(waitMs)
       }
     }
@@ -251,6 +306,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       running -= 1
       lastFinishedAt = now()
       hasFinished = true
+      consecutive += 1
       releaseMine()
     }
   }
@@ -278,6 +334,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       ...(cleanupBatch ? { cleanupBatch } : {}),
       ...(cleanupDelayMs ? { cleanupDelayMs } : {}),
       ...(cleanupGapMs ? { cleanupGapMs } : {}),
+      longRunThreshold,
+      ...(longRunBreakMs ? { longRunBreakMs } : {}),
     }
   }
 
@@ -299,6 +357,16 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       const value = normalizeCleanupRange(next.cleanupGapMs, CLEANUP_GAP_BOUNDS_MS)
       if (value) cleanupGapMs = value
     }
+    if (next.longRunThreshold !== undefined && Number.isFinite(next.longRunThreshold)) {
+      longRunThreshold = Math.max(
+        LONG_RUN_THRESHOLD_BOUNDS.min,
+        Math.min(LONG_RUN_THRESHOLD_BOUNDS.max, Math.round(next.longRunThreshold)),
+      )
+    }
+    if (next.longRunBreakMs !== undefined) {
+      const value = normalizeCleanupRange(next.longRunBreakMs, LONG_RUN_BREAK_BOUNDS_MS)
+      if (value) longRunBreakMs = value
+    }
     // 设置页两个滑块可能拖出「上限 < 下限」，这里纠正（不报错，直接夹住）
     if (maxIntervalMs < minIntervalMs) maxIntervalMs = minIntervalMs
     logger?.info?.(
@@ -308,7 +376,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
         (cleanupDelayMs
           ? ` · 最长等待 ${Math.round(cleanupDelayMs.min / 1000)}~${Math.round(cleanupDelayMs.max / 1000)}s`
           : '') +
-        (cleanupGapMs ? ` · 删除间隔 ${cleanupGapMs.min}~${cleanupGapMs.max}ms` : ''),
+        (cleanupGapMs ? ` · 删除间隔 ${cleanupGapMs.min}~${cleanupGapMs.max}ms` : '') +
+        ` · 长任务保护 ${longRunThreshold > 0 ? `每 ${longRunThreshold} 次长休 ${Math.round((longRunBreakMs ?? DEFAULT_LONG_RUN_BREAK_MS).min / 1000)}~${Math.round((longRunBreakMs ?? DEFAULT_LONG_RUN_BREAK_MS).max / 1000)}s` : '关闭'}`,
     )
     return settings()
   }

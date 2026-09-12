@@ -17,6 +17,9 @@ import {
   clampInterval,
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
   DEFAULT_MAX_REQUEST_INTERVAL_MS,
+  DEFAULT_LONG_RUN_THRESHOLD,
+  DEFAULT_LONG_RUN_BREAK_MS,
+  LONG_RUN_THRESHOLD_BOUNDS,
   MAX_INTERVAL_MS,
   INTERVAL_PRESETS,
 } from '../src/gate.ts'
@@ -295,20 +298,24 @@ await test('反向验证：allowConcurrent=true 时标题确实会与主回答�
 
 await test('configure：运行时改设置立即生效，且夹到合法范围', () => {
   const gate = createRequestGate({ minIntervalMs: 3_000, maxIntervalMs: 5_000 })
-  assert.deepEqual(gate.settings(), {
-    allowConcurrent: false,
-    minRequestIntervalMs: 3_000,
-    maxRequestIntervalMs: 5_000,
-  })
+  assert.equal(gate.settings().allowConcurrent, false)
+  assert.equal(gate.settings().minRequestIntervalMs, 3_000)
+  assert.equal(gate.settings().maxRequestIntervalMs, 5_000)
 
   assert.deepEqual(gate.configure({ allowConcurrent: true }), {
     allowConcurrent: true,
     minRequestIntervalMs: 3_000,
     maxRequestIntervalMs: 5_000,
+    longRunThreshold: DEFAULT_LONG_RUN_THRESHOLD,
   })
   assert.deepEqual(
     gate.configure({ minRequestIntervalMs: 999_999 }),
-    { allowConcurrent: true, minRequestIntervalMs: MAX_INTERVAL_MS, maxRequestIntervalMs: MAX_INTERVAL_MS },
+    {
+      allowConcurrent: true,
+      minRequestIntervalMs: MAX_INTERVAL_MS,
+      maxRequestIntervalMs: MAX_INTERVAL_MS,
+      longRunThreshold: DEFAULT_LONG_RUN_THRESHOLD,
+    },
     '下限超上限应被夹住，且上限要跟着抬起来（不能留下负区间）',
   )
   assert.equal(gate.configure({ minRequestIntervalMs: -1 }).minRequestIntervalMs, 0, '负数应归 0')
@@ -317,6 +324,7 @@ await test('configure：运行时改设置立即生效，且夹到合法范围',
     allowConcurrent: true,
     minRequestIntervalMs: 0,
     maxRequestIntervalMs: MAX_INTERVAL_MS,
+    longRunThreshold: DEFAULT_LONG_RUN_THRESHOLD,
   })
 })
 
@@ -378,11 +386,8 @@ await test('上下限相等 → 退化为固定间隔（随机源不影响结果
 
 await test('只给下限（0.1.20 的老配置）→ 上限跟随下限，行为不变', () => {
   const gate = createRequestGate({ minIntervalMs: 3_000 })
-  assert.deepEqual(gate.settings(), {
-    allowConcurrent: false,
-    minRequestIntervalMs: 3_000,
-    maxRequestIntervalMs: 3_000,
-  }, '老配置是固定间隔语义，升级后不该变成随机区间')
+  assert.equal(gate.settings().minRequestIntervalMs, 3_000)
+  assert.equal(gate.settings().maxRequestIntervalMs, 3_000, '老配置是固定间隔语义，升级后不该变成随机区间')
 })
 
 await test('上限小于下限 → 自动纠正，不会出现负区间', () => {
@@ -471,11 +476,95 @@ test('回归：设置页保存 2000~4000 后重启，恢复出来必须仍是 20
     minIntervalMs: saved.minRequestIntervalMs,
     maxIntervalMs: saved.maxRequestIntervalMs,
   })
-  assert.deepEqual(reborn.settings(), {
+  assert.equal(reborn.settings().allowConcurrent, false)
+  assert.equal(reborn.settings().minRequestIntervalMs, 2000)
+  assert.equal(reborn.settings().maxRequestIntervalMs, 4000)
+})
+
+/** 造一个可控时钟的闸门：sleep 只记录不真等。 */
+function makeClockGate(overrides = {}) {
+  const waits = []
+  const logs = []
+  let t = 1_000
+  const gate = createRequestGate({
     allowConcurrent: false,
-    minRequestIntervalMs: 2000,
-    maxRequestIntervalMs: 4000,
+    minIntervalMs: 0,
+    maxIntervalMs: 0,
+    longRunThreshold: 3,
+    longRunBreakMs: { min: 60_000, max: 60_000 },
+    now: () => t,
+    sleep: async (ms) => {
+      waits.push(ms)
+      t += ms
+    },
+    logger: { info: (m) => logs.push(m), debug: () => {} },
+    ...overrides,
   })
+  return {
+    gate,
+    waits,
+    logs,
+    tick: (ms) => {
+      t += ms
+    },
+  }
+}
+
+async function runBurst(ctx, times, gapMs = 100) {
+  for (let i = 0; i < times; i += 1) {
+    const release = await ctx.gate.acquire('chat')
+    release()
+    ctx.tick(gapMs)
+  }
+}
+
+test('长任务保护：连续跑满阈值后强制长休（间隔管不了"连着不停跑"）', async () => {
+  const ctx = makeClockGate()
+  await runBurst(ctx, 10)
+  const longBreaks = ctx.waits.filter((w) => w > 50_000)
+  // 阈值 3、连跑 10 次 → 第 4、7、10 次之前各长休一次
+  assert.equal(longBreaks.length, 3, `等待序列 ${JSON.stringify(ctx.waits)}`)
+  assert.ok(
+    ctx.logs.some((l) => l.includes('长休') && l.includes('长任务保护')),
+    '长休应当写日志（否则用户不知道为什么卡住）',
+  )
+})
+
+test('长任务保护：阈值 0 = 关闭（不引入意外的等待）', async () => {
+  const ctx = makeClockGate({ longRunThreshold: 0 })
+  await runBurst(ctx, 10)
+  assert.equal(ctx.waits.length, 0, `不该有任何等待：${JSON.stringify(ctx.waits)}`)
+})
+
+test('长任务保护：中间歇够了 → 连续计数归零（"连续"指的是不停歇）', async () => {
+  const ctx = makeClockGate()
+  await runBurst(ctx, 3)
+  ctx.tick(200_000) // 歇了 200 秒
+  await runBurst(ctx, 3)
+  assert.equal(ctx.waits.length, 0, `歇过了就不该再长休：${JSON.stringify(ctx.waits)}`)
+})
+
+test('长任务保护：长休时长在区间内随机（不是固定值）', async () => {
+  const ctx = makeClockGate({ longRunBreakMs: { min: 60_000, max: 180_000 } })
+  await runBurst(ctx, 10)
+  const breaks = ctx.waits.filter((w) => w > 50_000)
+  assert.equal(breaks.length, 3)
+  for (const b of breaks) {
+    assert.ok(b > 50_000 && b <= 180_000, `长休时长 ${b} 应落在 60~180s 区间`)
+  }
+})
+
+test('长任务保护：设置可改（configure）并回显在 settings()', () => {
+  const gate = createRequestGate({ minIntervalMs: 0, maxIntervalMs: 0 })
+  assert.equal(gate.settings().longRunThreshold, DEFAULT_LONG_RUN_THRESHOLD, '默认应开启')
+  gate.configure({ longRunThreshold: 8, longRunBreakMs: { min: 30_000, max: 90_000 } })
+  assert.equal(gate.settings().longRunThreshold, 8)
+  assert.deepEqual(gate.settings().longRunBreakMs, { min: 30_000, max: 90_000 })
+  // 越界要被夹住，不是报错
+  gate.configure({ longRunThreshold: 9999 })
+  assert.equal(gate.settings().longRunThreshold, 100, '阈值上限 100')
+  gate.configure({ longRunThreshold: -5 })
+  assert.equal(gate.settings().longRunThreshold, 0, '负数夹到 0（= 关闭）')
 })
 
 console.log()

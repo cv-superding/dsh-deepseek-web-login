@@ -119,6 +119,7 @@ const checks = {
   'host 账号路径拼装带 id 安全校验（防路径穿越）': host.includes('assertSafeAccountId'),
   'host 调用上报带「发起时的账号 id」（防飞行途中切号记错人）': /accountId:\s*accountIdAtStart/.test(host),
   'host 批量清理只在同账号下用（混号退化为逐个删）': host.includes('sameAccount'),
+  'host 有长任务保护（连续跑满阈值强制长休）': host.includes('长任务保护') && host.includes('DEFAULT_LONG_RUN_THRESHOLD'),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':

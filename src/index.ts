@@ -19,6 +19,7 @@ import {
   writeGateSettings,
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
   DEFAULT_MAX_REQUEST_INTERVAL_MS,
+  DEFAULT_LONG_RUN_THRESHOLD,
   INTERVAL_PRESETS,
   MAX_INTERVAL_MS,
   CLEANUP_BATCH_BOUNDS,
@@ -191,6 +192,9 @@ export function apply(ctx: any, config: Config = {}): void {
     // 而固定间隔恰恰是最典型的机器特征，用户完全不知情（日志里只会显示"区间 2000~2000"）。
     minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
     maxIntervalMs: savedGate?.maxRequestIntervalMs ?? config.maxRequestIntervalMs ?? DEFAULT_MAX_REQUEST_INTERVAL_MS,
+    // 长任务保护：连续 N 次请求后强制长休一次（0 = 关闭）。
+    longRunThreshold: savedGate?.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD,
+    longRunBreakMs: savedGate?.longRunBreakMs,
     logger,
   })
   // 旧版（≤0.1.25）只有一份 deepseek-auth.json；首次启动时迁进账号库。
