@@ -6,6 +6,12 @@
  * 渲染函数返回 React 元素（createElement），React #130 的坑即来自返回非元素。
  */
 import { createElement, useEffect, useRef, useState } from 'react'
+import {
+  pickJsonFile,
+  readImportSource,
+  saveWithPicker,
+  suggestedExportName,
+} from '../file-picker.ts'
 
 type ClientContext = {
   slots: any
@@ -445,13 +451,15 @@ function Panel(): any {
 
     const accountsIOPanel = el('div', 'dsw-row')
     accountsIOPanel.style.marginTop = '10px'
-    const exportBtn = el('button', 'dsw-btn ghost', '导出备份') as HTMLButtonElement
-    const importInput = el('input', 'dsw-input') as HTMLInputElement
-    importInput.placeholder = '要导入的备份文件路径'
-    importInput.style.maxWidth = '320px'
-    const importBtn = el('button', 'dsw-btn ghost', '导入') as HTMLButtonElement
-    accountsIOPanel.append(exportBtn, importInput, importBtn)
+    const exportBtn = el('button', 'dsw-btn ghost', '导出备份…') as HTMLButtonElement
+    const importBtn = el('button', 'dsw-btn ghost', '导入备份…') as HTMLButtonElement
+    accountsIOPanel.append(exportBtn, importBtn)
     accountsCard.append(accountsIOPanel)
+    // 以前这里是个"要导入的备份文件路径"输入框 —— 让人手打路径本来就别扭。
+    // 现在两个按钮都弹**系统对话框**（另存为 / 打开），位置和文件名由用户自己选。
+    // 实现见 src/file-picker.ts（宿主是 utility 进程，拿不到 Electron 的 dialog，
+    // 只能由渲染进程用 Chromium 自己的能力做）。
+    accountsCard.append(el('p', 'dsw-hint', '点按钮会弹出系统对话框，自己选位置和文件 —— 不用手打路径。'))
     const accountsMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     accountsCard.append(accountsMsg)
     accountsCard.append(
@@ -603,10 +611,26 @@ function Panel(): any {
         exportBtn.disabled = true
         accountsMsg.textContent = '导出中……'
         try {
-          const result = await api('/accounts/export', { method: 'POST', body: '{}' })
-          accountsMsg.textContent = result?.ok
-            ? `已导出 ${result.count} 个账号到：${result.path}（含明文凭证，请妥善保管）`
-            : `导出失败：${result?.error ?? '未知原因'}`
+          // 先弹系统「另存为」，内容在用户选完位置后再取（顺序见 file-picker.ts 的注释）。
+          const outcome = await saveWithPicker(suggestedExportName(), async () => {
+            const data = await api('/accounts/export-json', { method: 'POST', body: '{}' })
+            if (!data?.ok) throw new Error(data?.error ?? '读取备份内容失败')
+            const { ok: _ok, ...backup } = data
+            return JSON.stringify(backup, null, 2)
+          })
+
+          if (outcome.kind === 'saved') {
+            accountsMsg.textContent = `已保存：${outcome.name}（含明文凭证，请妥善保管）`
+          } else if (outcome.kind === 'cancelled') {
+            accountsMsg.textContent = '已取消导出。'
+          } else {
+            // 系统「另存为」不可用 → 回退到宿主写插件目录（功能不因此失效，只是不能选位置）
+            const result = await api('/accounts/export', { method: 'POST', body: '{}' })
+            const why = outcome.kind === 'unsupported' ? '当前环境不支持系统另存为' : `系统另存为失败（${outcome.reason}）`
+            accountsMsg.textContent = result?.ok
+              ? `${why}，已改为保存到插件目录：${result.path}`
+              : `导出失败：${result?.error ?? '未知原因'}`
+          }
         } catch (error: any) {
           accountsMsg.textContent = `导出失败：${error?.message ?? error}`
         } finally {
@@ -617,22 +641,28 @@ function Panel(): any {
 
     importBtn.addEventListener('click', () => {
       void (async () => {
-        const path = importInput.value.trim()
-        if (!path) {
-          accountsMsg.textContent = '请先填写备份文件路径'
-          return
-        }
         importBtn.disabled = true
-        accountsMsg.textContent = '导入中……'
+        accountsMsg.textContent = '请选择备份文件……'
         try {
-          const result = await api('/accounts/import', { method: 'POST', body: JSON.stringify({ path }) })
-          accountsMsg.textContent = result?.ok
-            ? `导入完成：新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}`
-            : `导入失败：${result?.error ?? '未知原因'}`
-          if (result?.ok) {
-            importInput.value = ''
-            await loadAccounts()
+          const file = await pickJsonFile()
+          if (!file) {
+            accountsMsg.textContent = '已取消导入。'
+            return
           }
+          accountsMsg.textContent = `正在读取 ${file.name}……`
+          const source = await readImportSource(file)
+          if (source.kind === 'unreadable') {
+            accountsMsg.textContent = `读取失败：${source.name} 不是有效的 JSON 备份（${source.reason}）`
+            return
+          }
+          // 拿到真实路径时只把**路径**交给宿主（宿主自己读文件，凭证不进 HTTP）；
+          // 拿不到才退回传内容 —— 兜底，免得宿主没注入路径桥时功能整体失效。
+          const body = source.kind === 'path' ? { path: source.path } : { payload: source.payload }
+          const result = await api('/accounts/import', { method: 'POST', body: JSON.stringify(body) })
+          accountsMsg.textContent = result?.ok
+            ? `导入完成（${source.name}）：新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}`
+            : `导入失败：${result?.error ?? '未知原因'}`
+          if (result?.ok) await loadAccounts()
         } catch (error: any) {
           accountsMsg.textContent = `导入失败：${error?.message ?? error}`
         } finally {

@@ -207,7 +207,7 @@ points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch b
 ### Account library, call ledger, login probe
 
 - **Account library** (`~/.dsh/web-login/accounts/`): keep several DeepSeek web accounts, switch with
-  one click, rename, remove, export/import backups. Switching takes effect on the **next** request.
+  one click, rename, remove, export/import backups (both open a **native OS dialog** so you pick the location and file yourself). Switching takes effect on the **next** request.
   **Switching accounts does not lose your conversation** — the transcript lives locally in DSH and
   every request re-sends the whole history; the account is just a pass and a quota owner.
 - **Call ledger**: per-day JSONL (metadata only, no conversation content or credentials) showing the
@@ -227,6 +227,14 @@ points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch b
 > accounts (same device, same IP, same fingerprint, similar behaviour), and a "same person, many
 > accounts" verdict is usually treated more harshly than single-account overuse.
 > Exported backups contain fully usable credentials — never share them or commit them.
+
+**How export/import pick files.** *Export backup…* opens the native **Save As** dialog, so the
+location and file name are yours to choose; *Import backup…* opens the native **Open** dialog, so
+there is no path to type (and none to look up first). Both fall back gracefully when the environment
+cannot show a native dialog: export then writes into the plugin directory and echoes the **full
+path**, and import reads the file in the UI instead — the feature never silently stops working.
+Import prefers passing only the **file path** to the host (which reads the file itself), so
+credential plaintext normally does not travel over HTTP.
 
 ## Known limitations
 

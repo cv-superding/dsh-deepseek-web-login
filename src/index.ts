@@ -43,6 +43,7 @@ import {
   accountsFootprint,
   accountTitle,
   activeAccountId,
+  exportAccounts,
   exportAccountsToFile,
   importAccounts,
   listAccounts,
@@ -456,11 +457,28 @@ export function apply(ctx: any, config: Config = {}): void {
               sendJson(res, 200, { ok: true, removed: id, activeId: activeAccountId() ?? null })
               return
             }
+            // 回退路径：宿主自己写到插件目录，只回传**路径**（明文 token 不进 HTTP）。
             if (req.method === 'POST' && route === '/accounts/export') {
-              // 写到本机文件后只回传路径（不把明文 token 放进 HTTP 响应）
               try {
                 const result = exportAccountsToFile()
                 sendJson(res, 200, { ok: true, ...result, warning: '导出文件含可完整登录的凭证，请妥善保管、勿分享' })
+              } catch (error: any) {
+                sendJson(res, 500, { ok: false, error: `导出失败：${error?.message ?? error}` })
+              }
+              return
+            }
+            // 首选路径：界面弹系统「另存为」让用户自己选位置与文件名，然后把内容写进去。
+            //
+            // ⚠️ 这一条会把**明文凭证**交给渲染进程（本机回环 + DSH 同源守卫）。
+            // 为什么躲不开：要"让用户选保存位置"，只有渲染进程能弹系统对话框；
+            // 而写盘必须由拿到那份数据的一方做。反过来"宿主只收一个路径"做不到 ——
+            // File System Access 只给 FileSystemFileHandle、不暴露路径，宿主无从代写。
+            // 权衡后接受：能读到这个响应的，本来就以本机同用户进程为主，
+            // 而插件宿主自身有完整 fs 权限、直接读账号文件更省事，边际风险接近于零。
+            // 不接受的场景也有出口：/accounts/export（上面那条）始终保留，凭证不出宿主。
+            if (req.method === 'POST' && route === '/accounts/export-json') {
+              try {
+                sendJson(res, 200, { ok: true, ...exportAccounts() })
               } catch (error: any) {
                 sendJson(res, 500, { ok: false, error: `导出失败：${error?.message ?? error}` })
               }

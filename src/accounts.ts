@@ -278,7 +278,15 @@ export function upsertAccount(auth: WebAuth, patch: Partial<AccountRecord> = {})
   return record
 }
 
-/** 导出（含明文凭证 —— 调用方必须把风险讲给用户）。 */
+/**
+ * 打包一份导出数据（含明文凭证 —— 调用方必须把风险讲给用户）。
+ *
+ * ⚠️ 这条数据现在有两条出口，安全姿态不同：
+ *   1. `exportAccountsToFile()` + `POST /accounts/export`：**凭证不出宿主**，
+ *      宿主自己写盘、只回传路径。始终保留，是回退路径。
+ *   2. `POST /accounts/export-json`：把内容交给界面，由界面弹系统「另存为」写盘。
+ *      为了让用户能自己选保存位置，这条路躲不开（理由见 index.ts 里那个路由的注释）。
+ */
 export function exportAccounts(): { version: number; exportedAt: string; warning: string; accounts: AccountRecord[] } {
   return {
     version: INDEX_VERSION,
@@ -289,10 +297,11 @@ export function exportAccounts(): { version: number; exportedAt: string; warning
 }
 
 /**
- * 导出**到磁盘文件**并返回路径。
+ * 导出到**插件目录下的文件**并返回路径（`<web-login>/exports/accounts-<时间戳>.json`）。
  *
- * 为什么不做成"接口返回 JSON、前端下载"：那会把明文 token 塞进 HTTP 响应体
- * （可能落进日志/抓包/前端内存）。写到本机文件、只回传**路径**更收敛。
+ * 这是回退路径：界面拿不到系统「另存为」（宿主未注入 File System Access、
+ * 或弹框被平台拒绝）时用它，保证导出功能永不失效。
+ * 优点是明文凭证不进 HTTP 响应体，只把**路径**回给界面。
  */
 export function exportAccountsToFile(): { path: string; count: number } {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
