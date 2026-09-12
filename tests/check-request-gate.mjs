@@ -449,6 +449,35 @@ await test('落盘的值与 configure 结果一致（重启后行为不变）', 
   }
 })
 
+test('语义：只传 minIntervalMs 时，max 会跟随 min（退化为固定间隔）', () => {
+  // 这是 createRequestGate 的既有语义（兼容老配置里只写一个值 = 固定间隔）。
+  // ⚠️ 但它意味着**调用方必须成对传**：漏传 max 就会静默得到固定间隔。
+  const g = createRequestGate({ minIntervalMs: 2000 })
+  assert.equal(g.settings().minRequestIntervalMs, 2000)
+  assert.equal(
+    g.settings().maxRequestIntervalMs,
+    2000,
+    '只传 min 时 max 跟随 min —— 不是默认的 4000。宿主启动时漏传 max 就会变成固定间隔',
+  )
+})
+
+test('回归：设置页保存 2000~4000 后重启，恢复出来必须仍是 2000~4000', () => {
+  // 2026-09-12 实测事故：宿主 index.ts 启动时只把 min 传给了 createRequestGate，
+  // 于是保存好的 2000~4000 随机区间在每次重启后 silently 变成固定 2000ms ——
+  // 固定间隔是最典型的机器特征，而用户从界面上看不出来（日志里只显示"区间 2000~2000"）。
+  const saved = { allowConcurrent: false, minRequestIntervalMs: 2000, maxRequestIntervalMs: 4000 }
+  const reborn = createRequestGate({
+    allowConcurrent: saved.allowConcurrent,
+    minIntervalMs: saved.minRequestIntervalMs,
+    maxIntervalMs: saved.maxRequestIntervalMs,
+  })
+  assert.deepEqual(reborn.settings(), {
+    allowConcurrent: false,
+    minRequestIntervalMs: 2000,
+    maxRequestIntervalMs: 4000,
+  })
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)

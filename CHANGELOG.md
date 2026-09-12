@@ -2,6 +2,41 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.34 — 2026-09-12
+
+### 修：设置页保存的间隔上限，每次重启都丢（随机区间变固定间隔）
+
+用户重启 DSH 后继续用，日志里打出：
+
+    deepseek-web: 距上次请求不足 2000ms（区间 2000~2000），等 908ms 再发「chat」
+
+而 `gate.json` 里明明是 `2000~4000`。查下去是宿主启动时**漏传了 max**：
+
+    // src/index.ts（修复前）
+    const gate = createRequestGate({
+      minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+      // ← 没有 maxIntervalMs
+    })
+
+而 `createRequestGate` 的既有语义是「只收到 min 时，max 跟随 min」（为了兼容老配置里
+只写一个值 = 固定间隔）。于是**设置页保存的 2000~4000 随机区间，每次重启都变成固定 2000ms**，
+直到用户再去设置页动一下才恢复。
+
+固定间隔正是最典型的机器特征 —— 用户以为自己开着随机区间，实际每次重启后都在用固定值跑，
+而且从界面上看不出来（"已生效"读的是 `gate.settings()`，它显示的就是退化后的值）。
+
+三处漏传一起补：启动闸门 / `adapterConfig` / 状态回传。
+（对照：0.1.30 加的三个**清理区间**在启动时是正确的，只有间隔这一对漏了。）
+
+测试：`check-request-gate` 加 2 条 —— 一条**记录语义**（只传 min 时 max 跟随 min，
+不是默认 4000），一条守「保存 2000~4000 后重启仍是 2000~4000」。
+`check-bundle` 加 3 条产物断言。
+
+⚠️ 反向验证又是**第一版没红**：我最初写的是 `/maxIntervalMs:/`，
+但 gate.ts 内部也有 `options.maxIntervalMs ?? …`，被一起打进产物，所以宿主漏传照样通过。
+改成匹配**调用点**（`/maxIntervalMs:\s*\w+\?\.maxRequestIntervalMs/`）才真的守住。
+→ **产物断言要精确到调用点，别只匹配字段名。**
+
 ## 0.1.33 — 2026-09-12
 
 ### 修：DSH 的 61 个工具里，有 26 个从没告诉过模型

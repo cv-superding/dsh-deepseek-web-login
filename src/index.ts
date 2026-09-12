@@ -185,7 +185,12 @@ export function apply(ctx: any, config: Config = {}): void {
   const savedGate = readGateSettings()
   const gate = createRequestGate({
     allowConcurrent: savedGate?.allowConcurrent ?? config.allowConcurrent === true,
+    // ⚠️ min / max 必须**成对**传：createRequestGate 在只收到 `minIntervalMs` 时，
+    // 会把 `maxIntervalMs` 兜底成 min（见 gate.ts），也就是**随机区间退化成固定间隔**。
+    // 2026-09-12 实测：设置页保存的 2000~4000，重启 DSH 后就变成固定 2000ms；
+    // 而固定间隔恰恰是最典型的机器特征，用户完全不知情（日志里只会显示"区间 2000~2000"）。
     minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    maxIntervalMs: savedGate?.maxRequestIntervalMs ?? config.maxRequestIntervalMs ?? DEFAULT_MAX_REQUEST_INTERVAL_MS,
     logger,
   })
   // 旧版（≤0.1.25）只有一份 deepseek-auth.json；首次启动时迁进账号库。
@@ -217,6 +222,8 @@ export function apply(ctx: any, config: Config = {}): void {
     // 取闸门的实际生效值（可能来自设置页保存的 gate.json）。
     allowConcurrent: gate.settings().allowConcurrent,
     minRequestIntervalMs: gate.settings().minRequestIntervalMs,
+    // 同上：必须与 min 成对传，否则这里也退化成固定间隔
+    maxRequestIntervalMs: gate.settings().maxRequestIntervalMs,
     logger,
   }
 
@@ -667,6 +674,7 @@ export function apply(ctx: any, config: Config = {}): void {
                   deleteWebSessions: adapterConfig.deleteWebSessions !== false,
                   allowConcurrent: adapterConfig.allowConcurrent === true,
                   minRequestIntervalMs: adapterConfig.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+                  maxRequestIntervalMs: adapterConfig.maxRequestIntervalMs ?? DEFAULT_MAX_REQUEST_INTERVAL_MS,
                   sessionCleanup: cleanupMode,
                   sessionCleanupPending: sessionCleaner.pendingCount(),
                   transport: transportState.effective,

@@ -109,6 +109,10 @@ const checks = {
   'host 工具目录超预算时必须列出被省略的工具名（不许静默丢弃）': host.includes('NOT described above'),
   'host 工具目录省略时明确要求「别猜参数」': host.includes('do NOT guess'),
   'host 老的那句「remaining tools omitted for length」已不再出现': !host.includes('remaining tools omitted for length'),
+  'host 启动闸门时 min/max 成对传入（漏传 max 会让随机区间变成固定间隔）':
+    /maxIntervalMs:\s*\w+\?\.maxRequestIntervalMs/.test(host),
+  'host 适配器配置也带上 maxRequestIntervalMs': host.includes('maxRequestIntervalMs: gate.settings().maxRequestIntervalMs'),
+  'host 状态回传也带上 maxRequestIntervalMs': /maxRequestIntervalMs:\s*adapterConfig\.maxRequestIntervalMs/.test(host),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':
