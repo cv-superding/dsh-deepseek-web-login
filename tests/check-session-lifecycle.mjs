@@ -178,14 +178,24 @@ await run('其它业务错误照常抛出（不误判为会话失效）', async 
 // ── 事实 ③：账号被服务端限制（muted）要说清楚，且不能空转重试 ──
 // 现场抓到（2026-09-11）：{"code":0,"data":{"biz_code":5,"biz_msg":"user is muted",
 //   "biz_data":{"is_muted":1,"mute_until":1789173841.894}}}
-const REAL_MUTED = '{"code":0,"msg":"","data":{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,"mute_until":1789173841.894}}}'
+//
+// ⚠️ `mute_until` 是**绝对**时间戳，写死在夹具里就是一颗时间炸弹：
+//    写测试那天它是「明天」，第二天就变成「过去」，于是 Math.max(0, until - now) 恒为 0，
+//    断言必然失败（2026-09-12 早上实测踩到：15 项通过 1 项失败）。
+//    所以这里按「当前时间 + 12 小时」动态生成，信封形状与现场完全一致。
+const MUTE_UNTIL_SECONDS = Math.floor(Date.now() / 1000) + 12 * 3600 + 0.894
+const REAL_MUTED = JSON.stringify({
+  code: 0,
+  msg: '',
+  data: { biz_code: 5, biz_msg: 'user is muted', biz_data: { is_muted: 1, mute_until: MUTE_UNTIL_SECONDS } },
+})
 
 test('isMutedError / muteUntilMs: 认得真实信封', () => {
   const json = JSON.parse(REAL_MUTED)
   const biz = envelopeError(json)
   assert.ok(biz, 'biz_code 5 必须被识别（否则只会显示 code 5 这种看不懂的话）')
   assert.equal(isMutedError(biz), true)
-  assert.equal(muteUntilMs(json), 1789173841894)
+  assert.equal(muteUntilMs(json), Math.round(MUTE_UNTIL_SECONDS * 1000))
   assert.equal(isMutedError({ code: 2, msg: 'INVALID_PARAM' }), false)
 })
 

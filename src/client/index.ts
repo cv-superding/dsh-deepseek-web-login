@@ -38,34 +38,100 @@ async function api(path: string, init?: RequestInit): Promise<any> {
   return await response.json()
 }
 
+/**
+ * 样式表 —— 全部走宿主的主题令牌（`--dsw-alias-*`）。
+ *
+ * 历史坑（2026-09-12 用户实测）：以前用的是 `var(--theme-text, #ddd)` 这套**并不存在**的变量名，
+ * 于是每个颜色都落到兜底值上；兜底又全是深色 → 浅色主题下整个面板仍是黑底，
+ * 灰色文字贴在深底上几乎读不出来。
+ *
+ * 现在的做法：
+ *  1. 颜色优先取宿主令牌（`--dsw-alias-label-primary` / `bg-layer-*` / `border-l*` / `state-*` …），
+ *     这些令牌由 DSH 按当前主题（浅 / 深 / 皮肤）重定义，插件无需自己判断主题；
+ *  2. 令牌缺失时（老宿主 / 令牌改名）退回 `--fb-*`，而 `--fb-*` 由 `prefers-color-scheme` 切换，
+ *     保证「浅色主题不会出现黑界面」这条底线永远成立；
+ *  3. 正文改用系统无衬线字体（原来是等宽字体铺满全屏，观感像终端日志），等宽只留给命令与代码。
+ */
 const styles = `
-.dsw-page{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.65;padding:14px 16px;max-width:760px;color:var(--theme-text,#ddd)}
-.dsw-title{margin:0 0 4px;font-size:13px;font-weight:600}
-.dsw-sub{color:var(--theme-text-secondary,#8b93a3);font-size:11px;margin:0 0 14px}
-.dsw-card{border:1px solid var(--theme-border,#2a2f3a);border-radius:10px;padding:12px 14px;margin-bottom:12px;background:var(--theme-input-bg,#151922)}
+.dsw-page{
+/* 兜底色：令牌缺失时才用到，随系统主题切换 */
+--fb-fg:#1f2329;--fb-fg2:#545b66;--fb-fg3:#8b93a3;
+--fb-bg1:#f6f7f9;--fb-bg2:#ffffff;--fb-bd:#e8eaee;--fb-bd2:#d7dae0;
+--fb-hover:#0000000f;--fb-code:#f3f4f6;
+/* 语义层 */
+--fg:var(--dsw-alias-label-primary,var(--fb-fg));
+--fg2:var(--dsw-alias-label-secondary,var(--fb-fg2));
+--fg3:var(--dsw-alias-label-tertiary,var(--fb-fg3));
+--bg1:var(--dsw-alias-bg-layer-1,var(--fb-bg1));
+--bg2:var(--dsw-alias-bg-layer-2,var(--fb-bg2));
+--bd:var(--dsw-alias-border-l1,var(--fb-bd));
+--bd2:var(--dsw-alias-border-l2,var(--fb-bd2));
+--hover:var(--dsw-alias-interactive-bg-hover,var(--fb-hover));
+--code-bg:var(--dsw-alias-markdown-code-block,var(--fb-code));
+--accent:var(--dsw-alias-brand-primary,#3b6ef0);
+--on-accent:var(--dsw-alias-label-primary-foreground,#ffffff);
+--ok:var(--dsw-alias-state-success-primary,#1a9f5a);
+--warn:var(--dsw-alias-state-warn-label,#9a6a00);
+--err:var(--dsw-alias-state-error-primary,#d93025);
+--mono:var(--dsw-alias-font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12px;
+-webkit-font-smoothing:antialiased;
+}
+@media (prefers-color-scheme:dark){
+.dsw-page{--fb-fg:#ededed;--fb-fg2:#b6bcc6;--fb-fg3:#858c99;
+--fb-bg1:#212121;--fb-bg2:#2a2a2a;--fb-bd:#333333;--fb-bd2:#3d3d3d;
+--fb-hover:#ffffff14;--fb-code:#1c1c1c}
+}
+.dsw-title{margin:0 0 3px;font-size:14px;font-weight:500;color:var(--fg)}
+.dsw-sub{margin:0 0 14px;font-size:12px;line-height:1.55;color:var(--fg3)}
+.dsw-card{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+.dsw-cardhead{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
+.dsw-card > .name{margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
 .dsw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.dsw-badge{font-size:10px;padding:2px 8px;border-radius:10px;white-space:nowrap}
-.dsw-badge.on{background:rgba(46,204,113,.16);color:#2ecc71}
-.dsw-badge.off{background:rgba(241,196,15,.14);color:#f1c40f}
-.dsw-badge.err{background:rgba(217,51,51,.16);color:#e05a5a}
-.dsw-btn{background:var(--theme-accent,#4a9eff);color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px}
-.dsw-btn.ghost{background:transparent;border:1px solid var(--theme-border,#444);color:var(--theme-text,#ccc)}
-.dsw-btn.danger{background:transparent;border:1px solid #d33;color:#e05a5a}
-.dsw-btn.armed{background:#b3261e;border-color:#b3261e;color:#fff;font-weight:600}
-.dsw-btn:disabled{opacity:.45;cursor:not-allowed}
-.dsw-input,.dsw-area{width:100%;box-sizing:border-box;background:var(--theme-bg,#0f1115);color:var(--theme-text,#ddd);border:1px solid var(--theme-border,#333);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit}
-.dsw-area{min-height:64px;resize:vertical}
-.dsw-kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin-top:8px}
-.dsw-kv .k{color:var(--theme-text-secondary,#8b93a3)}
-.dsw-msg{margin-top:10px;padding:8px 10px;border-radius:6px;background:var(--theme-bg,#0f1115);border:1px solid var(--theme-border,#333);white-space:pre-wrap;max-height:200px;overflow:auto;font-size:11px}
-.dsw-msg.err{border-color:#6b2b2b;color:#ffb4b4}
-.dsw-msg.ok{border-color:#2b6b45;color:#a8e6c0}
-.dsw-models{list-style:none;margin:6px 0 0;padding:0}
-.dsw-models li{padding:6px 0;border-top:1px dashed var(--theme-border,#2a2f3a)}
-.dsw-models .name{font-weight:600}
-.dsw-models .id{color:var(--theme-text-secondary,#8b93a3);font-size:11px}
-.dsw-hint{color:var(--theme-text-secondary,#8b93a3);font-size:11px;margin:6px 0 0}
-.dsw-code{background:var(--theme-bg,#0f1115);border:1px solid var(--theme-border,#333);border-radius:6px;padding:6px 8px;display:block;margin:4px 0;overflow-x:auto;font-size:11px}
+.dsw-badge{font-size:11px;font-weight:500;line-height:1.7;padding:1px 9px;border-radius:999px;white-space:nowrap}
+.dsw-badge.on{color:var(--ok);background:rgba(26,159,90,.15)}
+.dsw-badge.off{color:var(--warn);background:rgba(200,140,20,.16)}
+.dsw-badge.err{color:var(--err);background:rgba(217,48,37,.15)}
+.dsw-btn{font:inherit;font-size:12px;font-weight:500;line-height:1.5;padding:6px 13px;border-radius:8px;
+border:1px solid transparent;background:var(--accent);color:var(--on-accent);cursor:pointer;
+transition:background-color .15s ease,border-color .15s ease,opacity .15s ease}
+.dsw-btn:hover:not(:disabled){opacity:.88}
+.dsw-btn:active:not(:disabled){opacity:.72}
+.dsw-btn:disabled{opacity:.4;cursor:not-allowed}
+.dsw-btn.ghost{background:transparent;border-color:var(--bd2);color:var(--fg)}
+.dsw-btn.ghost:hover:not(:disabled){background:var(--hover);opacity:1}
+.dsw-btn.danger{background:transparent;border-color:var(--bd2);color:var(--err)}
+.dsw-btn.danger:hover:not(:disabled){background:rgba(217,48,37,.1);border-color:var(--err);opacity:1}
+.dsw-btn.armed{background:var(--err);border-color:var(--err);color:#ffffff}
+.dsw-btn.armed:hover:not(:disabled){opacity:.9}
+.dsw-input,.dsw-area{width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;
+background:var(--bg1);color:var(--fg);border:1px solid var(--bd2);border-radius:8px;padding:7px 10px;
+outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+.dsw-input:focus,.dsw-area:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--hover)}
+.dsw-area{min-height:68px;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.5}
+.dsw-kv{display:grid;grid-template-columns:auto 1fr;gap:0 12px;margin:2px 0 0;align-items:baseline}
+.dsw-kv > *{padding:5px 0;border-top:1px solid var(--bd);min-width:0}
+.dsw-kv > :nth-child(1),.dsw-kv > :nth-child(2){border-top:none}
+.dsw-kv .k{color:var(--fg3);font-size:12px;white-space:nowrap}
+.dsw-kv > *:not(.k){color:var(--fg);word-break:break-word}
+.dsw-msg{margin-top:10px;padding:9px 12px;border-radius:8px;background:var(--bg1);border:1px solid var(--bd);
+border-left:3px solid var(--fg3);white-space:pre-wrap;max-height:240px;overflow:auto;
+font-size:12px;line-height:1.6;color:var(--fg)}
+.dsw-msg.err{border-left-color:var(--err);color:var(--err)}
+.dsw-msg.ok{border-left-color:var(--ok)}
+.dsw-models{list-style:none;margin:2px 0 0;padding:0}
+.dsw-models li{padding:9px 0;border-top:1px solid var(--bd)}
+.dsw-models li:first-child{border-top:none;padding-top:2px}
+.dsw-models .name{font-size:13px;font-weight:500;color:var(--fg)}
+.dsw-models .id{color:var(--fg3);font-size:12px;margin-top:1px;word-break:break-word}
+.dsw-hint{color:var(--fg3);font-size:12px;line-height:1.6;margin:8px 0 0}
+.dsw-code{display:block;margin:6px 0;padding:7px 10px;background:var(--code-bg);border:1px solid var(--bd);
+border-radius:8px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);
+overflow-x:auto;white-space:pre}
+.dsw-msg::-webkit-scrollbar,.dsw-code::-webkit-scrollbar,.dsw-area::-webkit-scrollbar{width:8px;height:8px}
+.dsw-msg::-webkit-scrollbar-thumb,.dsw-code::-webkit-scrollbar-thumb,.dsw-area::-webkit-scrollbar-thumb{
+background:var(--bd2);border-radius:4px}
 `
 
 function el(tag: string, cls?: string, text?: string): HTMLElement {
@@ -95,9 +161,9 @@ function Panel(): any {
 
     // ── 登录卡 ──
     const loginCard = el('div', 'dsw-card')
-    const loginHead = el('div', 'dsw-row')
+    const loginHead = el('div', 'dsw-cardhead')
     const loginTitle = el('div')
-    loginTitle.append(el('span', 'name', '登录状态'), document.createTextNode(' '))
+    loginTitle.append(el('span', 'name', '登录状态'))
     const badge = el('span', 'dsw-badge off', '未登录')
     loginTitle.append(badge)
     loginHead.append(loginTitle)
@@ -110,7 +176,7 @@ function Panel(): any {
     // 为什么要单独一张卡：退出登录以前只作为一个按钮塞在「手动粘贴 Token」那张卡的角落里，
     // 用户根本找不到（实测反馈）。退出账号是高频操作，必须显眼、且要能换号。
     const accountCard = el('div', 'dsw-card')
-    accountCard.append(el('div', 'name', '当前账号'))
+    accountCard.append(el('div', 'dsw-cardhead', '当前账号'))
     const accountLine = el('div', 'dsw-kv')
     accountCard.append(accountLine)
     const accountActions = el('div', 'dsw-row')
@@ -154,7 +220,7 @@ function Panel(): any {
 
     // ── 手动 token 卡 ──
     const tokenCard = el('div', 'dsw-card')
-    tokenCard.append(el('div', 'name', '手动粘贴 Token（可选路径）'))
+    tokenCard.append(el('div', 'dsw-cardhead', '手动粘贴 Token（可选路径）'))
     tokenCard.append(
       el(
         'p',
@@ -183,7 +249,7 @@ function Panel(): any {
 
     // ── 测试卡 ──
     const testCard = el('div', 'dsw-card')
-    testCard.append(el('div', 'name', '连通性测试'))
+    testCard.append(el('div', 'dsw-cardhead', '连通性测试'))
     testCard.append(el('p', 'dsw-hint', '直接经适配器发一次最小请求（会消耗一点网页端额度）：'))
     const testActions = el('div', 'dsw-row')
     testActions.style.marginTop = '6px'
@@ -199,7 +265,7 @@ function Panel(): any {
 
     // ── 模型卡 ──
     const modelsCard = el('div', 'dsw-card')
-    modelsCard.append(el('div', 'name', '可用模型（网页免费）'))
+    modelsCard.append(el('div', 'dsw-cardhead', '可用模型（网页免费）'))
     const modelsList = el('ul', 'dsw-models')
     modelsCard.append(modelsList)
     const modelsHint = el('p', 'dsw-hint', '')
