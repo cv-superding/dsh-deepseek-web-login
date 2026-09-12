@@ -159,6 +159,7 @@ prompt 字符上限默认 1,200,000（可配）。
 | `sessionCleanup` | **`deferred`** | 临时会话清理：`immediate`＝结束后 1.5s 删 / `deferred`＝攒批集中清理（默认）/ `keep`＝不删 |
 | `sessionCleanupDelayMs` | `90000` | deferred：从第一个会话入队起最多等多久就清理 |
 | `sessionCleanupBatchSize` | `8` | deferred：攒够多少个立即清理 |
+| `transport` | **`chromium`** | 传输层：`chromium`＝Electron 的 `net.fetch`（指纹与真实浏览器一致）/ `node`＝Node 原生 fetch |
 
 ### 请求节流：为什么需要，值该给多少
 
@@ -200,6 +201,27 @@ prompt 字符上限默认 1,200,000（可配）。
 > 优先级：**设置页保存的值 > entry config > 内置默认**（设置页是显式操作，不会被配置文件里的旧值盖回去），
 > 落盘位置 `${DSH_HOME:-~/.dsh}/web-login/gate.json`。「登录状态」卡里也会显示当前生效值。
 
+### 传输层（指纹）：默认走 Chromium 网络栈
+
+网页端请求的网络栈决定了「在服务端眼里你是浏览器还是一个脚本」。实测三方对比（同机同日）：
+
+| | JA4 | cipher 列表哈希 | ALPN |
+|---|---|---|---|
+| Node fetch(undici) | `t13d5212h1_…` | — | **h1** |
+| Chrome（本机 152） | `t13d1517h2_8daaf6152771_cb7bf5808d99` | `8daaf6152771` | h2 |
+| **默认：net.fetch（Electron 43）** | `t13d1516h2_8daaf6152771_806a8c22fdea` | **`8daaf6152771`** | h2 |
+
+Node 的请求在 **TLS 层**就能被判定为非浏览器（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE），
+而且这几项**调参修不了**。改用 Electron 的 `net.fetch` 后走 Chromium 内置网络栈，
+cipher 列表哈希与 Chrome 逐字节一致 —— 且**零新依赖**（不用 uTLS / curl-impersonate）。
+唯一残留差异是扩展数 16 vs 17（内置 Chromium 150 vs 本机 Chrome 152，版本差异，属正常）。
+
+设置页「传输层（指纹）」卡可以直接切换，并带一个**零额度的一键测试**
+（回显指纹 / 流式 / 鉴权三项结论）。
+
+⚠️ **切到 Chromium 后请求会跟随系统代理**（Node 则完全无视代理）。
+如果梯子关闭时系统代理仍指向 `127.0.0.1:7897`，请求会失败 —— 这时切回 `node` 即可。
+
 ## 已知限制
 
 - **同账号同时只能开一个聊天窗口**：网页端按账号限制并发生成，多开会触发服务端的**临时封禁（1 天）**——登录态没坏，但期间该账号所有请求都会被拒。要多窗口就换账号，或把多余的窗口换到别的 provider
@@ -210,9 +232,8 @@ prompt 字符上限默认 1,200,000（可配）。
 - `temperature` / `stop` / `max_tokens` 网页端无对应字段，会被忽略；usage 为**估算值**（网页端不返回 token 计数）
 - 免费额度有频控；`429` 会带上 `providerRetryAfterMs` 交给 DSH 的重试策略
 - `describe_image` 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它
-- **请求从 Node 的网络栈发出**：TLS/HTTP2 指纹与真实浏览器不同（实测 JA4 的 `h1` vs `h2`、完全不带 GREASE、
-  cipher 数量差 3 倍多）——这是「可能被识别为脚本」的底层原因之一。已在验证把传输层切到 Electron 的
-  `net.fetch`（Chromium 网络栈），见「故障排查 → 传输层诊断」
+- **默认走 Chromium 网络栈**（Electron 的 `net.fetch`），TLS/HTTP2 指纹与真实浏览器一致；
+  但它会跟随**系统代理**，梯子关着而系统代理仍指向它时会连不上 —— 设置页「传输层（指纹）」切回 Node 即可
 
 ## 测试与验证
 
@@ -227,6 +248,7 @@ node tests/check-bundle.mjs          # 产物核对（关键修复是否都进�
 node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 node tests/check-fetch-injection.mjs  # 传输层注入必须"每次现取"（防单测静默打到线上）
 node tests/check-net-diagnostics.mjs  # net.fetch 诊断通道（标记文件生命周期 + 流式探针正反向）
+node tests/check-transport.mjs       # 传输层选择（降级判定 + 注入层真的跟着变）
 ```
 
 CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个 PR 上跑上面两条命令；
@@ -312,6 +334,8 @@ echo '{"mode":"probe"}' > "$HOME/.dsh/web-login/probe-request.json"
 | ① 指纹 | `ja4` / `http_version` / `http2_hash` | 变成 `t13d…h2…` 且带 GREASE ＝ 与 Chrome 一致 |
 | ② 流式 | `hasBody` / `chunks` / `abortedEarly` | 三项都为真才能读 SSE（否则改造路线不成立） |
 | ③ 鉴权 | `status` / `body` | 200 且能读出账号 ＝ header/cookie 原样透传 |
+
+（设置页「传输层（指纹）」卡里也有**一键测试**，走的就是这个接口。）
 
 想连 DeepSeek 的 SSE 一起端到端验证（**会消耗一点额度**）：把 `probe` 换成 `stream`。
 文件被读取后会改名为 `probe-request.json.done-<时间戳>`，不会每次启动都重跑。

@@ -31,13 +31,29 @@ import {
   type SessionCleanupMode,
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
+import {
+  applyTransport,
+  readTransportSetting,
+  transportSettingsPath,
+  writeTransportSetting,
+  DEFAULT_TRANSPORT,
+  TRANSPORT_HINT,
+  type TransportKind,
+} from './transport.ts'
 
 export const name = 'dsh-deepseek-web-login'
 export const inject = ['llm', 'webServer']
 
 const API_PREFIX = '/deepseek-web-login/api'
 
-export interface Config extends AdapterConfig {}
+export interface Config extends AdapterConfig {
+  /**
+   * 传输层：网页端请求从哪个网络栈出去。
+   * `chromium`（默认）＝ Electron 的 `net.fetch`，指纹与真实浏览器一致；`node` ＝ 原来的 undici。
+   * 设置页保存的值优先于这里；环境不支持 chromium 时自动降级为 node。详见 transport.ts。
+   */
+  transport?: TransportKind
+}
 
 interface Logger {
   info?: (message: string) => void
@@ -136,6 +152,18 @@ export function apply(ctx: any, config: Config = {}): void {
     minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
     logger,
   })
+  // 传输层：默认走 Chromium 网络栈（TLS/HTTP2 指纹与真实浏览器一致，见 transport.ts 的模块注释）。
+  // 优先级：设置页保存的值 > cordis config > 内置默认；环境拿不到 electron.net.fetch 时降级为 Node。
+  let transportState = applyTransport(
+    readTransportSetting() ?? (config.transport === 'node' ? 'node' : DEFAULT_TRANSPORT),
+  )
+  logger.info?.(
+    `deepseek-web: 传输层=${transportState.effective}` +
+      (transportState.degraded
+        ? '（配置要求 Chromium，但本环境没有 electron.net.fetch，已降级为 Node）'
+        : ''),
+  )
+
   const adapterConfig: AdapterConfig = {
     maxPromptChars: config.maxPromptChars ?? 1_500_000,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
@@ -252,6 +280,40 @@ export function apply(ctx: any, config: Config = {}): void {
               sendJson(res, 200, { ok: true, ...applied, persisted: true })
               return
             }
+            // 传输层：网页端请求从哪个网络栈出去（Chromium / Node）。见 transport.ts。
+            if (req.method === 'GET' && route === '/transport') {
+              sendJson(res, 200, { ...transportState, hint: TRANSPORT_HINT, settingsPath: transportSettingsPath() })
+              return
+            }
+            if (req.method === 'POST' && route === '/transport') {
+              const body = await readJsonBody(req)
+              const wanted = body?.transport
+              if (wanted !== 'chromium' && wanted !== 'node') {
+                sendJson(res, 400, { ok: false, error: "transport 必须是 'chromium' 或 'node'" })
+                return
+              }
+              // 先即时生效（无需重启），再落盘；落盘失败如实回报，不假装成功
+              transportState = applyTransport(wanted)
+              let persisted = true
+              try {
+                writeTransportSetting(wanted)
+              } catch {
+                persisted = false
+              }
+              logger.info?.(
+                `deepseek-web: 传输层切换为 ${transportState.effective}` +
+                  (transportState.degraded ? '（要求 Chromium 但本环境不可用，已降级 Node）' : ''),
+              )
+              sendJson(res, 200, {
+                ok: true,
+                ...transportState,
+                persisted,
+                hint: TRANSPORT_HINT,
+                settingsPath: transportSettingsPath(),
+              })
+              return
+            }
+
             // 诊断：用 Electron 的 net.fetch（Chromium 网络栈）对比指纹与连通性。
             // 实现与取舍见 src/net-diagnostics.ts 的模块注释。
             if (req.method === 'POST' && route === '/diagnostics/net-fetch') {
@@ -311,6 +373,7 @@ export function apply(ctx: any, config: Config = {}): void {
                   minRequestIntervalMs: adapterConfig.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
                   sessionCleanup: cleanupMode,
                   sessionCleanupPending: sessionCleaner.pendingCount(),
+                  transport: transportState.effective,
                 },
               })
               return

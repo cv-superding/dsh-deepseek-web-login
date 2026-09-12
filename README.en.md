@@ -175,6 +175,27 @@ So the plugin now serialises calls (including title/compaction) and enforces a m
 > user action, so a stale config value never overrides it). Stored at
 > `${DSH_HOME:-~/.dsh}/web-login/gate.json`.
 
+### Transport layer: Chromium network stack by default
+
+Measured on the same machine, same day:
+
+| | JA4 | cipher list hash | ALPN |
+|---|---|---|---|
+| Node fetch (undici) | `t13d5212h1_…` | — | **h1** |
+| Chrome (local, 152) | `t13d1517h2_8daaf6152771_cb7bf5808d99` | `8daaf6152771` | h2 |
+| **default: net.fetch (Electron 43)** | `t13d1516h2_8daaf6152771_806a8c22fdea` | **`8daaf6152771`** | h2 |
+
+Node's fingerprint gives you away at the TLS layer (no HTTP/2, 3x more ciphers, no GREASE) and
+none of that is fixable by tuning. Going through Electron's `net.fetch` uses Chromium's built-in
+network stack — the cipher list hash matches Chrome byte for byte — with **zero new dependencies**
+(no uTLS, no curl-impersonate). The only residual gap is 16 vs 17 extensions (bundled Chromium 150
+vs local Chrome 152, a normal version difference).
+
+Switchable in Settings, with a **zero-quota one-click test** (echoes fingerprint / streaming / auth).
+
+⚠️ The Chromium stack **follows the system proxy** (Node ignores it entirely). If your proxy still
+points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch back to `node`.
+
 ## Known limitations
 
 - **One chat window per account**: the web client limits generation per account. Running two or more windows against the same account triggers a server-side **temporary ban (1 day)** — the login stays valid, but every request from that account is rejected until it lifts. Use one account per window, or move the extra windows to another provider

@@ -29,25 +29,14 @@
  *    （宿主进程的 HTTP 端点只有 DSH 自己的同源页面打得通，从外部 curl 会撞同源守卫；
  *    读完会把文件改名为 `*.done-<时间>`，不删文件）
  */
-import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { resolveDshHome, type WebAuth } from './auth.ts'
 import { buildDsHeaders, fetchImplKind, scheduleDeleteSession, setFetchImpl, streamWebCompletion } from './webapi.ts'
+import { electronNetFetch } from './transport.ts'
 
 export type NetFetchMode = 'probe' | 'stream'
-
-/** 取 Electron 的 `net.fetch`；不可用（非 Electron 环境 / 未暴露 net）返回 undefined。 */
-export function electronNetFetch(): typeof fetch | undefined {
-  try {
-    const electron: any = createRequire(import.meta.url)('electron')
-    const impl = electron?.net?.fetch
-    return typeof impl === 'function' ? impl : undefined
-  } catch {
-    return undefined
-  }
-}
 
 /**
  * 用一次本地分块响应，验证指定 fetch 能否**增量读流**并支持 AbortSignal。

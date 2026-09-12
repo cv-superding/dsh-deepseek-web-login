@@ -23,8 +23,10 @@ import { join } from 'node:path'
 const HOME = mkdtempSync(join(tmpdir(), 'dsh-netdiag-'))
 process.env.DSH_HOME = HOME
 
-const { consumeProbeRequest, electronNetFetch, probeRequestPath, probeStreamingSupport, runNetFetchDiagnostics, writeProbeRequest } =
+const { consumeProbeRequest, probeRequestPath, probeStreamingSupport, runNetFetchDiagnostics, writeProbeRequest } =
   await import('../src/net-diagnostics.ts')
+// electronNetFetch 归 transport 层（net-diagnostics 复用它的实现）
+const { electronNetFetch } = await import('../src/transport.ts')
 
 let passed = 0
 const failures = []

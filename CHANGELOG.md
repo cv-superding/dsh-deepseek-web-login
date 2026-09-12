@@ -2,6 +2,42 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.23 — 2026-09-12
+
+### 传输层可切换：默认改走 Chromium 网络栈（消除「非浏览器客户端」特征）
+
+0.1.22 的 net.fetch 诊断三项全绿后，把主请求路径接上。三方指纹对比（同机同日实测）：
+
+| | JA4 | cipher 列表哈希 | ALPN |
+|---|---|---|---|
+| Node fetch(undici) | `t13d5212h1_…` | — | **h1** |
+| Chrome（本机 152） | `t13d1517h2_8daaf6152771_cb7bf5808d99` | `8daaf6152771` | h2 |
+| **net.fetch（Electron 43）** | `t13d1516h2_8daaf6152771_806a8c22fdea` | **`8daaf6152771`** | h2 |
+
+cipher 列表哈希与 Chrome **逐字节一致**，ALPN 与 cipher 数量（15）也都对上；
+唯一差异是扩展数 16 vs 17 —— Electron 43 内置 Chromium 150、本机 Chrome 是 152，
+差两个大版本，属正常。流式（`response.body` + AbortSignal）与鉴权（只读 `users/current` 200）均通过。
+
+**改动**
+
+- 新增 `src/transport.ts`：`chromium` / `node` 二选一 + 设置持久化
+  （`<DSH_HOME>/web-login/transport.json`）+ 环境降级判定。
+  降级只看**能力**（拿不到 `electron.net.fetch`），**不做「请求失败后换一条重试」** ——
+  完成请求重发可能就是一次重复生成，代价比"切错了手动改回来"大得多。
+- 宿主启动时按设置**一次性注入**；webapi 保持与环境无关（不 require electron，单测天然不碰）。
+- 设置页新增「传输层（指纹）」卡：切换即时生效，外加**一键测试**（调诊断端点，零额度，
+  直接回显 ①指纹 ②流式 ③鉴权 三项结论）。环境不支持 Chromium 时该选项自动禁用并说明原因。
+- 新增接口 `GET/POST /deepseek-web-login/api/transport`；`/status` 的 config 带上 `transport`。
+- 启动日志打印 `传输层=chromium|node`，降级时显式标注。
+
+⚠️ **行为变更**：Chromium 网络栈会跟随**系统代理**，而 Node fetch 完全无视代理。
+若梯子关闭时系统代理仍指向 `127.0.0.1:7897`，切到 Chromium 后请求会失败 —— 设置页切回 Node 即可。
+这条提示常驻在卡片说明里。
+
+测试：新增 `check-transport` 11 项 —— 默认值、路径跟随 DSH_HOME、读写往返、损坏/非法值容错、
+非 Electron 环境降级且**如实标记 degraded**、切换后注入层真的跟着变、降级后 fetch 不能丢、
+反复切换稳定、`apply` 能纠正外部对注入层的改动。
+
 ## 0.1.22 — 2026-09-12
 
 ### 新增：可注入传输层 + `net.fetch` 诊断（为「请求从哪出去」做验证）
