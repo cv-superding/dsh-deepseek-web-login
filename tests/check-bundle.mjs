@@ -139,6 +139,8 @@ const checks = {
   'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),
+  // F14：spawn 的异步错误必须有监听 —— 否则 ENOENT/EACCES 会变成未捕获异常带崩宿主
+  'host 监听浏览器启动的异步错误': host.includes('spawnError'),
 }
 
 let failed = 0

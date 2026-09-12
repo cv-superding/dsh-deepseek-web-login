@@ -462,7 +462,9 @@ export function createAdapter(deps: AdapterDeps) {
    */
   async function* gatedStream(options: any): AsyncGenerator<any> {
     const purpose = typeof options?.purpose === 'string' && options.purpose ? options.purpose : 'chat'
-    const release = await gate.acquire(purpose)
+    // F11：把调用方的取消信号交给闸门 —— 否则「点停止」之后，请求仍会在排队/
+    // 等间隔里干等（间隔 2~4s、长休可达 180s），界面停了、闸门还在倒计时。
+    const release = await gate.acquire(purpose, options?.signal)
     const startedAt = Date.now()
     // ⚠️ F05（2026-09-12 审计）：在**起飞前**就把账号 id 定下来。
     // 旧实现由宿主在上报时现取 `activeAccountId()`，而这次调用可能飞几十秒 ——

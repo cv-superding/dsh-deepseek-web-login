@@ -304,19 +304,61 @@ async function discoverWasmUrl(signal?: AbortSignal): Promise<string | undefined
 export async function resolveWasmUrl(auth: WebAuth, signal?: AbortSignal): Promise<string> {
   const key = auth.wasmUrl || ''
   if (resolvedWasmUrl?.key === key) return resolvedWasmUrl.url
-  const candidates = [auth.wasmUrl, DEFAULT_WASM_URL].filter((url): url is string => !!url)
+  // 凭证里的地址先过白名单：不合法就丢弃（并告警），绝不拿去发请求
+  const fromAuth = checkedWasmUrl(auth.wasmUrl)
+  if (auth.wasmUrl && !fromAuth) {
+    lastWasmUrlRejection = auth.wasmUrl
+  }
+  const candidates = [fromAuth, checkedWasmUrl(DEFAULT_WASM_URL)].filter((url): url is string => !!url)
   for (const url of candidates) {
     if (await isReachable(url, signal)) {
       resolvedWasmUrl = { key, url }
       return url
     }
   }
-  const discovered = await discoverWasmUrl(signal)
+  const discovered = checkedWasmUrl(await discoverWasmUrl(signal))
   if (discovered) {
     resolvedWasmUrl = { key, url: discovered }
     return discovered
   }
-  return auth.wasmUrl || DEFAULT_WASM_URL
+  // 全都拿不到：宁可带着「地址不合法/找不到」的明确报错失败，也不要退回未校验的地址
+  return fromAuth ?? checkedWasmUrl(DEFAULT_WASM_URL) ?? DEFAULT_WASM_URL
+}
+
+/**
+ * F12（2026-09-12 审计）：PoW WASM 地址的白名单校验。
+ *
+ * 为什么需要：`auth.wasmUrl` 主要来自**导入的账号备份**，可被构造成任意地址
+ * （审计已复现：可打内网 / 云元数据 / file: 协议）。Electron 的 net.fetch 支持的
+ * 协议比 Node fetch 更宽，不能把后者的协议限制当成统一边界。
+ *
+ * 为什么只限到 deepseek.com 而不是写死单个主机：默认地址里带内容哈希
+ * （sha3_wasm_bg.7b9ca65ddd.wasm），官方一改就失效；而 `wasmUrl` 实际上**不是**
+ * 浏览器抓来的（browser-login 里恒为空），页面发现（discoverWasmUrl）是唯一的
+ * 兜底路径。所以保留发现能力，只把「能不能用」收白名单，既挡 SSRF 又留后路。
+ */
+const MAX_WASM_BYTES = 8 * 1024 * 1024
+
+/** 最近一次被白名单拒绝的凭证 wasmUrl（诊断/单测用；本模块无日志器，留状态而不是打日志）。 */
+export let lastWasmUrlRejection: string | undefined
+
+/** 合法则返回规范化后的地址，否则返回 undefined（调用方负责回退并告警）。 */
+export function checkedWasmUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw) return undefined
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return undefined
+  }
+  if (url.protocol !== 'https:') return undefined
+  if (url.username || url.password) return undefined
+  if (url.port && url.port !== '443') return undefined
+  const host = url.hostname.toLowerCase()
+  // 挡住 169.254.169.254 / localhost / 内网 / 任意第三方，同时容忍未来换 CDN
+  if (host !== 'deepseek.com' && !host.endsWith('.deepseek.com')) return undefined
+  if (!url.pathname.toLowerCase().endsWith('.wasm')) return undefined
+  return url.href
 }
 
 async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
@@ -324,7 +366,17 @@ async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
   const promise = (async () => {
     const resp = await activeFetch(wasmUrl, { signal: AbortSignal.timeout(15_000) })
     if (!resp.ok) throw new Error(`PoW WASM fetch failed (HTTP ${resp.status})`)
-    return WebAssembly.compile(await resp.arrayBuffer())
+    // 体积上限：PoW 用的 sha3 wasm 只有几十 KB，8MB 足够宽松又能挡住「下个几百 MB 再编译」。
+    // 先读成字节再校验，避免把超大响应直接喂给 WebAssembly.compile。
+    const declared = Number(resp.headers?.get?.('content-length') ?? Number.NaN)
+    if (Number.isFinite(declared) && declared > MAX_WASM_BYTES) {
+      throw new Error(`PoW WASM 体积异常（${declared} 字节，上限 ${MAX_WASM_BYTES}）：拒绝加载`)
+    }
+    const bytes = new Uint8Array(await resp.arrayBuffer())
+    if (bytes.byteLength > MAX_WASM_BYTES) {
+      throw new Error(`PoW WASM 体积异常（${bytes.byteLength} 字节，上限 ${MAX_WASM_BYTES}）：拒绝加载`)
+    }
+    return WebAssembly.compile(bytes)
   })()
   wasmModuleCache = { url: wasmUrl, promise }
   promise.catch(() => {
@@ -1263,31 +1315,55 @@ export function createSseState() {
 export async function* parseWebSse(body: any): AsyncGenerator<WebStreamEvent> {
   const state = createSseState()
   let eventName = ''
+  /**
+   * F13（2026-09-12 审计）：SSE 规范允许一个事件里出现**多个** `data:` 行，
+   * 收齐后要用 `\n` 拼接再整体解析。旧实现逐行 `JSON.parse`，一旦服务端把一个
+   * JSON 拆到多行（或 payload 里本身含换行），每行都解析失败 → 被
+   * `catch { continue }` 静默丢弃，表现为「流突然断了/少了一段」且无任何报错。
+   */
+  let dataLines: string[] = []
+  const flushData = (): { events: WebStreamEvent[]; done: boolean } => {
+    if (dataLines.length === 0) return { events: [], done: false }
+    const data = dataLines.join('\n').trim()
+    dataLines = []
+    if (data.length === 0) return { events: [], done: false }
+    if (data === '[DONE]') return { events: Array.from(state.finish()), done: true }
+    let parsed: any
+    try {
+      parsed = JSON.parse(data)
+    } catch {
+      return { events: [], done: false }
+    }
+    return { events: Array.from(state.handle(parsed, eventName)), done: false }
+  }
+
   for await (const line of iterateLines(body)) {
     if (line.length === 0) {
+      // 空行 = 事件结束
+      const flushed = flushData()
+      for (const event of flushed.events) yield event
+      if (flushed.done) return
       eventName = ''
       continue
     }
     if (line.startsWith(':')) continue
     if (line.startsWith('event:')) {
+      // 新事件名出现 = 上一个事件结束（有些实现不补空行，这里也要收口）
+      const flushed = flushData()
+      for (const event of flushed.events) yield event
+      if (flushed.done) return
       eventName = line.slice(6).trim()
       continue
     }
-    if (!line.startsWith('data:')) continue
-    const data = line.slice(5).trim()
-    if (data === '[DONE]') {
-      for (const event of state.finish()) yield event
-      return
-    }
-    let parsed: any
-    try {
-      parsed = JSON.parse(data)
-    } catch {
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim())
       continue
     }
-    for (const event of state.handle(parsed, eventName)) yield event
-    eventName = ''
   }
+  // 流结束：末尾可能没有空行，攒下的 data 不能丢
+  const tail = flushData()
+  for (const event of tail.events) yield event
+  if (tail.done) return
   for (const event of state.finish()) yield event
 }
 

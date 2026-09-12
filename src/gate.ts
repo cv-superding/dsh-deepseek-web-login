@@ -212,7 +212,8 @@ export interface RequestGateOptions {
 
 export interface RequestGate {
   /** 取得放行许可；返回的函数必须调用一次（幂等）以释放并让出队首。 */
-  acquire(label?: string): Promise<() => void>
+  /** signal 可在排队/等间隔期间取消（F11）；取消时抛 AbortError 且闸门不会锁死。 */
+  acquire(label?: string, signal?: AbortSignal): Promise<() => void>
   /** 当前状态（诊断/测试用）。 */
   stats(): { running: number; waiting: number; lastFinishedAt: number }
   /** 读取当前生效的节流设置。 */
@@ -249,13 +250,41 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   /** 是否已经有调用结束过 —— 首次调用不该被间隔规则拖住。 */
   let hasFinished = false
 
-  async function acquire(label = 'call'): Promise<() => void> {
+  async function acquire(label = 'call', signal?: AbortSignal): Promise<() => void> {
     let releaseMine!: () => void
     const mine = new Promise<void>((resolve) => {
       releaseMine = resolve
     })
     const prev = tail
     tail = prev.then(() => mine)
+
+    const aborted = (): Error => {
+      const error = new Error(`「${label}」在闸门等待中被取消`)
+      error.name = 'AbortError'
+      return error
+    }
+    /** 让等待可被中断：abort 时立刻 reject，不等定时器/前序请求。 */
+    const waitOrAbort = (inner: Promise<unknown>): Promise<void> => {
+      if (!signal) return inner.then(() => undefined)
+      if (signal.aborted) return Promise.reject(aborted())
+      return new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          reject(aborted())
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        inner.then(
+          () => {
+            signal.removeEventListener('abort', onAbort)
+            resolve()
+          },
+          (error) => {
+            signal.removeEventListener('abort', onAbort)
+            reject(error)
+          },
+        )
+      })
+    }
 
     waiting += 1
     try {
@@ -264,11 +293,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
         if (running > 0 || waiting > 1) {
           logger?.debug?.(`deepseek-web: 「${label}」排队等待（前面还有 ${running} 个在跑 / ${waiting - 1} 个在等）`)
         }
-        await prev
+        await waitOrAbort(prev)
       }
-    } finally {
-      waiting -= 1
-    }
 
     // 长任务保护：先算"是不是已经连着跑了很久"。
     // 距上次结束已经过了很久 → 说明人是歇过的，连续计数归零。
@@ -294,8 +320,17 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
               `等 ${Math.round(waitMs)}ms 再发「${label}」（防账号级限流）`,
           )
         }
-        await sleep(waitMs)
+        await waitOrAbort(sleep(waitMs))
       }
+    }
+
+    } catch (error) {
+      // 取消（或前序出错）时必须把自己从队列里摘掉：本节点的 mine 一旦不 resolve，
+      // 后面排队的请求会在 tail 上永久卡住 —— 闸门就锁死了。
+      releaseMine()
+      throw error
+    } finally {
+      waiting -= 1
     }
 
     running += 1

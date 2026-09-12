@@ -293,6 +293,30 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
     return { ok: false, reason: 'spawn-failed', message: `启动 ${browser.name} 失败：${error?.message ?? error}` }
   }
 
+  // ⚠️ F14（2026-09-12 审计）：spawn 的失败有**一大部分是异步**的
+  // （ENOENT / EACCES / 被安全软件拦截，都以 'error' 事件异步到达）。
+  // 上面那个 try/catch 只接得住**同步**抛错；不监听 'error' 的话，
+  // 异步失败会变成未捕获异常 —— 后果是把**整个 DSH 宿主进程**带崩，
+  // 而这里真实语义只是"登录窗口没起来"，完全不该有这个量级的破坏力。
+  let spawnError: Error | undefined
+  child.on('error', (error: Error) => {
+    spawnError = error
+    progress(`${browser.name} 启动失败（异步错误）：${error?.message ?? error}`)
+  })
+  // 给异步错误一个冒头的机会：ENOENT/EACCES 都是立刻触发，300ms 足够，
+  // 不必让用户干等 waitForDebugPort 的 25 秒才看到原因。
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  if (spawnError) {
+    try {
+      child.kill()
+    } catch {}
+    return {
+      ok: false,
+      reason: 'spawn-failed',
+      message: `启动 ${browser.name} 失败：${spawnError.message}`,
+    }
+  }
+
   const cleanupBrowser = (): void => {
     try {
       child.kill()

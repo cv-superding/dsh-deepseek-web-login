@@ -567,6 +567,79 @@ test('长任务保护：设置可改（configure）并回显在 settings()', () 
   assert.equal(gate.settings().longRunThreshold, 0, '负数夹到 0（= 关闭）')
 })
 
+await test('F11 闸门可取消：已取消的 signal 立刻抛 AbortError', async () => {
+  const gate = createRequestGate({
+    allowConcurrent: false,
+    minIntervalMs: 5_000,
+    maxIntervalMs: 5_000,
+    longRunThreshold: 0,
+    now: () => 0,
+    sleep: async () => {},
+  })
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(() => gate.acquire('chat', controller.signal), (error) => error.name === 'AbortError')
+})
+
+await test('F11 闸门可取消：取消后闸门不锁死', async () => {
+  const gate = createRequestGate({
+    allowConcurrent: false,
+    minIntervalMs: 0,
+    maxIntervalMs: 0,
+    longRunThreshold: 0,
+    now: () => 0,
+    sleep: async () => {},
+  })
+  const controller = new AbortController()
+  controller.abort()
+  try {
+    await gate.acquire('chat', controller.signal)
+  } catch {}
+  const release = await gate.acquire('chat')
+  assert.equal(typeof release, 'function', '取消之后后续请求仍要能拿到许可')
+  release()
+})
+
+await test('F11 闸门可取消：排队等待中取消 → 能退出且不放任队列卡死', async () => {
+  const gate = createRequestGate({
+    allowConcurrent: false,
+    minIntervalMs: 0,
+    maxIntervalMs: 0,
+    longRunThreshold: 0,
+    now: () => 0,
+    sleep: async () => {},
+  })
+  const hold = await gate.acquire('chat') // 占住不释放，让第二个进入排队
+  const controller = new AbortController()
+  let settled = false
+  let caught
+  const pending = gate.acquire('chat', controller.signal).then(
+    () => {
+      settled = true
+    },
+    (error) => {
+      settled = true
+      caught = error
+    },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 5)) // 让它真正 await 在队列上
+  controller.abort()
+  await pending
+  assert.ok(settled, '取消后必须 settle（不能永远悬着）')
+  assert.equal(caught?.name, 'AbortError')
+
+  // 关键：被取消的节点必须把自己摘出队列，否则后面排队的请求永久卡住
+  hold()
+  const raced = await Promise.race([
+    gate.acquire('chat').then((release) => {
+      release()
+      return 'got'
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), 300)),
+  ])
+  assert.equal(raced, 'got', '取消之后队列必须还在流动（否则闸门被锁死）')
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
