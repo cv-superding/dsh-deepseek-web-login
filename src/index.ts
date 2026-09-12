@@ -11,6 +11,7 @@
  */
 import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
 import {
   createRequestGate,
@@ -27,10 +28,29 @@ import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFinge
 import {
   validateAuth,
   createSessionCleaner,
+  currentFetch,
   DEFAULT_SESSION_CLEANUP,
   type SessionCleanupMode,
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
+import { noteCall as writeLedgerEntry, pruneLedger, summarizeLedger, ledgerDir, LEDGER_KEEP_DAYS } from './ledger.ts'
+import { startProbeLoop } from './probe.ts'
+import { checkForUpdate, RELEASE_REPO } from './update-check.ts'
+import { pluginVersion } from './version.ts'
+import { webLoginDir } from './paths.ts'
+import {
+  accountsDir,
+  accountsFootprint,
+  accountTitle,
+  activeAccountId,
+  exportAccountsToFile,
+  importAccounts,
+  listAccounts,
+  migrateLegacyAuthIfNeeded,
+  removeAccount,
+  setActiveAccount,
+  updateAccount,
+} from './accounts.ts'
 import {
   applyTransport,
   readTransportSetting,
@@ -53,6 +73,13 @@ export interface Config extends AdapterConfig {
    * 设置页保存的值优先于这里；环境不支持 chromium 时自动降级为 node。详见 transport.ts。
    */
   transport?: TransportKind
+  /**
+   * 登录态主动探活的间隔（毫秒），默认 30 分钟；设 0 关闭。
+   *
+   * 探活走**只读**的 `users/current`（零额度），目的是在任务跑到一半之前发现登录态失效。
+   * 关掉它的代价就是"过期只能靠一次失败的调用才发现"。
+   */
+  probeIntervalMs?: number
 }
 
 interface Logger {
@@ -152,6 +179,13 @@ export function apply(ctx: any, config: Config = {}): void {
     minIntervalMs: savedGate?.minRequestIntervalMs ?? config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
     logger,
   })
+  // 旧版（≤0.1.25）只有一份 deepseek-auth.json；首次启动时迁进账号库。
+  // 只在「库为空 且 旧文件在」时跑一次，旧文件改名留档（不删），所以不会重复导入。
+  const migratedAccount = migrateLegacyAuthIfNeeded()
+  if (migratedAccount) {
+    logger.info?.(`deepseek-web: 已把旧的单账号凭证迁移进账号库（${migratedAccount.id}）`)
+  }
+
   // 传输层：默认走 Chromium 网络栈（TLS/HTTP2 指纹与真实浏览器一致，见 transport.ts 的模块注释）。
   // 优先级：设置页保存的值 > cordis config > 内置默认；环境拿不到 electron.net.fetch 时降级为 Node。
   let transportState = applyTransport(
@@ -191,9 +225,81 @@ export function apply(ctx: any, config: Config = {}): void {
   })
 
   const getAuth = (): WebAuth | undefined => readAuth()
+
+  // 台账按天滚动清理（保留 LEDGER_KEEP_DAYS 天），启动时做一次就够。
+  try {
+    const pruned = pruneLedger(LEDGER_KEEP_DAYS)
+    if (pruned > 0) logger.info?.(`deepseek-web: 已清理 ${pruned} 个过期台账文件`)
+  } catch {}
+
+  /**
+   * 每次模型调用的结果上报（adapter 的 noteCall 钩子）。做两件事：
+   *
+   *  1. **把"账号级限制"学到账号上**。这个状态只能在生成请求被拒时学到
+   *     （受限期间 `users/current` 依然 200），所以必须在这里记；成功一次且已过解除时间就清掉。
+   *  2. 写本地台账，供设置页看请求密度与失败分类。
+   *
+   * 全程 try/catch：旁路设施绝不能影响调用本身。
+   */
+  const recordCallOutcome = (info: {
+    purpose: string
+    ok: boolean
+    ms: number
+    code?: string
+    message?: string
+    mutedUntilMs?: number
+    throttled?: boolean
+  }): void => {
+    try {
+      const accountId = activeAccountId()
+      const muted = Number.isFinite(info.mutedUntilMs)
+      if (!info.ok && muted && accountId) {
+        updateAccount(accountId, {
+          limit: { untilMs: Number(info.mutedUntilMs), observedAt: new Date().toISOString() },
+        })
+        logger.warn?.(
+          `deepseek-web: 账号被临时限制，已记录解除时间 ${new Date(Number(info.mutedUntilMs)).toLocaleString()}`,
+        )
+      }
+      if (info.ok && accountId) {
+        const record = listAccounts().find((item) => item.id === accountId)
+        // 限制时间已过 + 这次生成成功 → 确实解除了，清掉标记（不靠猜）
+        if (record?.limit && Date.now() >= record.limit.untilMs) {
+          updateAccount(accountId, { limit: undefined })
+          logger.info?.('deepseek-web: 账号级限制已解除，已清除本地的限制标记')
+        }
+      }
+      writeLedgerEntry({
+        at: Date.now(),
+        ...(accountId ? { accountId } : {}),
+        purpose: info.purpose,
+        ok: info.ok,
+        ms: info.ms,
+        ...(info.code ? { code: info.code } : {}),
+        ...(muted ? { muted: true } : {}),
+        ...(info.throttled ? { throttled: true } : {}),
+      })
+    } catch {}
+  }
+
+  // 登录态主动探活：启动后 20 秒探一次，之后每 probeIntervalMs 一次（0 = 关闭）。
+  const probeIntervalMs = config.probeIntervalMs ?? 30 * 60_000
+  ctx.effect(() =>
+    startProbeLoop({
+      intervalMs: probeIntervalMs,
+      getAuth: () => readAuth(),
+      logger,
+    }),
+  )
+  logger.info?.(
+    probeIntervalMs > 0
+      ? `deepseek-web: 登录态探活已开启，每 ${Math.round(probeIntervalMs / 60_000)} 分钟一次（只读、零额度）`
+      : 'deepseek-web: 登录态探活已关闭（probeIntervalMs=0）',
+  )
   // 附件服务（ctx.attachments）：图片输入所需。用 ctx.get 取（可选依赖，缺省则图片降级为文本）
   const adapter = createAdapter({
     getAuth,
+    noteCall: recordCallOutcome,
     gate,
     sessionCleaner,
     config: adapterConfig,
@@ -280,6 +386,108 @@ export function apply(ctx: any, config: Config = {}): void {
               sendJson(res, 200, { ok: true, ...applied, persisted: true })
               return
             }
+            // 本地调用台账：请求密度 + 失败分类（用来判断节流到底有没有效）
+            if (req.method === 'GET' && route === '/ledger') {
+              const hours = Math.min(72, Math.max(1, Number(url.searchParams.get('hours')) || 24))
+              sendJson(res, 200, summarizeLedger(hours))
+              return
+            }
+            // 检查更新：读自身版本 → 比对 GitHub Releases latest。
+            // 走当前传输层；8 秒超时；失败如实返回原因（国内连不上 GitHub 很正常）。
+            if (req.method === 'POST' && route === '/update-check') {
+              const result = await checkForUpdate(pluginVersion(), currentFetch)
+              sendJson(res, 200, { ...result, repo: RELEASE_REPO })
+              return
+            }
+
+            // ── 账号库：多账号并存 + 一键切换 ─────────────────────────────
+            // ⚠️ 返回给界面的**只有元信息**（掩码账号、时间、限制状态等），**永不回传凭证**：
+            // 设置页跑在渲染层，把它能触及的敏感面收窄没有坏处。
+            if (req.method === 'GET' && route === '/accounts') {
+              const activeId = activeAccountId()
+              sendJson(res, 200, {
+                activeId: activeId ?? null,
+                accounts: listAccounts().map((record) => ({
+                  id: record.id,
+                  title: accountTitle(record, maskIdentifier),
+                  display: record.user?.display ? maskIdentifier(record.user.display) : '',
+                  label: record.label ?? '',
+                  unverified: record.unverified === true,
+                  capturedAt: record.capturedAt,
+                  lastVerifiedAt: record.lastVerifiedAt ?? null,
+                  lastVerifyError: record.lastVerifyError ?? null,
+                  limit: record.limit ?? null,
+                  isActive: record.id === activeId,
+                })),
+                footprint: accountsFootprint(),
+              })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/switch') {
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              if (!setActiveAccount(id)) {
+                sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除）' })
+                return
+              }
+              logger.info?.(`deepseek-web: 当前账号已切换为 ${id}`)
+              sendJson(res, 200, { ok: true, activeId: id })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/rename') {
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              const label = String(body?.label ?? '').slice(0, 40)
+              if (!updateAccount(id, { label })) {
+                sendJson(res, 404, { ok: false, error: '账号不存在' })
+                return
+              }
+              sendJson(res, 200, { ok: true, id, label })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/remove') {
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              if (!removeAccount(id)) {
+                sendJson(res, 404, { ok: false, error: '账号不存在' })
+                return
+              }
+              logger.info?.(`deepseek-web: 已从账号库移除 ${id}`)
+              sendJson(res, 200, { ok: true, removed: id, activeId: activeAccountId() ?? null })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/export') {
+              // 写到本机文件后只回传路径（不把明文 token 放进 HTTP 响应）
+              try {
+                const result = exportAccountsToFile()
+                sendJson(res, 200, { ok: true, ...result, warning: '导出文件含可完整登录的凭证，请妥善保管、勿分享' })
+              } catch (error: any) {
+                sendJson(res, 500, { ok: false, error: `导出失败：${error?.message ?? error}` })
+              }
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/import') {
+              const body = await readJsonBody(req)
+              const path = typeof body?.path === 'string' ? body.path.trim() : ''
+              let payload: unknown = body?.payload
+              if (!payload && path) {
+                try {
+                  payload = JSON.parse(readFileSync(path, 'utf8'))
+                } catch (error: any) {
+                  sendJson(res, 400, { ok: false, error: `读取导入文件失败：${error?.message ?? error}` })
+                  return
+                }
+              }
+              if (!payload) {
+                sendJson(res, 400, { ok: false, error: '请提供要导入的文件路径（或 payload）' })
+                return
+              }
+              const result = importAccounts(payload)
+              logger.info?.(`deepseek-web: 账号库导入完成（新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}）`)
+              sendJson(res, 200, { ok: true, ...result, activeId: activeAccountId() ?? null })
+              return
+            }
+
             // 传输层：网页端请求从哪个网络栈出去（Chromium / Node）。见 transport.ts。
             if (req.method === 'GET' && route === '/transport') {
               sendJson(res, 200, { ...transportState, hint: TRANSPORT_HINT, settingsPath: transportSettingsPath() })
@@ -355,7 +563,21 @@ export function apply(ctx: any, config: Config = {}): void {
                   canOpenWindow: canOpenElectronWindow(),
                   browser: findSystemBrowser()?.name ?? null,
                 },
-                auth: summary,
+                // 账号元信息（限制解除时间 / 探活结果）跟着 auth 一起给界面。
+                // 注意 limit 只能从"生成被拒"里学到 —— 受限期间 users/current 依然 200。
+                // 本地状态位置（「关于」页展示）
+                paths: {
+                  webLogin: webLoginDir(),
+                  accounts: accountsDir(),
+                  ledger: ledgerDir(),
+                },
+                auth: {
+                  ...summary,
+                  limitUntilMs: Number.isFinite((auth as any)?.limit?.untilMs) ? (auth as any).limit.untilMs : null,
+                  limitObservedAt: (auth as any)?.limit?.observedAt ?? null,
+                  lastVerifiedAt: (auth as any)?.lastVerifiedAt ?? null,
+                  lastVerifyError: (auth as any)?.lastVerifyError ?? null,
+                },
                 validation,
                 models: MODEL_SPECS.map((spec) => ({
                   id: spec.id,
@@ -374,6 +596,8 @@ export function apply(ctx: any, config: Config = {}): void {
                   sessionCleanup: cleanupMode,
                   sessionCleanupPending: sessionCleaner.pendingCount(),
                   transport: transportState.effective,
+                  version: pluginVersion(),
+                  probeIntervalMs,
                 },
               })
               return

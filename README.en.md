@@ -56,9 +56,10 @@ The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so i
 
 ## Screenshots
 
-The settings panel is split into **4 tabs** (one page at a time): **Account** (login status /
-current account / manual token) · **Models** (available models / connectivity test) ·
-**Anti-throttle** (request pacing / session cleanup) · **Transport** (fingerprint + one-click test).
+The settings panel is split into **5 tabs** (one page at a time): **Account** (login status /
+current account / **account library** / manual token) · **Models** (available models /
+connectivity test) · **Anti-throttle** (request pacing / session cleanup / **call ledger**) ·
+**Transport** (fingerprint + one-click test) · **About** (version & updates / data locations / risks).
 The action-feedback strip sits above the tab bar, so it stays visible from any tab.
 
 Settings panel (real screenshot, taken before the tab split): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.
@@ -148,6 +149,8 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `sessionCleanup` | **`deferred`** | Temp-session cleanup: `immediate` (delete 1.5s after each call) / `deferred` (batched, default) / `keep` (never delete) |
 | `sessionCleanupDelayMs` | `90000` | deferred: max wait before flushing the queue |
 | `sessionCleanupBatchSize` | `8` | deferred: flush as soon as this many sessions are queued |
+| `transport` | **`chromium`** | Transport: `chromium` = Electron `net.fetch` (browser-identical fingerprint) / `node` = Node fetch |
+| `probeIntervalMs` | `1800000` | Read-only login-state probe interval (ms); `0` disables. Uses `users/current`, zero quota |
 
 ### Why throttling is on by default, and which values to use
 
@@ -200,6 +203,30 @@ Switchable in Settings, with a **zero-quota one-click test** (echoes fingerprint
 
 ⚠️ The Chromium stack **follows the system proxy** (Node ignores it entirely). If your proxy still
 points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch back to `node`.
+
+### Account library, call ledger, login probe
+
+- **Account library** (`~/.dsh/web-login/accounts/`): keep several DeepSeek web accounts, switch with
+  one click, rename, remove, export/import backups. Switching takes effect on the **next** request.
+  **Switching accounts does not lose your conversation** — the transcript lives locally in DSH and
+  every request re-sends the whole history; the account is just a pass and a quota owner.
+- **Call ledger**: per-day JSONL (metadata only, no conversation content or credentials) showing the
+  **gap distribution between chat calls** (p50/p90/min — the minimum is what reveals bursts) and the
+  **failure breakdown** (throttled / account muted / auth / network).
+- **Login probe**: a read-only `users/current` check 20s after startup and every 30 minutes
+  (`probeIntervalMs`, zero quota, can be disabled) so an expired login is discovered *before* a long
+  task fails midway.
+- **Mute countdown**: when the account is temporarily limited, the panel shows the remaining time.
+  This state can only be learned from a **rejected generation** — read-only endpoints still return
+  200 while muted, so the probe cannot detect it.
+
+> ⚠️ **There is deliberately no auto-rotation between accounts.** Switching is manual only.
+> A real person does not swap accounts and keep sending within minutes — that is a very strong
+> machine-behaviour signal, and it directly conflicts with the transport-fingerprint / randomized
+> pacing / session-cleanup work this plugin does to look less like a script. Providers also link
+> accounts (same device, same IP, same fingerprint, similar behaviour), and a "same person, many
+> accounts" verdict is usually treated more harshly than single-account overuse.
+> Exported backups contain fully usable credentials — never share them or commit them.
 
 ## Known limitations
 

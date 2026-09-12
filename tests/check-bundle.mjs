@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 
 const host = readFileSync('lib/index.js', 'utf8')
 const client = readFileSync('lib/client.js', 'utf8')
+// 源码（注释不会进 bundle，涉及"注释里必须写明风险"的断言只能读源文件）
+const srcAccounts = readFileSync('src/accounts.ts', 'utf8')
 
 const checks = {
   'XML 工具调用解析器': host.includes('function_calls') && host.includes('<parameter'),
@@ -63,6 +65,22 @@ const checks = {
   'client 操作反馈常驻标签栏之上（dsw-alert）': client.includes('dsw-alert'),
   'client 副标题整词不拆（deepseek-web 不会被断在连字符）': client.includes('dsw-nobreak'),
   'client 传输层卡（切换 + 一键测试）': client.includes('/transport') && client.includes('测试传输层'),
+  // ── 0.1.26：账号库 / 受限倒计时 / 探活 / 台账 / 检查更新 ──
+  '账号库路由齐全（列表/切换/重命名/移除/导入/导出）': ['/accounts/switch', '/accounts/rename', '/accounts/remove', '/accounts/import', '/accounts/export'].every((route) => host.includes(route)),
+  '账号库接口不回传凭证（只给元信息）': host.includes('accountsFootprint') && host.includes('isActive: record.id === activeId'),
+  '账号库支持导入去重（serverId / token）': host.includes('serverId') && host.includes('upsertAccount'),
+  '受限解除时间随错误结构化传递（不靠解析文案）': host.includes('mutedUntilMs'),
+  '受限状态落到账号上（限流时记录、成功且过期后清除）': host.includes('recordCallOutcome') && host.includes('账号级限制已解除'),
+  '登录态主动探活（只读、零额度、可关）': host.includes('startProbeLoop') && host.includes('probeIntervalMs'),
+  '调用台账（间隔分布 + 失败分类）': host.includes('summarizeLedger') && host.includes('percentile') && host.includes('账号被限制') && host.includes('限流（发太频繁）'),
+  '台账只统计对话类调用（标题生成会污染间隔分布）': /purpose\s*===\s*["']chat["']/.test(host),
+  '检查更新（GitHub Releases + 优雅失败）': host.includes('releases/latest') && host.includes('isNewer') && host.includes('连接 GitHub 超时'),
+  '版本号兜底常量（打包后读不到 package.json 也能显示）': host.includes('FALLBACK_VERSION'),
+  'client 账号库卡片': client.includes('账号库') && client.includes('导出备份') && client.includes('确认移除？'),
+  'client 受限倒计时（独立 30 秒定时器）': client.includes('dsw-limit') && client.includes('countdownTimer'),
+  'client 台账小柱图（手写 SVG，不引依赖）': client.includes('dsw-spark') && client.includes('sparkSvg'),
+  'client 关于页（检查更新 + 数据位置 + 风险说明）': client.includes('检查更新') && client.includes('数据位置') && client.includes('为什么没有「自动换号」'),
+  '源码注释写明为何不做自动换号（风险可见）': srcAccounts.includes('刻意**不做自动轮换**') && srcAccounts.includes('关联'),
   'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
   'client 槽位名合法': client.includes('settings.section'),

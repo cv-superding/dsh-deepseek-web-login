@@ -7,6 +7,9 @@
  *     「浏览器窗口登录」打开的也是已登录页面，根本换不了号；
  *  3) 旧实现卸载插件时调用 logout() → 热重载一下就被登出了（现在改为只关窗口）。
  *
+ * 0.1.26 起：存储层从「单文件 deepseek-auth.json」换成「账号库 accounts/<id>.json」，
+ * 本测试同步改为断言"账号文件被删掉 + 当前指针被清掉"，语义不变（登出就要真的登出）。
+ *
  * 用法: node tests/check-logout.mjs
  */
 import assert from 'node:assert/strict'
@@ -17,7 +20,9 @@ import { join } from 'node:path'
 const home = mkdtempSync(join(tmpdir(), 'dswl-logout-'))
 process.env.DSH_HOME = home
 
-const { authFilePath, readAuth, writeAuth } = await import('../src/auth.ts')
+const { readAuth, writeAuth } = await import('../src/auth.ts')
+// 存储层已从「单文件」换成「账号库」，所以这里查的是账号文件而不是固定的 authFilePath
+const { accountFilePath, activeAccountId, listAccounts } = await import('../src/accounts.ts')
 const { closeLoginWindow, clearLoginPartition, getLastLoginResult, logout } = await import('../src/login.ts')
 
 let passed = 0
@@ -43,10 +48,12 @@ function seedAuth() {
   })
 }
 
-await test('前提：凭证能写入并能读回', async () => {
+await test('前提：凭证能写入并能读回（且进入账号库）', async () => {
   seedAuth()
   assert.equal(readAuth()?.token, 't'.repeat(64))
-  assert.ok(existsSync(authFilePath()))
+  const stored = listAccounts()
+  assert.equal(stored.length, 1, '写入后账号库应恰好有一条')
+  assert.ok(existsSync(accountFilePath(stored[0].id)), '账号文件应落盘')
 })
 
 await test('非 Electron 环境：分区清理返回 false（不抛错）', async () => {
@@ -66,10 +73,13 @@ await test('logout()：删凭证 + 清浏览器登录 profile，并留下可读�
   mkdirSync(profileDir, { recursive: true })
   writeFileSync(join(profileDir, 'marker.txt'), 'fake-login-state')
 
+  const doomedId = listAccounts()[0].id
   const cleared = await logout()
   assert.equal(cleared, true, '本环境没有 Electron 分区，但浏览器 profile 应被清掉 → true')
   assert.ok(!readAuth()?.token, '凭证必须被删除')
-  assert.ok(!existsSync(authFilePath()), '凭证文件必须被删除，而不只是清空内容')
+  assert.ok(!existsSync(accountFilePath(doomedId)), '账号文件必须被删除，而不只是清空内容')
+  assert.equal(listAccounts().length, 0, '账号库里不该再残留这条')
+  assert.equal(activeAccountId(), undefined, '当前指针必须清掉（否则会指向悬空账号）')
   assert.ok(!existsSync(profileDir), '浏览器登录 profile 必须被删除（否则换号会复用旧登录态）')
   const result = getLastLoginResult()
   assert.ok(result && /退出/.test(result.message), `最近结果应说明已退出：${JSON.stringify(result)}`)

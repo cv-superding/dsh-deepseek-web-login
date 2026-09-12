@@ -3,21 +3,27 @@
  *
  * 登录凭证来自 chat.deepseek.com 网页端（浏览器窗口捕获或手动粘贴）：
  * Bearer token + cookie + 反爬指纹头（x-hif-*）+ PoW WASM 地址。
- * 存放于 `${DSH_HOME || ~/.dsh}/web-login/deepseek-auth.json`（插件自治，
+ *
+ * 存储已从「单个文件」升级成「**账号库**」（见 accounts.ts）：本文件只保留
+ * 类型 + 存取门面 —— `readAuth()` 取当前生效的账号、`writeAuth()` 写入并设为当前、
+ * `clearAuth()` 移除当前账号。这样适配器、登录流程、诊断等**所有调用点一行都不用改**。
+ *
+ * 位置：`${DSH_HOME || ~/.dsh}/web-login/accounts/<id>.json`（插件自治，
  * 不进 settings/credentials 缝合口，避免敏感凭据落入通用配置面）。
  */
-import { homedir } from 'node:os'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import {
+  activeAccount,
+  clearActiveAccount,
+  removeAccount,
+  setActiveAccount,
+  upsertAccount,
+} from './accounts.ts'
+import { resolveDshHome } from './paths.ts'
 
-/** DSH 主目录（与生态一致的解析顺序）。 */
-export function resolveDshHome(): string {
-  return process.env.DSH_HOME || join(homedir(), '.dsh')
-}
-
-export function authFilePath(): string {
-  return join(resolveDshHome(), 'web-login', 'deepseek-auth.json')
-}
+// resolveDshHome 搬去了 paths.ts（那是为了避开 auth 与 accounts 的 import 环）。
+// 这里原样再导出：外部既有代码（transport.ts / net-diagnostics.ts）不用改。
+export { resolveDshHome }
 
 /** 一份已捕获的网页端登录凭证。 */
 export interface WebAuth {
@@ -45,54 +51,34 @@ export interface WebAuth {
   user?: { id?: string; display?: string }
 }
 
+/** 当前生效的登录凭证（没有选择账号 → undefined）。 */
 export function readAuth(): WebAuth | undefined {
-  try {
-    const raw = readFileSync(authFilePath(), 'utf8')
-    const parsed = JSON.parse(raw)
-    if (typeof parsed?.token === 'string' && parsed.token.length > 0) {
-      return {
-        token: parsed.token,
-        cookie: typeof parsed.cookie === 'string' ? parsed.cookie : '',
-        hifDliq: typeof parsed.hifDliq === 'string' ? parsed.hifDliq : '',
-        hifLeim: typeof parsed.hifLeim === 'string' ? parsed.hifLeim : '',
-        wasmUrl: typeof parsed.wasmUrl === 'string' ? parsed.wasmUrl : '',
-        userAgent: typeof parsed.userAgent === 'string' ? parsed.userAgent : '',
-        ...(parsed.extraHeaders && typeof parsed.extraHeaders === 'object' ? { extraHeaders: parsed.extraHeaders } : {}),
-        capturedAt: typeof parsed.capturedAt === 'string' ? parsed.capturedAt : '',
-        ...(parsed.unverified === true ? { unverified: true } : {}),
-        ...(parsed.user && typeof parsed.user === 'object' ? { user: parsed.user } : {}),
-      }
-    }
-  } catch {}
-  return undefined
+  return activeAccount()
 }
 
+/**
+ * 写入/更新凭证。
+ *
+ * 语义：**写进去的那个就是接下来要用的那个** —— 所有调用点（浏览器捕获、
+ * 手动粘 token、登录流程回填账号信息）表达的都是这个意思，所以这里顺带把它设为当前账号。
+ * 同一个账号重复写入会**更新原记录**（按 serverId / token 去重，见 accounts.upsertAccount）。
+ */
 export function writeAuth(auth: WebAuth): void {
-  const file = authFilePath()
-  mkdirSync(join(file, '..'), { recursive: true })
-  // 先写临时文件再原子替换，避免半截 JSON 毒化读取。
-  const tmp = `${file}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(auth, null, 2), 'utf8')
-  try {
-    rmSync(file, { force: true })
-    renameSync(tmp, file)
-  } catch (error) {
-    try {
-      rmSync(tmp, { force: true })
-    } catch {}
-    throw error
-  }
-  if (process.platform !== 'win32') {
-    try {
-      chmodSync(file, 0o600)
-    } catch {}
-  }
+  const record = upsertAccount(auth)
+  setActiveAccount(record.id)
 }
 
+/**
+ * 退出登录：把当前账号从库里**移除**（并清掉当前指针）。
+ *
+ * 库里还有其它账号时**刻意不自动切换**：自动换号会让人以为"我只是登出了，
+ * 怎么又用上另一个号了"。界面会提示"账号库里还有 N 个，点「切换」即可使用"，
+ * 由人明确选择。
+ */
 export function clearAuth(): void {
-  try {
-    rmSync(authFilePath(), { force: true })
-  } catch {}
+  const active = activeAccount()
+  if (active) removeAccount(active.id)
+  clearActiveAccount()
 }
 
 export function hasUsableAuth(auth: WebAuth | undefined): auth is WebAuth {
@@ -145,11 +131,23 @@ export function maskIdentifier(raw: string): string {
 export class AdapterLlmError extends Error {
   readonly failure: { message: string; code: string; status?: number; providerRetryAfterMs?: number }
   readonly code: string
+  /**
+   * 账号级限制的**解除时间**（毫秒时间戳），仅在 `user is muted` 时有值。
+   *
+   * 为什么要单独带一个字段：`providerRetryAfterMs` 是相对值（给重试策略用的），
+   * 而"记下这个账号被限到什么时候"需要绝对值。让调用方去解析错误文案里的时间是不可靠的。
+   */
+  readonly mutedUntilMs?: number
 
-  constructor(message: string, code: string, options: { status?: number; providerRetryAfterMs?: number; cause?: unknown } = {}) {
+  constructor(
+    message: string,
+    code: string,
+    options: { status?: number; providerRetryAfterMs?: number; mutedUntilMs?: number; cause?: unknown } = {},
+  ) {
     super(message)
     this.name = 'LlmError'
     this.code = code
+    if (options.mutedUntilMs !== undefined) this.mutedUntilMs = options.mutedUntilMs
     this.failure = {
       message,
       code,

@@ -171,6 +171,14 @@ export function setFetchImpl(impl?: typeof fetch): void {
   injectedFetch = impl
 }
 
+/**
+ * 当前生效的 fetch（诊断/检查更新这类**旁路请求**用它，从而与网页端请求走同一个传输层）。
+ * 注意它已经做了"每次现取"，直接当 fetch 用即可。
+ */
+export function currentFetch(input: any, init?: any): Promise<Response> {
+  return activeFetch(input, init)
+}
+
 /** 当前用的是注入实现还是 Node 原生（诊断用）。 */
 export function fetchImplKind(): 'injected' | 'node' {
   return injectedFetch ? 'injected' : 'node'
@@ -1186,6 +1194,8 @@ async function openCompletion(
             status: resp.status,
             // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
             ...(muted && untilMs !== undefined ? { providerRetryAfterMs: Math.max(0, untilMs - Date.now()) } : {}),
+            // 绝对值单独带一份：宿主会把它记到账号上，在设置页显示倒计时
+            ...(muted && untilMs !== undefined ? { mutedUntilMs: untilMs } : {}),
             ...(busy ? { providerRetryAfterMs: 5_000 } : {}),
           },
         )

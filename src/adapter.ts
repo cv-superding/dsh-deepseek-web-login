@@ -211,6 +211,26 @@ export interface AdapterDeps {
    * 缺省时图片输入不可用（会退化成文本占位提示）。
    */
   readImage?: (ref: any, signal?: AbortSignal) => Promise<{ data: Uint8Array; mediaType?: string; name?: string }>
+  /**
+   * 每次模型调用的结果上报（成功/失败、耗时、错误码、受限解除时间）。
+   *
+   * 宿主用它做两件事，所以只留**一个**钩子而不是两个：
+   *  1. 把 `mutedUntilMs` 记到账号上 → 设置页显示"限制还剩多久"；
+   *  2. 写本地调用台账 → 看请求密度与失败分类（判断节流是否真的有效）。
+   * 上报失败不得影响调用本身（宿主内部自己吞异常）。
+   */
+  noteCall?: (info: {
+    /** 调用用途（chat / session-title / compaction…）。 */
+    purpose: string
+    ok: boolean
+    ms: number
+    code?: string
+    message?: string
+    /** 账号级限制的解除时间（仅 user is muted）。 */
+    mutedUntilMs?: number
+    /** 是否属于"限流"（发太频繁）而非"账号被限制"。 */
+    throttled?: boolean
+  }) => void
   /** 注入自定义流函数（单测用假流验证自动续写）；缺省用 streamWebCompletion。 */
   streamCompletion?: (auth: WebAuth, params: any) => AsyncGenerator<any>
   /**
@@ -432,8 +452,29 @@ export function createAdapter(deps: AdapterDeps) {
   async function* gatedStream(options: any): AsyncGenerator<any> {
     const purpose = typeof options?.purpose === 'string' && options.purpose ? options.purpose : 'chat'
     const release = await gate.acquire(purpose)
+    const startedAt = Date.now()
+    let reported = false
+    /** 上报一次结果。钩子是宿主给的，它自己负责不抛错；这里再兜一层，别让它影响调用。 */
+    const report = (info: { ok: boolean; code?: string; message?: string; mutedUntilMs?: number; throttled?: boolean }): void => {
+      if (reported) return
+      reported = true
+      try {
+        deps.noteCall?.({ purpose, ms: Date.now() - startedAt, ...info })
+      } catch {}
+    }
     try {
       yield* streamImpl(options)
+      // 跑完没抛错 = 这次调用成功。宿主会用这个信号清理"已经过期的受限标记"。
+      report({ ok: true })
+    } catch (error: any) {
+      report({
+        ok: false,
+        ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+        ...(typeof error?.message === 'string' ? { message: error.message.slice(0, 300) } : {}),
+        ...(Number.isFinite(error?.mutedUntilMs) ? { mutedUntilMs: error.mutedUntilMs } : {}),
+        ...(error?.failure?.rateLimitKind === 'throttled' || error?.rateLimitKind === 'throttled' ? { throttled: true } : {}),
+      })
+      throw error
     } finally {
       release()
     }

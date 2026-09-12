@@ -24,8 +24,26 @@ interface StatusPayload {
   loginProgress: { open: boolean; startedAt?: string; captured?: { token: boolean; cookie: boolean; fingerprint: boolean; wasm: boolean }; lastError?: string; finished?: boolean }
   fingerprint?: { at: string; url: string; stripped: string[]; pageUa?: string; pageBrands?: string[]; pageWebdriver?: boolean }
   lastLoginResult?: { ok: boolean; message: string; at: string }
-  auth: { loggedIn: boolean; display?: string; capturedAt?: string; hasCookie: boolean; hasFingerprint: boolean; wasmHost?: string; unverified?: boolean; tokenLength?: number }
+  auth: {
+    loggedIn: boolean
+    display?: string
+    capturedAt?: string
+    hasCookie: boolean
+    hasFingerprint: boolean
+    wasmHost?: string
+    unverified?: boolean
+    tokenLength?: number
+    /** 观测到的账号级限制解除时间（毫秒时间戳）。只在**生成请求被拒**时才学到。 */
+    limitUntilMs?: number | null
+    limitObservedAt?: string | null
+    /** 最近一次主动探活成功的时间（ISO）。 */
+    lastVerifiedAt?: string | null
+    /** 最近一次主动探活失败。 */
+    lastVerifyError?: { at: string; message: string } | null
+  }
   validation?: { ok: boolean; error?: string }
+  /** 插件的本地状态目录（「关于」页展示用）。 */
+  paths?: { webLogin?: string; accounts?: string; ledger?: string }
   models: { id: string; name: string; description: string; modelType: string; thinking: boolean; contextWindow: number }[]
   config: {
     maxPromptChars: number
@@ -33,6 +51,8 @@ interface StatusPayload {
     deleteWebSessions: boolean
     allowConcurrent?: boolean
     minRequestIntervalMs?: number
+    version?: string
+    probeIntervalMs?: number
   }
 }
 
@@ -165,12 +185,65 @@ transition:opacity .15s ease,border-color .15s ease}
 .dsw-tab:hover{opacity:1}
 .dsw-tab.active{opacity:1;color:var(--fg);border-bottom-color:var(--fg)}
 .dsw-pane[hidden]{display:none}
+/* 调用台账 */
+.dsw-spark{display:block;width:100%;height:40px;margin:8px 0 2px}
+.dsw-spark rect{fill:var(--bd2)}
+.dsw-spark rect.on{fill:var(--accent)}
+.dsw-spark rect.bad{fill:var(--err)}
+.dsw-path{font-family:var(--mono);font-size:11px;color:var(--fg2);word-break:break-all}
+/* 账号库 */
+.dsw-accounts{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.dsw-account{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--bd);
+border-radius:10px;padding:9px 11px;background:var(--bg1)}
+.dsw-account.active{border-color:var(--accent)}
+.dsw-account-main{flex:1 1 200px;min-width:0}
+.dsw-account-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;font-weight:500}
+.dsw-account-meta{font-size:11px;color:var(--fg3);margin-top:3px;word-break:break-all}
+.dsw-account-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.dsw-labelinput{font:inherit;font-size:12px;padding:3px 7px;border-radius:6px;border:1px solid var(--bd2);
+background:var(--bg2);color:var(--fg);width:150px;margin-top:4px}
+.dsw-limit{color:var(--warn)}
 /* 操作反馈：不归属任何一页，常驻在标签栏之上 */
 .dsw-alert{margin:0 0 12px;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);
 background:var(--bg1);white-space:pre-wrap;font-size:12px}
 .dsw-alert.ok{border-left:3px solid var(--ok);color:var(--ok)}
 .dsw-alert.err{border-left:3px solid var(--err);color:var(--err)}
 `
+
+/** 短时间：今天只显示时分，其它显示月/日 时:分。 */
+function shortTime(input?: string | number | null): string {
+  if (input === undefined || input === null || input === '') return ''
+  const date = new Date(input)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const sameDay = date.toDateString() === now.toDateString()
+  const hhmm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return sameDay ? hhmm : `${date.getMonth() + 1}/${date.getDate()} ${hhmm}`
+}
+
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前。 */
+function relTime(input?: string | null): string {
+  if (!input) return ''
+  const at = new Date(input).getTime()
+  if (!Number.isFinite(at)) return ''
+  const diff = Date.now() - at
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  return `${Math.floor(diff / 86_400_000)} 天前`
+}
+
+/** 倒计时：还剩 2 小时 13 分 / 已解除。 */
+function countdown(untilMs?: number | null): string {
+  if (!untilMs || !Number.isFinite(untilMs)) return ''
+  const left = untilMs - Date.now()
+  if (left <= 0) return '已解除'
+  const totalMinutes = Math.ceil(left / 60_000)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) return `剩余 ${hours} 小时 ${minutes} 分`
+  return `剩余 ${minutes} 分`
+}
 
 function el(tag: string, cls?: string, text?: string): HTMLElement {
   const node = document.createElement(tag)
@@ -221,22 +294,25 @@ function Panel(): any {
     // ── 标签栏 + 四个页 ────────────────────────────────────────
     // 原来 7 张卡堆在一页，「找某一项」要滚很久。分组按"什么时候会用它"：
     //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
-    const TAB_KEYS = ['account', 'model', 'gate', 'transport'] as const
+    const TAB_KEYS = ['account', 'model', 'gate', 'transport', 'about'] as const
     const TAB_LABELS: Record<string, string> = {
       account: '账号',
       model: '模型',
       gate: '防风控',
       transport: '传输层',
+      about: '关于',
     }
     const accountPane = el('div', 'dsw-pane')
     const modelPane = el('div', 'dsw-pane')
     const gatePane = el('div', 'dsw-pane')
     const transportPane = el('div', 'dsw-pane')
+    const aboutPane = el('div', 'dsw-pane')
     const panes: Record<string, HTMLElement> = {
       account: accountPane,
       model: modelPane,
       gate: gatePane,
       transport: transportPane,
+      about: aboutPane,
     }
     const tabButtons: Record<string, HTMLButtonElement> = {}
     const selectTab = (key: string): void => {
@@ -273,6 +349,28 @@ function Panel(): any {
 
     const statusKv = el('div', 'dsw-kv')
     loginCard.append(statusKv)
+
+    // 账号级限制单独占一行 + 自己的倒计时。
+    // 为什么要单独一行、还要挂定时器：这个状态**只在生成请求被拒时才能学到**
+    // （受限期间 users/current 依然返回 200），所以不能指望"刷新时顺便更新"，
+    // 要让"还剩多久"一直显示着。
+    let activeLimitUntilMs: number | null = null
+    const limitRow = el('p', 'dsw-hint dsw-limit')
+    limitRow.style.display = 'none'
+    limitRow.style.marginTop = '8px'
+    loginCard.append(limitRow)
+    const paintLimit = (): void => {
+      if (!activeLimitUntilMs) {
+        limitRow.style.display = 'none'
+        return
+      }
+      const text = countdown(activeLimitUntilMs)
+      limitRow.style.display = ''
+      limitRow.textContent =
+        text === '已解除'
+          ? `账号级限制已解除（${shortTime(activeLimitUntilMs)}）。`
+          : `⚠️ 账号级限制：${text}（${shortTime(activeLimitUntilMs)} 解除）—— 期间生成会被拒；只读调用（校验 / 探活）不受影响。`
+    }
 
     // ── 账号卡（退出 / 换号）──
     // 为什么要单独一张卡：退出登录以前只作为一个按钮塞在「手动粘贴 Token」那张卡的角落里，
@@ -318,6 +416,230 @@ function Panel(): any {
       ),
     )
     accountPane.append(loginCard, accountCard)
+
+    // ── 账号库：多账号并存 + 一键切换 ────────────────────────────────
+    // 为什么值得有：以前换号的代价是「退出 → 清浏览器分区 → 重新登录 → 等捕获」，
+    // 期间原来的号也回不去了。现在保存过的账号都在库里，切换即时生效。
+    //
+    // ⚠️ 风险已在 src/accounts.ts 的模块注释里写明，这里再对使用者说一遍：
+    // 用多账号轮换规避单账号限流，会被服务商把账号关联起来，处置通常更重。
+    // 所以刻意**只提供手动切换、不做自动轮换** —— 真人不会几分钟换一个号接着发。
+    const accountsCard = el('div', 'dsw-card')
+    const accountsHead = el('div', 'dsw-cardhead')
+    accountsHead.append(el('span', 'name', '账号库'))
+    const accountsBadge = el('span', 'dsw-badge off', '—')
+    accountsHead.append(accountsBadge)
+    accountsCard.append(accountsHead)
+    accountsCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '保存过的账号都在本机，点「切换」即时生效，不用重新登录。切换后**下一次请求**就用新账号。',
+      ),
+    )
+
+    const accountsList = el('ul', 'dsw-accounts')
+    accountsCard.append(accountsList)
+    const accountsEmpty = el('p', 'dsw-hint', '账号库是空的 —— 用上面的「登录」或「手动粘贴 Token」添加一个。')
+    accountsCard.append(accountsEmpty)
+
+    const accountsIOPanel = el('div', 'dsw-row')
+    accountsIOPanel.style.marginTop = '10px'
+    const exportBtn = el('button', 'dsw-btn ghost', '导出备份') as HTMLButtonElement
+    const importInput = el('input', 'dsw-input') as HTMLInputElement
+    importInput.placeholder = '要导入的备份文件路径'
+    importInput.style.maxWidth = '320px'
+    const importBtn = el('button', 'dsw-btn ghost', '导入') as HTMLButtonElement
+    accountsIOPanel.append(exportBtn, importInput, importBtn)
+    accountsCard.append(accountsIOPanel)
+    const accountsMsg = el('p', 'dsw-hint dsw-gate-msg', '')
+    accountsCard.append(accountsMsg)
+    accountsCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '导出的备份文件里是**可完整登录的凭证**（等同于账号本身），别分享、别提交到仓库。',
+      ),
+    )
+    accountPane.append(accountsCard)
+
+    const renderAccounts = (data: any): void => {
+      const items: any[] = Array.isArray(data?.accounts) ? data.accounts : []
+      accountsBadge.textContent = `${items.length} 个`
+      accountsBadge.className = `dsw-badge ${items.length ? 'on' : 'off'}`
+      accountsEmpty.hidden = items.length > 0
+      accountsList.textContent = ''
+      for (const item of items) accountsList.append(accountRow(item))
+    }
+
+    const accountRow = (item: any): HTMLElement => {
+      const row = el('li', `dsw-account${item.isActive ? ' active' : ''}`)
+      const main = el('div', 'dsw-account-main')
+      const title = el('div', 'dsw-account-title')
+      title.append(el('span', undefined, item.title || item.id))
+      if (item.isActive) title.append(el('span', 'dsw-badge on', '当前'))
+      if (item.unverified) title.append(el('span', 'dsw-badge off', '未校验'))
+      const limited = item.limit && Number.isFinite(item.limit.untilMs) && item.limit.untilMs > Date.now()
+      if (limited) {
+        title.append(el('span', 'dsw-badge off', `受限至 ${shortTime(item.limit.untilMs)}`))
+      }
+      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '校验失败'))
+      main.append(title)
+
+      const meta: string[] = []
+      if (item.display) meta.push(item.display)
+      if (item.capturedAt) meta.push(`${shortTime(item.capturedAt)} 捕获`)
+      meta.push(item.lastVerifiedAt ? `最近校验 ${relTime(item.lastVerifiedAt)}` : '尚未校验')
+      main.append(el('div', 'dsw-account-meta', meta.join(' · ')))
+      row.append(main)
+
+      const actions = el('div', 'dsw-account-actions')
+      if (item.isActive) {
+        actions.append(el('span', 'dsw-hint', '使用中'))
+      } else {
+        const useBtn = el('button', 'dsw-btn ghost dsw-preset', '切换') as HTMLButtonElement
+        useBtn.addEventListener('click', () => void switchToAccount(item.id))
+        actions.append(useBtn)
+      }
+
+      const renameBtn = el('button', 'dsw-btn ghost dsw-preset', '重命名') as HTMLButtonElement
+      let editing = false
+      renameBtn.addEventListener('click', () => {
+        if (editing) return
+        editing = true
+        const input = el('input', 'dsw-labelinput') as HTMLInputElement
+        input.value = item.label || ''
+        input.placeholder = '备注名，如「工作号」'
+        main.append(input)
+        input.focus()
+        let settled = false
+        const commit = (): void => {
+          if (settled) return
+          settled = true
+          void saveAccountLabel(item.id, input.value)
+        }
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') commit()
+          if (event.key === 'Escape') {
+            settled = true
+            void loadAccounts()
+          }
+        })
+        input.addEventListener('blur', commit)
+      })
+      actions.append(renameBtn)
+
+      // 移除要二次确认：凭证一旦删掉就找不回来了（不保留明文归档，见 accounts.ts）
+      const removeBtn = el('button', 'dsw-btn danger dsw-preset', '移除') as HTMLButtonElement
+      let armed = false
+      removeBtn.addEventListener('click', () => {
+        if (!armed) {
+          armed = true
+          removeBtn.textContent = '确认移除？'
+          removeBtn.classList.add('armed')
+          window.setTimeout(() => {
+            armed = false
+            removeBtn.textContent = '移除'
+            removeBtn.classList.remove('armed')
+          }, 4_000)
+          return
+        }
+        void removeAccountById(item.id)
+      })
+      actions.append(removeBtn)
+      row.append(actions)
+      return row
+    }
+
+    const loadAccounts = async (): Promise<void> => {
+      try {
+        renderAccounts(await api('/accounts'))
+      } catch (error: any) {
+        accountsMsg.textContent = `账号库读取失败：${error?.message ?? error}`
+      }
+    }
+
+    const switchToAccount = async (id: string): Promise<void> => {
+      accountsMsg.textContent = '切换中……'
+      try {
+        const result = await api('/accounts/switch', { method: 'POST', body: JSON.stringify({ id }) })
+        if (!result?.ok) {
+          accountsMsg.textContent = `切换失败：${result?.error ?? '未知原因'}`
+          return
+        }
+        accountsMsg.textContent = '已切换（下一次请求生效）。正在刷新登录状态……'
+        await loadAccounts()
+        await refresh(false)
+        accountsMsg.textContent = '已切换（下一次请求生效）'
+      } catch (error: any) {
+        accountsMsg.textContent = `切换失败：${error?.message ?? error}`
+      }
+    }
+
+    const removeAccountById = async (id: string): Promise<void> => {
+      try {
+        const result = await api('/accounts/remove', { method: 'POST', body: JSON.stringify({ id }) })
+        if (!result?.ok) {
+          accountsMsg.textContent = `移除失败：${result?.error ?? '未知原因'}`
+          return
+        }
+        accountsMsg.textContent = '已移除该账号（凭证已删除）'
+        await loadAccounts()
+        await refresh(true)
+      } catch (error: any) {
+        accountsMsg.textContent = `移除失败：${error?.message ?? error}`
+      }
+    }
+
+    const saveAccountLabel = async (id: string, label: string): Promise<void> => {
+      try {
+        await api('/accounts/rename', { method: 'POST', body: JSON.stringify({ id, label }) })
+      } catch {}
+      await loadAccounts()
+    }
+
+    exportBtn.addEventListener('click', () => {
+      void (async () => {
+        exportBtn.disabled = true
+        accountsMsg.textContent = '导出中……'
+        try {
+          const result = await api('/accounts/export', { method: 'POST', body: '{}' })
+          accountsMsg.textContent = result?.ok
+            ? `已导出 ${result.count} 个账号到：${result.path}（含明文凭证，请妥善保管）`
+            : `导出失败：${result?.error ?? '未知原因'}`
+        } catch (error: any) {
+          accountsMsg.textContent = `导出失败：${error?.message ?? error}`
+        } finally {
+          exportBtn.disabled = false
+        }
+      })()
+    })
+
+    importBtn.addEventListener('click', () => {
+      void (async () => {
+        const path = importInput.value.trim()
+        if (!path) {
+          accountsMsg.textContent = '请先填写备份文件路径'
+          return
+        }
+        importBtn.disabled = true
+        accountsMsg.textContent = '导入中……'
+        try {
+          const result = await api('/accounts/import', { method: 'POST', body: JSON.stringify({ path }) })
+          accountsMsg.textContent = result?.ok
+            ? `导入完成：新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}`
+            : `导入失败：${result?.error ?? '未知原因'}`
+          if (result?.ok) {
+            importInput.value = ''
+            await loadAccounts()
+          }
+        } catch (error: any) {
+          accountsMsg.textContent = `导入失败：${error?.message ?? error}`
+        } finally {
+          importBtn.disabled = false
+        }
+      })()
+    })
 
     // ── 手动 token 卡 ──
     const tokenCard = el('div', 'dsw-card')
@@ -377,6 +699,7 @@ function Panel(): any {
     let loggedIn = false
     let electron = false
     let windowOpen = false
+    let probeIntervalMs = 0
 
     const renderKv = (rows: [string, string][]): void => {
       statusKv.textContent = ''
@@ -401,6 +724,11 @@ function Panel(): any {
       }
 
       const rows: [string, string][] = []
+      activeLimitUntilMs = Number.isFinite(status.auth?.limitUntilMs) ? Number(status.auth?.limitUntilMs) : null
+      paintLimit()
+      probeIntervalMs = Number(status.config?.probeIntervalMs ?? 0)
+      renderVersion({ current: status.config?.version, probeIntervalMs })
+      renderPaths(status.paths)
       rows.push(['适配器注册', (status.registeredProviders ?? []).includes(status.provider) ? `✅ ${status.provider} 已注册到 llm` : `⚠️ 未在 llm 中找到 ${status.provider}`])
       if (loggedIn) {
         rows.push(['账号', status.auth.display || '（未获取到账号信息）'])
@@ -425,6 +753,19 @@ function Panel(): any {
         rows.push(['PoW WASM', status.auth.wasmHost || '默认地址'])
         rows.push(['token 长度', `${status.auth.tokenLength ?? 0} 字符`])
         if (status.validation) rows.push(['服务端校验', status.validation.ok ? '通过' : `失败：${status.validation.error ?? ''}`])
+
+        // 主动探活（后台定时做的，与上面这次"按需校验"是两件事）：
+        // 目的就是**在任务跑到一半之前**发现登录态失效。
+        const verifiedAt = status.auth?.lastVerifiedAt
+        const verifyError = status.auth?.lastVerifyError
+        if (verifyError) {
+          rows.push([
+            '登录态探活',
+            `❌ ${relTime(verifyError.at)}失败：${verifyError.message}（可能已过期，建议重新登录）`,
+          ])
+        } else if (verifiedAt) {
+          rows.push(['登录态探活', `✅ ${relTime(verifiedAt)}通过（后台定时校验，零额度）`])
+        }
         // 让用户能确认「防风控」到底生效成什么样（值来自配置，改配置后重启生效）
         const interval = status.config?.minRequestIntervalMs
         if (interval !== undefined) {
@@ -634,6 +975,92 @@ function Panel(): any {
     gateCard.append(gateMsg)
     gatePane.append(gateCard)
 
+    // ── 调用台账：请求密度 + 失败分类 ──────────────────────────────
+    // 节流"到底有没有生效"不能靠感觉 —— 看两个数：相邻对话的间隔分布（最短间隔说明有没有连环请求）、
+    // 以及失败分类（限流 / 账号被限制 / 鉴权 / 网络各占多少）。
+    const ledgerCard = el('div', 'dsw-card')
+    const ledgerHead = el('div', 'dsw-cardhead')
+    ledgerHead.append(el('span', 'name', '调用台账'))
+    const ledgerBadge = el('span', 'dsw-badge off', '近 24 小时')
+    ledgerHead.append(ledgerBadge)
+    ledgerCard.append(ledgerHead)
+    ledgerCard.append(
+      el('p', 'dsw-hint', '本地记录每次调用的结果（不含任何对话内容与凭证）。用来判断节流是否真的在起作用。'),
+    )
+    const ledgerKv = el('div', 'dsw-kv')
+    ledgerCard.append(ledgerKv)
+    const ledgerSparkBox = el('div')
+    ledgerCard.append(ledgerSparkBox)
+    const ledgerRow = el('div', 'dsw-row')
+    const ledgerRefreshBtn = el('button', 'dsw-btn ghost', '刷新台账') as HTMLButtonElement
+    ledgerRow.append(ledgerRefreshBtn)
+    ledgerCard.append(ledgerRow)
+    const ledgerMsg = el('p', 'dsw-hint dsw-gate-msg', '')
+    ledgerCard.append(ledgerMsg)
+    gatePane.append(ledgerCard)
+
+    /** 24 根小柱：每小时调用量。高度按最大值归一，失败多的时段用红色。 */
+    const sparkSvg = (hourly: number[], failedHours: Set<number>): string => {
+      const values = hourly.length ? hourly : [0]
+      const max = Math.max(1, ...values)
+      const barW = 100 / values.length
+      let out = '<svg class="dsw-spark" viewBox="0 0 100 100" preserveAspectRatio="none">'
+      values.forEach((value, index) => {
+        const height = (value / max) * 100
+        // 基础填充由 .dsw-spark rect 给；只有"有失败"的时段才额外挂 class（CSS 里 .bad 覆盖填充色）
+        const cls = failedHours.has(index) ? ' class="bad"' : ''
+        out += `<rect${cls} x="${(index * barW).toFixed(2)}" y="${(100 - height).toFixed(2)}" width="${(barW * 0.7).toFixed(2)}" height="${Math.max(height, value > 0 ? 3 : 0.6).toFixed(2)}" rx="1"></rect>`
+      })
+      out += '</svg>'
+      return out
+    }
+
+    const fmtMs = (ms: number): string => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} 分` : `${(ms / 1000).toFixed(1)} 秒`)
+
+    const renderLedger = (data: any): void => {
+      const calls = Number(data?.calls ?? 0)
+      ledgerBadge.textContent = `近 ${data?.hours ?? 24} 小时`
+      ledgerBadge.className = `dsw-badge ${calls > 0 ? 'on' : 'off'}`
+      ledgerKv.textContent = ''
+      ledgerSparkBox.textContent = ''
+      if (calls === 0) {
+        ledgerMsg.textContent = '还没有记录 —— 跑一次对话后回来看。'
+        return
+      }
+      const push = (key: string, value: string): void => {
+        ledgerKv.append(el('div', 'k', key), el('div', undefined, value))
+      }
+      push('调用次数', `${calls}（成功 ${data.succeeded ?? 0} / 失败 ${data.failed ?? 0}）`)
+      const gaps = data.gaps
+      push(
+        '相邻对话间隔',
+        gaps
+          ? `中位 ${fmtMs(gaps.p50)} · p90 ${fmtMs(gaps.p90)} · 最短 ${fmtMs(gaps.min)}（样本 ${gaps.samples}）`
+          : '样本不足',
+      )
+      if (gaps && gaps.min < 1_500) {
+        ledgerMsg.textContent = `⚠️ 出现过 ${fmtMs(gaps.min)} 的极短间隔 —— 检查一下节流是否被关掉了。`
+      }
+      const failures = data.failures ?? {}
+      push(
+        '失败分类',
+        Object.keys(failures).length ? Object.entries(failures).map(([key, count]) => `${key} ${count}`).join(' · ') : '无',
+      )
+      push('台账占用', `${data.footprint?.files ?? 0} 个文件 · ${Math.round((data.footprint?.bytes ?? 0) / 1024)} KB`)
+      const hourly: number[] = Array.isArray(data.hourly) ? data.hourly : []
+      ledgerSparkBox.innerHTML = sparkSvg(hourly, new Set())
+      ledgerSparkBox.append(el('p', 'dsw-hint', `每小时调用量（最近 1 小时在最右，峰值 ${Math.max(0, ...hourly)} 次）`))
+    }
+
+    const loadLedger = async (): Promise<void> => {
+      try {
+        renderLedger(await api('/ledger?hours=24'))
+      } catch (error: any) {
+        ledgerMsg.textContent = `台账读取失败：${error?.message ?? error}`
+      }
+    }
+    ledgerRefreshBtn.addEventListener('click', () => void loadLedger())
+
     // ── 传输层卡：请求从哪个网络栈出去（决定 TLS/HTTP2 指纹像不像浏览器）──
     // 实测：Node fetch 的 JA4 是 `t13d…h1`（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE）；
     // 换成 Chromium 网络栈后 cipher 列表哈希与 Chrome **逐字节一致**。所以默认走 Chromium。
@@ -673,6 +1100,121 @@ function Panel(): any {
     const transportMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     transportCard.append(transportMsg)
     transportPane.append(transportCard)
+
+    // ── 关于页：版本与更新 / 数据位置 / 风险提示 ────────────────────
+    // 单独一个标签而不是塞进别的页：这三块都是"偶尔看一眼"的信息，
+    // 混进日常操作的页里只会稀释注意力。
+    const aboutCard = el('div', 'dsw-card')
+    aboutCard.append(el('div', 'dsw-cardhead', '版本与更新'))
+    const versionKv = el('div', 'dsw-kv')
+    aboutCard.append(versionKv)
+    const updateRow = el('div', 'dsw-row')
+    updateRow.style.marginTop = '8px'
+    const updateBtn = el('button', 'dsw-btn ghost', '检查更新') as HTMLButtonElement
+    updateRow.append(updateBtn)
+    aboutCard.append(updateRow)
+    const updateMsg = el('p', 'dsw-hint dsw-gate-msg', '')
+    aboutCard.append(updateMsg)
+    aboutCard.append(
+      el('p', 'dsw-hint', '插件装不了包，所以这里只做"检查 + 给链接"。GitHub 在国内可能连不上，检查失败是正常的。'),
+    )
+    aboutPane.append(aboutCard)
+
+    const renderVersion = (info: any): void => {
+      versionKv.textContent = ''
+      versionKv.append(el('div', 'k', '当前版本'), el('div', undefined, info?.current || '未知'))
+      versionKv.append(
+        el('div', 'k', '登录态探活'),
+        el(
+          'div',
+          undefined,
+          info?.probeIntervalMs > 0
+            ? `每 ${Math.round(info.probeIntervalMs / 60_000)} 分钟一次（只读、零额度）`
+            : '已关闭',
+        ),
+      )
+    }
+
+    updateBtn.addEventListener('click', () => {
+      void (async () => {
+        updateBtn.disabled = true
+        updateMsg.textContent = '正在检查……'
+        try {
+          const result = await api('/update-check', { method: 'POST', body: '{}' })
+          if (!result?.ok) {
+            updateMsg.textContent = `检查失败：${result?.error ?? '未知原因'}`
+            return
+          }
+          const current = result.current
+          renderVersion({ current, probeIntervalMs })
+          if (result.hasUpdate) {
+            updateMsg.textContent = `发现新版本 ${result.latest}（当前 ${current}）${
+              result.publishedAt ? ` · ${shortTime(result.publishedAt)} 发布` : ''
+            }${result.url ? ` · ${result.url}` : ''}`
+          } else {
+            updateMsg.textContent = `已是最新版本（${current}）。`
+          }
+        } catch (error: any) {
+          updateMsg.textContent = `检查失败：${error?.message ?? error}`
+        } finally {
+          updateBtn.disabled = false
+        }
+      })()
+    })
+
+    const pathsCard = el('div', 'dsw-card')
+    pathsCard.append(el('div', 'dsw-cardhead', '数据位置'))
+    pathsCard.append(
+      el('p', 'dsw-hint', '插件的本地状态都在 DSH 主目录下，不进通用配置面（避免凭证混进 settings/credentials）。'),
+    )
+    const pathsKv = el('div', 'dsw-kv')
+    pathsCard.append(pathsKv)
+    pathsCard.append(
+      el('p', 'dsw-hint', '账号库里每个文件都是**可完整登录的凭证**；导出的备份同样是明文 —— 账号库卡片里的提示请当真。'),
+    )
+    aboutPane.append(pathsCard)
+
+    const renderPaths = (paths: any): void => {
+      pathsKv.textContent = ''
+      const rows: [string, string][] = [
+        ['账号库', paths?.accounts || '（未知）'],
+        ['账号索引', paths?.webLogin ? `${paths.webLogin}/accounts.json` : '（未知）'],
+        ['调用台账', paths?.ledger || '（未知）'],
+        ['导出备份', paths?.webLogin ? `${paths.webLogin}/exports/` : '（未知）'],
+      ]
+      for (const [key, value] of rows) {
+        pathsKv.append(el('div', 'k', key), el('div', 'dsw-path', value))
+      }
+    }
+
+    const riskCard = el('div', 'dsw-card')
+    riskCard.append(el('div', 'dsw-cardhead', '为什么没有「自动换号」'))
+    riskCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '账号库支持一键手动切换，但**刻意不做自动轮换**（检测到限流就自动换一个号继续发）。原因不是保守：',
+      ),
+    )
+    riskCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '参考项目切的是「CLI 下次启动用哪个账号」——服务端看不到；而我们每次对话都实时发请求。' +
+          '真人不会在几分钟内换一个账号接着发消息，自动换号是极强的机器行为特征，' +
+          '与本插件在传输层指纹、随机间隔、会话清理上「降低机器可识别性」的努力直接冲突。',
+      ),
+    )
+    riskCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '另外：同一服务商会把多账号关联起来（同设备 / 同 IP / 同指纹 / 相近的行为模式）。' +
+          '一旦被判定为同一人的多开小号，处置通常比单账号超频更重，而且可能波及全部关联账号。' +
+          '所以账号库的目标是「在自己的多个正常账号之间切换更省事」，不是「靠轮换把限流绕过去」。',
+      ),
+    )
+    aboutPane.append(riskCard)
 
     const applyTransportCard = (info: any): void => {
       if (!info) return
@@ -755,6 +1297,13 @@ function Panel(): any {
         transportMsg.textContent = '传输层设置读取失败（宿主未响应）'
       }
     })()
+
+    // 账号库首次加载（此时 refresh 已经定义好了）
+    void loadAccounts()
+    // 台账首次加载
+    void loadLedger()
+    // 版本 / 数据位置来自 /status，这里主动拉一次让它别等到第一次轮询
+    void refresh(true)
 
     /** 渲染宿主返回的节流设置（含可选档位与清理策略）。 */
     const applyGate = (g: any): void => {
@@ -1042,6 +1591,9 @@ function Panel(): any {
 
     root.append(page)
     void refresh(false)
+    // 倒计时独立走一个 30 秒的定时器：不产生任何请求，只把"还剩多久"重新算一遍。
+    const countdownTimer = window.setInterval(paintLimit, 30_000)
+
     timer = window.setInterval(() => {
       const active = windowOpen || Date.now() < boostUntil
       if (active) {
@@ -1055,6 +1607,7 @@ function Panel(): any {
     return () => {
       disposed = true
       if (timer !== undefined) window.clearInterval(timer)
+      window.clearInterval(countdownTimer)
     }
   }, [])
 
