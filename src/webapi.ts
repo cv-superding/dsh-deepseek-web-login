@@ -867,6 +867,33 @@ export function pickUserDisplay(user: any): string {
   return ''
 }
 
+/**
+ * 判定 `users/current` 的响应体**形状**是否可信。
+ *
+ * ⚠️ F09（2026-09-12 审计）：旧代码在 `resp.json()` 抛错时把 json 置为 undefined，
+ * 而 `envelopeError(undefined)` 返回 undefined，于是径直走到 `ok: true`，
+ * 返回一个**空壳的 user({})**。也就是说：反爬页 / WAF 拦截页 / 空响应
+ * —— 它们同样是 HTTP 200 —— 会被当成"验证通过"。
+ *
+ * 后果很实际：探活显示"通过"、账号看起来正常，
+ * 0.1.31 加的「需要重新登录」按钮就永远不会触发；什么都没确认到，却说成功。
+ * 只读零额度请求偶发失败的代价只是一次重试，远比"误报成功"划算。
+ *
+ * 抽成纯函数是为了能单测（validateAuth 要发网络请求，测不了这条分支）。
+ */
+export function classifyAuthEnvelope(json: unknown): { ok: true } | { ok: false; error: string } {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    return { ok: false, error: 'users/current 响应不是 JSON 对象（可能是反爬页面或网关拦截）' }
+  }
+  const bizError = envelopeError(json)
+  if (bizError) return { ok: false, error: bizError.msg }
+  // 形状兜底：既没有 data 也没有 code，说明不是我们认识的业务信封。
+  if ((json as any).data === undefined && (json as any).code === undefined) {
+    return { ok: false, error: 'users/current 响应既无 data 也无 code（形状不符）' }
+  }
+  return { ok: true }
+}
+
 export async function validateAuth(
   auth: WebAuth,
   signal?: AbortSignal,
@@ -880,8 +907,9 @@ export async function validateAuth(
       } catch {
         json = undefined
       }
-      const bizError = envelopeError(json)
-      if (bizError) return { ok: false, error: bizError.msg }
+      // 形状校验（纯函数，见 classifyAuthEnvelope 的注释）
+      const verdict = classifyAuthEnvelope(json)
+      if (!verdict.ok) return verdict
       const payload = json?.data?.biz_data ?? json?.data
       const user = payload?.user ?? payload ?? {}
       const display = pickUserDisplay(user)

@@ -8,7 +8,7 @@
  * 用法: node tests/check-accounts.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -228,6 +228,44 @@ test('账号文件里存的是完整凭证（读回来能直接当 WebAuth 用�
   assert.ok(accountsDir().endsWith('accounts'))
   assert.equal(record.id, `acc_${record.id.split('_')[1]}`, 'id 前缀应是 acc_')
   assert.match(randomUUID(), /-/, '随机 id 来源可用（占位断言，确认 crypto 可用）')
+})
+
+test('F02：重复写入（覆盖）后文件仍在、内容已更新', () => {
+  // 注意：去重键是 serverId，必须显式给，否则两次会落成两条不同记录
+  const first = upsertAccount({ token: 't1', cookie: 'c1', userAgent: 'ua', serverId: 'srv-f02a' })
+  const file = join(accountsDir(), `${first.id}.json`)
+  assert.ok(existsSync(file))
+  const second = upsertAccount({ token: 't2', cookie: 'c2', userAgent: 'ua', serverId: 'srv-f02a' })
+  assert.equal(second.id, first.id, '同一 serverId 应落到同一条记录')
+  const saved = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(saved.token, 't2', '覆盖写入后内容应更新')
+})
+
+test('F02：写入失败时原文件必须保留（旧实现先 rmSync，凭证直接丢失）', () => {
+  const rec = upsertAccount({ token: 'keep-me', cookie: 'c', userAgent: 'ua', serverId: 'srv-f02b' })
+  const file = join(accountsDir(), `${rec.id}.json`)
+  assert.ok(existsSync(file))
+  // Windows 上 chmod 只读**挡不住** rename 覆盖（实测 rename 照样成功），
+  // 改用"持有文件句柄"来让 rename 失败 —— 这是能可靠模拟的方式。
+  const fd = openSync(file, 'r')
+  let threw = false
+  let errCode = ''
+  try {
+    upsertAccount({ token: 'new', cookie: 'c', userAgent: 'ua', serverId: 'srv-f02b' })
+  } catch (error) {
+    threw = true
+    errCode = String(error?.code ?? error)
+  } finally {
+    try { closeSync(fd) } catch {}
+  }
+  assert.ok(threw, `占用目标文件时写入应当失败（错误码 ${errCode}）—— 否则这条用例没测到东西`)
+  // 关键断言：失败了，原凭证还在
+  assert.ok(existsSync(file), '写入失败后原文件不该消失')
+  const saved = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(saved.token, 'keep-me', '原凭证内容必须完好')
+  // 也不该留下临时文件
+  const leftovers = readdirSync(accountsDir()).filter((n) => n.includes('.tmp-'))
+  assert.equal(leftovers.length, 0, `残留临时文件：${leftovers.join(', ')}`)
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

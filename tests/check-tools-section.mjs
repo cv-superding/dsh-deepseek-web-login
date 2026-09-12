@@ -172,6 +172,37 @@ test('描述里的换行与多余空白被压平（一块工具占的行数可�
   assert.ok(section.includes('line1 line2 line3'), '描述应压成一行')
 })
 
+test('F18：maxChars 很小时 head 必须完整（工具目录收缩，而不是被中间挖空）', () => {
+  // 旧做法：先渲染满 5.6 万字符的工具目录，再发现 head 超预算，
+  // 于是 truncateMiddle 从**中间**挖掉一块 → 留下残缺的 JSON Schema。
+  const tools = Array.from({ length: 61 }, (_, i) => mkTool(`tool_${String(i).padStart(2, '0')}`, 800))
+  for (const maxChars of [20_000, 50_000]) {
+    const prompt = serializePrompt({
+      system: 'S'.repeat(9_000),
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      tools,
+      maxChars,
+    })
+    const head = prompt.split('\n\n---\n\n')[0]
+    assert.ok(
+      !head.includes('chars omitted'),
+      `maxChars=${maxChars} 时 head 被中段截断了 —— 会留下残缺的工具定义`,
+    )
+    assert.ok(head.includes('Tool Calling Protocol'), '协议头必须完整')
+  }
+})
+
+test('F18：预算充足时仍能装下全部工具（收缩不能矫枉过正）', () => {
+  const tools = Array.from({ length: 61 }, (_, i) => mkTool(`tool_${String(i).padStart(2, '0')}`, 400))
+  const prompt = serializePrompt({
+    system: 'S'.repeat(9_000),
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    tools,
+  })
+  const missing = tools.filter((t) => !prompt.includes(`### ${t.name}`))
+  assert.equal(missing.length, 0, `默认预算下不该缺失：${missing.slice(0, 5).map((t) => t.name).join(', ')}`)
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)

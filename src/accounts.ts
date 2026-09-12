@@ -99,9 +99,16 @@ export function newAccountId(): string {
 function writeJsonAtomic(file: string, value: unknown): void {
   mkdirSync(join(file, '..'), { recursive: true })
   const tmp = `${file}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
+  // 临时文件从创建起就是 0600：它装的是**可完整登录的凭证**，
+  // 旧写法先按默认权限（受 umask 影响，常见 0644）落地、事后再 chmod，中间有暴露窗口。
+  writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 })
+  // ⚠️ F02（2026-09-12 审计）：旧写法是「先 rmSync 目标文件，再 rename 过去」——
+  // 一旦 rename 失败（磁盘满 / 占用 / 权限），**原文件已经没了**，凭证直接丢失。
+  // 而在 Windows 上 `fs.renameSync` 本来就能直接覆盖已存在的目标文件
+  // （实测 win32 + Node 22：renameSync 成功覆盖，目标变新内容，临时文件消失），
+  // 所以那句 rmSync 既没必要、也是唯一的丢数据风险点。去掉之后：
+  // rename 失败 → 清掉临时文件 → 原文件完好无损。
   try {
-    rmSync(file, { force: true })
     renameSync(tmp, file)
   } catch (error) {
     try {

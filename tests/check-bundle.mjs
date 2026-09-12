@@ -114,6 +114,8 @@ const checks = {
   'host 适配器配置也带上 maxRequestIntervalMs': host.includes('maxRequestIntervalMs: gate.settings().maxRequestIntervalMs'),
   'host 状态回传也带上 maxRequestIntervalMs': /maxRequestIntervalMs:\s*adapterConfig\.maxRequestIntervalMs/.test(host),
   'host 会剥掉孤立的工具调用标记残片（`</|DSML|calls>` 那类漏上屏过）': host.includes('stripStrayToolMarkup'),
+  'host 认证响应有形状校验（反爬页不会被当成验证通过）': host.includes('classifyAuthEnvelope'),
+  'host 写凭证不再先删目标文件（Windows rename 可直接覆盖）': !/rmSync\(file,\s*\{\s*force:\s*true\s*\}\)\s*\n\s*renameSync/.test(host),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':

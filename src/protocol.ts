@@ -71,6 +71,15 @@ const HOLD_BACK_CHARS = 24
 const MAX_CAPTURE_CHARS = 256 * 1024
 
 /** 工具调用协议指令（固定文本，进 prompt 前缀，保持前缀缓存友好）。 */
+/**
+ * head（system + 工具协议 + 工具目录）在 prompt 里最多占的比例。
+ * 0.62 是 0.1.33 调的：实测 61 个工具时 head 约 6.35 万字符，而 0.45 × 12 万 = 5.4 万装不下。
+ * 转写仍余约 5.6 万字符 —— 历史可以截，工具定义不可以。
+ */
+const HEAD_RATIO = 0.62
+/** 协议段拼接时的固定开销（换行、`---` 分隔、省略标记等）。 */
+const PROTOCOL_SLACK_CHARS = 96
+
 export const TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
 You can call tools to complete the user's task. When you need a tool, output ONLY a single JSON object, with no other text before or after it:
@@ -98,10 +107,15 @@ function truncate(text: string, max: number): string {
 }
 
 /** 渲染工具目录（含 JSON Schema）。 */
-export function buildToolSection(tools: readonly ToolSchemaLike[] | undefined): string {
+export function buildToolSection(
+  tools: readonly ToolSchemaLike[] | undefined,
+  maxChars: number = MAX_TOOLS_SECTION_CHARS,
+): string {
   if (!tools || tools.length === 0) return ''
   const parts: string[] = ['', '## Available tools']
-  let budget = MAX_TOOLS_SECTION_CHARS
+  // 预算取「内置上限」与「调用方给的额度」的较小值。
+  // 调用方（serializePrompt）会按剩余空间算一个动态额度传进来 —— 见下面 F18 的注释。
+  let budget = Math.max(0, Math.min(MAX_TOOLS_SECTION_CHARS, maxChars))
   for (let index = 0; index < tools.length; index += 1) {
     const tool = tools[index]
     let schemaText = ''
@@ -218,7 +232,17 @@ export interface SerializeOptions {
 export function serializePrompt(options: SerializeOptions): string {
   const maxChars = options.maxChars ?? 120_000
   const system = String(options.system ?? '').trim()
-  const toolSection = buildToolSection(options.tools)
+  // ⚠️ F18（2026-09-12 审计）：**按剩余空间给工具目录算预算**，而不是"先渲染满、事后截 head"。
+  // 旧做法是先把工具目录渲染到 5.6 万字符，再发现 head 超过 `maxChars * 比例`，
+  // 于是 `truncateMiddle` 从**中间**挖掉一块 —— 留下的是**残缺的 JSON Schema**：
+  // 模型会照着半截定义猜参数，比"干脆不列这个工具"更糟；而且 maxChars 越小时越容易触发。
+  // 现在反过来：先把 system 与协议指令的固定开销扣掉，剩下的才是工具目录能用的额度。
+  // 装不下就走 buildToolSection 自己的兜底（列出被省略的工具名），head 永远完整。
+  const toolBudget = Math.max(
+    0,
+    Math.floor(maxChars * HEAD_RATIO) - system.length - TOOL_PROTOCOL_INSTRUCTIONS.length - PROTOCOL_SLACK_CHARS,
+  )
+  const toolSection = buildToolSection(options.tools, toolBudget)
   const protocol = toolSection ? `\n\n${TOOL_PROTOCOL_INSTRUCTIONS}${toolSection}` : ''
 
   const lines: string[] = []
@@ -265,7 +289,10 @@ export function serializePrompt(options: SerializeOptions): string {
   // 所以把 head 的占比从 0.45 提到 0.62：2026-09-12 实测 61 个工具时 head 约 6.35 万字符，
   // 而 0.45 × 12 万 = 5.4 万已经装不下，会被 truncateMiddle 从中间挖掉一块。
   // 转写仍余约 5.6 万字符，超出时照旧中段截断（历史可截，工具定义不可截）。
-  const headBudget = Math.min(head.length, Math.floor(maxChars * 0.62))
+  // 有了上面的动态预算，head 理论上不会再超。这里保留兜底（防御用）：
+  // 万一真的超了，也**不抛错**（那会让整个请求失败、用户什么都拿不到），
+  // 而是照旧中段截断 —— 但这种情况应当被测试视为失败。
+  const headBudget = Math.min(head.length, Math.floor(maxChars * HEAD_RATIO))
   const boundedHead = head.length <= headBudget ? head : truncateMiddle(head, headBudget, 0.85)
   const transcriptBudget = Math.max(1_000, maxChars - boundedHead.length - 8)
   const boundedTranscript = truncateMiddle(transcript, transcriptBudget, 0.7)

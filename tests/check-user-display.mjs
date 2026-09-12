@@ -17,7 +17,7 @@
  */
 import assert from 'node:assert/strict'
 
-const { pickUserDisplay } = await import('../src/webapi.ts')
+const { pickUserDisplay, classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { accountTitle } = await import('../src/accounts.ts')
 
 let passed = 0
@@ -113,6 +113,36 @@ run('两个未识别账号的标题互不相同（否则列表里没法区分）
   const a = accountTitle({ id: 'acc_cd8e05ec' }, mask)
   const b = accountTitle({ id: 'acc_11223344' }, mask)
   assert.notEqual(a, b)
+})
+
+run('F09：resp.json() 失败（HTML/空响应）必须判失败，不能是空壳 ok:true', () => {
+  // 旧实现：json=undefined → envelopeError(undefined) 返回 undefined → 走到 ok:true + user:{}
+  // 于是反爬页 / WAF 拦截页（同样是 200）会被当成"验证通过"，
+  // 0.1.31 的「需要重新登录」按钮永远不会触发。
+  for (const bad of [undefined, null, 'not json', 42, []]) {
+    const r = classifyAuthEnvelope(bad)
+    assert.equal(r.ok, false, `${JSON.stringify(bad)} 应当判失败`)
+    assert.match(r.error, /不是 JSON 对象/)
+  }
+})
+
+run('F09：业务错误码与形状不符也判失败', () => {
+  const biz = classifyAuthEnvelope({ code: 40003, msg: 'Authorization Failed' })
+  assert.equal(biz.ok, false)
+  assert.match(biz.error, /Authorization Failed/)
+  // 外层 code=0 但 data.biz_code 非 0（网页端真实形态）
+  const inner = classifyAuthEnvelope({ code: 0, msg: '', data: { biz_code: 1, biz_msg: 'invalid session' } })
+  assert.equal(inner.ok, false)
+  const shapeless = classifyAuthEnvelope({ foo: 1 })
+  assert.equal(shapeless.ok, false)
+  assert.match(shapeless.error, /形状不符/)
+})
+
+run('F09：正常信封仍判成功（别矫枉过正）', () => {
+  assert.equal(classifyAuthEnvelope({ code: 0, msg: '', data: { biz_data: { user: { id: 'u1' } } } }).ok, true)
+  assert.equal(classifyAuthEnvelope({ data: { biz_data: { id: 'u1' } } }).ok, true)
+  // 只有 code 也算（某些响应 data 为空对象）
+  assert.equal(classifyAuthEnvelope({ code: 0, data: {} }).ok, true)
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
