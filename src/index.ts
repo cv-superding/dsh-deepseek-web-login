@@ -16,13 +16,19 @@ import {
   readGateSettings,
   writeGateSettings,
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
+  DEFAULT_MAX_REQUEST_INTERVAL_MS,
   INTERVAL_PRESETS,
   MAX_INTERVAL_MS,
   type GateSettings,
 } from './gate.ts'
 import { browserLogin, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
-import { validateAuth } from './webapi.ts'
+import {
+  validateAuth,
+  createSessionCleaner,
+  DEFAULT_SESSION_CLEANUP,
+  type SessionCleanupMode,
+} from './webapi.ts'
 
 export const name = 'dsh-deepseek-web-login'
 export const inject = ['llm', 'webServer']
@@ -103,11 +109,25 @@ export function apply(ctx: any, config: Config = {}): void {
     logger,
   }
 
+  // 临时会话清理策略：默认「攒批 + 延迟」，减少「每轮建一个立刻删一个」的机器特征。
+  // immediate 用老参数（1.5s / 每次一个）；deferred 用可配的延迟与批量阈值。
+  const cleanupMode: SessionCleanupMode =
+    savedGate?.sessionCleanup ?? config.sessionCleanup ?? DEFAULT_SESSION_CLEANUP.mode
+  const sessionCleaner = createSessionCleaner({
+    policy: {
+      mode: cleanupMode,
+      delayMs: cleanupMode === 'immediate' ? 1_500 : (config.sessionCleanupDelayMs ?? DEFAULT_SESSION_CLEANUP.delayMs),
+      batchSize: cleanupMode === 'immediate' ? 1 : (config.sessionCleanupBatchSize ?? DEFAULT_SESSION_CLEANUP.batchSize),
+    },
+    logger,
+  })
+
   const getAuth = (): WebAuth | undefined => readAuth()
   // 附件服务（ctx.attachments）：图片输入所需。用 ctx.get 取（可选依赖，缺省则图片降级为文本）
   const adapter = createAdapter({
     getAuth,
     gate,
+    sessionCleaner,
     config: adapterConfig,
     readImage: async (ref: any, signal?: AbortSignal) => {
       const attachments = ctx.get?.('attachments')
@@ -142,9 +162,11 @@ export function apply(ctx: any, config: Config = {}): void {
             if (req.method === 'GET' && route === '/gate') {
               sendJson(res, 200, {
                 ...gate.settings(),
-                presets: [...INTERVAL_PRESETS],
+                presets: INTERVAL_PRESETS.map(([lo, hi]) => ({ min: lo, max: hi })),
                 maxIntervalMs: MAX_INTERVAL_MS,
-                defaultIntervalMs: DEFAULT_MIN_REQUEST_INTERVAL_MS,
+                defaultMinIntervalMs: DEFAULT_MIN_REQUEST_INTERVAL_MS,
+                defaultMaxIntervalMs: DEFAULT_MAX_REQUEST_INTERVAL_MS,
+                cleanup: sessionCleaner.policy(),
               })
               return
             }
@@ -156,19 +178,29 @@ export function apply(ctx: any, config: Config = {}): void {
               }
               const patch: Partial<GateSettings> = {}
               if (typeof body.allowConcurrent === 'boolean') patch.allowConcurrent = body.allowConcurrent
-              if (body.minRequestIntervalMs !== undefined) {
-                const ms = Number(body.minRequestIntervalMs)
+              for (const field of ['minRequestIntervalMs', 'maxRequestIntervalMs']) {
+                if (body[field] === undefined) continue
+                const ms = Number(body[field])
                 if (!Number.isFinite(ms)) {
-                  sendJson(res, 400, { ok: false, error: 'minRequestIntervalMs 必须是数字' })
+                  sendJson(res, 400, { ok: false, error: `${field} 必须是数字` })
                   return
                 }
-                patch.minRequestIntervalMs = ms
+                patch[field] = ms
+              }
+              if (body.sessionCleanup !== undefined) {
+                if (!['immediate', 'deferred', 'keep'].includes(body.sessionCleanup)) {
+                  sendJson(res, 400, { ok: false, error: 'sessionCleanup 只能是 immediate / deferred / keep' })
+                  return
+                }
+                patch.sessionCleanup = body.sessionCleanup
               }
               if (Object.keys(patch).length === 0) {
                 sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
                 return
               }
               const applied = gate.configure(patch)
+              // 清理策略由 cleaner 执行 → 同步生效
+              if (patch.sessionCleanup) sessionCleaner.configure({ mode: patch.sessionCleanup })
               try {
                 writeGateSettings(applied)
               } catch (error: any) {
@@ -228,6 +260,8 @@ export function apply(ctx: any, config: Config = {}): void {
                   deleteWebSessions: adapterConfig.deleteWebSessions !== false,
                   allowConcurrent: adapterConfig.allowConcurrent === true,
                   minRequestIntervalMs: adapterConfig.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+                  sessionCleanup: cleanupMode,
+                  sessionCleanupPending: sessionCleaner.pendingCount(),
                 },
               })
               return

@@ -12,7 +12,12 @@ import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
-import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
+import {
+  scheduleDeleteSession,
+  streamWebCompletion,
+  uploadImageFile,
+  type SessionCleaner,
+} from './webapi.ts'
 import { collectImageRefs, serializePrompt, stripSystemMarkers, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
@@ -174,12 +179,26 @@ export interface AdapterConfig {
    */
   allowConcurrent?: boolean
   /**
-   * 两次网页端调用之间的最小间隔（毫秒，默认 3000）。
+   * 最小间隔的**下限**（毫秒，默认 2000）。
    *
-   * 按上一次调用的**结束**时刻计算 —— 真正压低请求密度、避免账号级限流的那一项。
-   * 设 0 可关闭。推荐值见 README「配置」一节。
+   * 实际等待时间在 [minRequestIntervalMs, maxRequestIntervalMs] 之间**随机**取值，
+   * 按上一次调用的**结束**时刻计算。随机区间的意义：固定间隔方差≈0，是明显的「定时器特征」。
    */
   minRequestIntervalMs?: number
+  /** 最小间隔的**上限**（毫秒，默认 4000）；与下限相等即退化为固定间隔。 */
+  maxRequestIntervalMs?: number
+  /**
+   * 临时会话清理策略（默认 `deferred`）。
+   *
+   * - `immediate`：调用后 1.5s 删掉（老行为，每轮 1 个 DELETE 请求）
+   * - `deferred`：攒够 N 个或等满 T 秒再清理，且优先尝试一个请求批量删
+   * - `keep`：完全不删（请求最少，但网页端会留下临时会话）
+   */
+  sessionCleanup?: 'immediate' | 'deferred' | 'keep'
+  /** deferred 模式的等待上限（毫秒，默认 90000）。 */
+  sessionCleanupDelayMs?: number
+  /** deferred 模式攒够多少个立即清理（默认 8）。 */
+  sessionCleanupBatchSize?: number
   /** 日志器（cordis logger；缺省静默）。 */
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
 }
@@ -199,6 +218,11 @@ export interface AdapterDeps {
    * 缺省时按 config 自建一个。
    */
   gate?: RequestGate
+  /**
+   * 外部注入的临时会话清理器（策略由宿主配置：immediate / deferred / keep）。
+   * 缺省时退回「调用后 1.5s 删除」的老行为。
+   */
+  sessionCleaner?: SessionCleaner
 }
 
 function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
@@ -508,9 +532,14 @@ export function createAdapter(deps: AdapterDeps) {
         refFileIds: rounds === 0 ? refFileIds : [],
         signal: options?.signal,
         idleTimeoutMs: deps.config.idleTimeoutMs ?? 120_000,
-        onDeleteSession: deps.config.deleteWebSessions === false ? undefined : (sessionId: string) => {
-          scheduleDeleteSession(auth as WebAuth, sessionId)
-        },
+        onDeleteSession:
+          deps.config.deleteWebSessions === false
+            ? undefined
+            : (sessionId: string) => {
+                // 清理策略由宿主注入（攒批 / 立即 / 不删），缺省退回老行为
+                if (deps.sessionCleaner) deps.sessionCleaner.schedule(auth as WebAuth, sessionId)
+                else scheduleDeleteSession(auth as WebAuth, sessionId)
+              },
       })) {
         if (event.kind === 'thinking') {
           const block = openReasoning()

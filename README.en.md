@@ -114,8 +114,12 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
 | `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer) |
 | `maxContinuations` | `2` | Max auto-continuation rounds (each round is a new web request, so it spends more of the free quota) |
-| `minRequestIntervalMs` | **`3000`** | Minimum gap between two web calls, measured from when the previous one **finished**. `0` disables it |
+| `minRequestIntervalMs` | **`2000`** | Lower bound of the gap between two web calls, measured from when the previous one **finished** |
+| `maxRequestIntervalMs` | **`4000`** | Upper bound; the actual wait is picked **randomly** inside the range (equal bounds = fixed interval) |
 | `allowConcurrent` | **`false`** | Allow concurrent requests on one account. Off by default: calls queue (FIFO) |
+| `sessionCleanup` | **`deferred`** | Temp-session cleanup: `immediate` (delete 1.5s after each call) / `deferred` (batched, default) / `keep` (never delete) |
+| `sessionCleanupDelayMs` | `90000` | deferred: max wait before flushing the queue |
+| `sessionCleanupBatchSize` | `8` | deferred: flush as soon as this many sessions are queued |
 
 ### Why throttling is on by default, and which values to use
 

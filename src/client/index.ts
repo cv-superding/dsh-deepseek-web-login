@@ -144,6 +144,7 @@ font-size:12px;line-height:1.6;color:var(--fg)}
 .dsw-range{-webkit-appearance:none;appearance:none;flex:1 1 160px;height:4px;border-radius:999px;background:var(--bd2);outline:none;cursor:pointer}
 .dsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
 .dsw-preset{padding:4px 10px;font-size:12px}
+.dsw-preset.active{background:var(--accent);border-color:transparent;color:var(--on-accent)}
 .dsw-gate-msg{color:var(--fg3);min-height:1.6em}
 .dsw-code{display:block;margin:6px 0;padding:7px 10px;background:var(--code-bg);border:1px solid var(--bd);
 border-radius:8px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);
@@ -487,11 +488,20 @@ function Panel(): any {
       }
     }
 
-    // ── 请求节流卡：并发开关 + 间隔滑块 ──
-    // 这两项决定会不会被账号级限流（实测双窗口并发 6 分钟内被限制 1 天），
+    // ── 请求节流卡：并发开关 + 间隔区间 + 会话清理 ──
+    // 这三项直接决定会不会被账号级限流（实测双窗口并发 6 分钟内被限制 1 天），
     // 所以不该只藏在配置文件里 —— 界面上直接可调，改完即时生效并落盘。
     const gateCard = el('div', 'dsw-card')
     gateCard.append(el('div', 'dsw-cardhead', '请求节流（防风控）'))
+
+    const rangeInput = (): HTMLInputElement => {
+      const input = el('input', 'dsw-range') as HTMLInputElement
+      input.type = 'range'
+      input.min = '0'
+      input.max = '30000'
+      input.step = '500'
+      return input
+    }
 
     const concRow = el('div', 'dsw-gate-row')
     const concLabel = el('label', 'dsw-switch')
@@ -502,27 +512,44 @@ function Panel(): any {
     concRow.append(concLabel)
     gateCard.append(concRow)
 
-    const intervalRow = el('div', 'dsw-gate-row')
-    intervalRow.append(el('span', 'dsw-gate-label', '最小间隔'))
-    const intervalRange = el('input', 'dsw-range') as HTMLInputElement
-    intervalRange.type = 'range'
-    intervalRange.min = '0'
-    intervalRange.max = '30000'
-    intervalRange.step = '500'
-    const intervalValue = el('span', 'dsw-gate-value', '—')
-    intervalRow.append(intervalRange, intervalValue)
-    gateCard.append(intervalRow)
+    const minRow = el('div', 'dsw-gate-row')
+    minRow.append(el('span', 'dsw-gate-label', '间隔下限'))
+    const minRange = rangeInput()
+    const minValue = el('span', 'dsw-gate-value', '—')
+    minRow.append(minRange, minValue)
+    gateCard.append(minRow)
+
+    const maxRow = el('div', 'dsw-gate-row')
+    maxRow.append(el('span', 'dsw-gate-label', '间隔上限'))
+    const maxRange = rangeInput()
+    const maxValue = el('span', 'dsw-gate-value', '—')
+    maxRow.append(maxRange, maxValue)
+    gateCard.append(maxRow)
+
+    const intervalHint = el('p', 'dsw-hint', '')
+    gateCard.append(intervalHint)
 
     const presetRow = el('div', 'dsw-gate-row')
     gateCard.append(presetRow)
 
-    gateCard.append(
-      el(
-        'p',
-        'dsw-hint',
-        '间隔按「上一次请求结束」起算，所以长回答之后不会白等 —— 它只在密集连发时起作用。',
-      ),
-    )
+    const cleanupRow = el('div', 'dsw-gate-row')
+    cleanupRow.append(el('span', 'dsw-gate-label', '会话清理'))
+    const cleanupBtns: Record<string, HTMLButtonElement> = {}
+    for (const pair of [
+      ['immediate', '立即'],
+      ['deferred', '延迟（推荐）'],
+      ['keep', '不删'],
+    ] as const) {
+      const key = pair[0]
+      const btn = el('button', 'dsw-btn ghost dsw-preset', pair[1]) as HTMLButtonElement
+      btn.addEventListener('click', () => void saveGate({ sessionCleanup: key }))
+      cleanupBtns[key] = btn
+      cleanupRow.append(btn)
+    }
+    gateCard.append(cleanupRow)
+    const cleanupHint = el('p', 'dsw-hint', '')
+    gateCard.append(cleanupHint)
+
     gateCard.append(
       el(
         'p',
@@ -535,31 +562,74 @@ function Panel(): any {
     gateCard.append(gateMsg)
     page.append(gateCard)
 
-    /** 渲染宿主返回的节流设置（含可选档位）。 */
+    /** 渲染宿主返回的节流设置（含可选档位与清理策略）。 */
     const applyGate = (g: any): void => {
-      const interval = Number(g?.minRequestIntervalMs ?? 3000)
-      concInput.checked = !!g?.allowConcurrent
-      intervalRange.max = String(g?.maxIntervalMs ?? 30000)
-      intervalRange.value = String(interval)
-      intervalValue.textContent = `${interval}ms`
+      if (!g) return
+      concInput.checked = !!g.allowConcurrent
+
+      const cap = String(g.maxIntervalMs ?? 30000)
+      minRange.max = cap
+      maxRange.max = cap
+      const lo = Number(g.minRequestIntervalMs ?? 2000)
+      const hi = Number(g.maxRequestIntervalMs ?? lo)
+      minRange.value = String(lo)
+      maxRange.value = String(hi)
+      minValue.textContent = `${lo}ms`
+      maxValue.textContent = `${hi}ms`
+      intervalHint.textContent =
+        lo === hi
+          ? `固定间隔 ${lo}ms（上下限相等）。建议拉开成区间 —— 固定值方差≈0，是明显的「定时器特征」。`
+          : `实际等待在 ${lo}~${hi}ms 之间随机取值（均值约 ${Math.round((lo + hi) / 2)}ms）。`
+
       presetRow.textContent = ''
       presetRow.append(el('span', 'dsw-gate-label', '快捷'))
-      for (const ms of g?.presets ?? [1500, 3000, 8000]) {
-        const isDefault = ms === (g?.defaultIntervalMs ?? 3000)
-        const preset = el('button', 'dsw-btn ghost dsw-preset', isDefault ? `${ms}ms（推荐）` : `${ms}ms`) as HTMLButtonElement
-        preset.addEventListener('click', () => void saveGate({ minRequestIntervalMs: ms }))
-        presetRow.append(preset)
+      const presets: { min: number; max: number }[] =
+        g.presets ?? [{ min: 1_500, max: 2_500 }, { min: 2_000, max: 4_000 }, { min: 5_000, max: 9_000 }]
+      for (const preset of presets) {
+        const isDefault =
+          preset.min === (g.defaultMinIntervalMs ?? 2_000) && preset.max === (g.defaultMaxIntervalMs ?? 4_000)
+        const btn = el(
+          'button',
+          'dsw-btn ghost dsw-preset',
+          `${preset.min}~${preset.max}ms${isDefault ? '（推荐）' : ''}`,
+        ) as HTMLButtonElement
+        btn.addEventListener('click', () =>
+          void saveGate({ minRequestIntervalMs: preset.min, maxRequestIntervalMs: preset.max }),
+        )
+        if (isDefault && g.minRequestIntervalMs === preset.min && g.maxRequestIntervalMs === preset.max) {
+          btn.classList.add('active')
+        }
+        presetRow.append(btn)
       }
+
+      const mode = g.cleanup?.mode ?? 'deferred'
+      for (const key of Object.keys(cleanupBtns)) {
+        cleanupBtns[key].classList.toggle('active', key === mode)
+      }
+      cleanupHint.textContent =
+        mode === 'keep'
+          ? '不删：请求最少，但网页端会留下临时会话记录。'
+          : mode === 'immediate'
+            ? '立即：调用结束后 1.5 秒删掉（老行为，每轮多一个删除请求）。'
+            : `延迟：攒够 ${g.cleanup?.batchSize ?? 8} 个、或 ${Math.round((g.cleanup?.delayMs ?? 90_000) / 1000)} 秒后集中清理，` +
+              '并优先用一个请求批量删 —— 减少「每轮建一个立刻删一个」的机器特征。'
     }
 
-    const saveGate = async (patch: { allowConcurrent?: boolean; minRequestIntervalMs?: number }): Promise<void> => {
+    const saveGate = async (patch: {
+      allowConcurrent?: boolean
+      minRequestIntervalMs?: number
+      maxRequestIntervalMs?: number
+      sessionCleanup?: string
+    }): Promise<void> => {
       gateMsg.textContent = '保存中……'
       try {
         const result = await api('/gate', { method: 'POST', body: JSON.stringify(patch) })
         if (result?.ok) {
           applyGate(result)
           gateMsg.textContent =
-            `已生效：${result.allowConcurrent ? '允许并发（不推荐）' : '串行'} · 间隔 ${result.minRequestIntervalMs}ms` +
+            `已生效：${result.allowConcurrent ? '允许并发（不推荐）' : '串行'} · ` +
+            `间隔 ${result.minRequestIntervalMs}~${result.maxRequestIntervalMs}ms · ` +
+            `清理 ${result.sessionCleanup ?? result.cleanup?.mode ?? '-'}` +
             (result.persisted === false ? ` ⚠️ ${result.warning ?? '未能写入配置'}` : '（已写入配置，重启后仍生效）')
         } else {
           gateMsg.textContent = `保存失败：${result?.error ?? '未知原因'}`
@@ -571,10 +641,14 @@ function Panel(): any {
 
     concInput.addEventListener('change', () => void saveGate({ allowConcurrent: concInput.checked }))
     // 拖动中只更新数字，松手（change）才提交，避免一路发请求
-    intervalRange.addEventListener('input', () => {
-      intervalValue.textContent = `${intervalRange.value}ms`
+    minRange.addEventListener('input', () => {
+      minValue.textContent = `${minRange.value}ms`
     })
-    intervalRange.addEventListener('change', () => void saveGate({ minRequestIntervalMs: Number(intervalRange.value) }))
+    maxRange.addEventListener('input', () => {
+      maxValue.textContent = `${maxRange.value}ms`
+    })
+    minRange.addEventListener('change', () => void saveGate({ minRequestIntervalMs: Number(minRange.value) }))
+    maxRange.addEventListener('change', () => void saveGate({ maxRequestIntervalMs: Number(maxRange.value) }))
 
     void (async () => {
       try {

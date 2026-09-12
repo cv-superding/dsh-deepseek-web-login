@@ -16,6 +16,7 @@ import {
   gateSettingsPath,
   clampInterval,
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
+  DEFAULT_MAX_REQUEST_INTERVAL_MS,
   MAX_INTERVAL_MS,
   INTERVAL_PRESETS,
 } from '../src/gate.ts'
@@ -78,8 +79,13 @@ function fakeClock() {
 
 console.log('请求闸门：')
 
-await test('默认间隔是 3 秒（README 推荐值，勿随意改动）', () => {
-  assert.equal(DEFAULT_MIN_REQUEST_INTERVAL_MS, 3_000)
+await test('默认是随机区间 2~4 秒（切勿改成固定值：方差≈0 就是定时器特征）', () => {
+  assert.equal(DEFAULT_MIN_REQUEST_INTERVAL_MS, 2_000)
+  assert.equal(DEFAULT_MAX_REQUEST_INTERVAL_MS, 4_000)
+  assert.ok(
+    DEFAULT_MAX_REQUEST_INTERVAL_MS > DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    '默认必须是区间；上下限相等会退化成固定间隔',
+  )
 })
 
 await test('串行（默认）：上一个没释放，下一个拿不到许可', async () => {
@@ -288,17 +294,30 @@ await test('反向验证：allowConcurrent=true 时标题确实会与主回答�
 })
 
 await test('configure：运行时改设置立即生效，且夹到合法范围', () => {
-  const gate = createRequestGate({ minIntervalMs: 3_000 })
-  assert.deepEqual(gate.settings(), { allowConcurrent: false, minRequestIntervalMs: 3_000 })
+  const gate = createRequestGate({ minIntervalMs: 3_000, maxIntervalMs: 5_000 })
+  assert.deepEqual(gate.settings(), {
+    allowConcurrent: false,
+    minRequestIntervalMs: 3_000,
+    maxRequestIntervalMs: 5_000,
+  })
 
-  assert.deepEqual(gate.configure({ allowConcurrent: true }), { allowConcurrent: true, minRequestIntervalMs: 3_000 })
-  assert.deepEqual(gate.configure({ minRequestIntervalMs: 999_999 }), {
+  assert.deepEqual(gate.configure({ allowConcurrent: true }), {
     allowConcurrent: true,
-    minRequestIntervalMs: MAX_INTERVAL_MS,
-  }, '超过上限应被夹住')
-  assert.deepEqual(gate.configure({ minRequestIntervalMs: -1 }).minRequestIntervalMs, 0, '负数应归 0')
+    minRequestIntervalMs: 3_000,
+    maxRequestIntervalMs: 5_000,
+  })
+  assert.deepEqual(
+    gate.configure({ minRequestIntervalMs: 999_999 }),
+    { allowConcurrent: true, minRequestIntervalMs: MAX_INTERVAL_MS, maxRequestIntervalMs: MAX_INTERVAL_MS },
+    '下限超上限应被夹住，且上限要跟着抬起来（不能留下负区间）',
+  )
+  assert.equal(gate.configure({ minRequestIntervalMs: -1 }).minRequestIntervalMs, 0, '负数应归 0')
   // 空 patch 不改任何东西
-  assert.deepEqual(gate.configure({}), { allowConcurrent: true, minRequestIntervalMs: 0 })
+  assert.deepEqual(gate.configure({}), {
+    allowConcurrent: true,
+    minRequestIntervalMs: 0,
+    maxRequestIntervalMs: MAX_INTERVAL_MS,
+  })
 })
 
 await test('clampInterval：非法输入回落默认值', () => {
@@ -309,11 +328,66 @@ await test('clampInterval：非法输入回落默认值', () => {
   assert.equal(clampInterval(MAX_INTERVAL_MS + 1), MAX_INTERVAL_MS)
 })
 
-await test('推荐档位包含默认值（设置页的「推荐」按钮不会指错）', () => {
-  assert.ok(
-    INTERVAL_PRESETS.includes(DEFAULT_MIN_REQUEST_INTERVAL_MS),
-    `档位 ${INTERVAL_PRESETS.join('/')} 里应含默认 ${DEFAULT_MIN_REQUEST_INTERVAL_MS}`,
+await test('推荐档位里含默认区间（设置页的「推荐」按钮不会指错）', () => {
+  const matched = INTERVAL_PRESETS.some(
+    ([lo, hi]) => lo === DEFAULT_MIN_REQUEST_INTERVAL_MS && hi === DEFAULT_MAX_REQUEST_INTERVAL_MS,
   )
+  assert.ok(
+    matched,
+    `档位 ${JSON.stringify(INTERVAL_PRESETS)} 里应含默认区间 ` +
+      `${DEFAULT_MIN_REQUEST_INTERVAL_MS}~${DEFAULT_MAX_REQUEST_INTERVAL_MS}`,
+  )
+})
+
+await test('间隔在区间内随机取值 —— 不同随机源得到不同等待（消除定时器特征）', async () => {
+  const got = []
+  for (const r of [0, 0.25, 0.5, 0.75, 1]) {
+    const clock = fakeClock()
+    const gate = createRequestGate({
+      minIntervalMs: 2_000,
+      maxIntervalMs: 4_000,
+      now: clock.api.now,
+      sleep: clock.api.sleep,
+      random: () => r,
+    })
+    const r1 = await gate.acquire('a')
+    r1()
+    const r2 = await gate.acquire('b')
+    r2()
+    got.push(clock.sleeps[0])
+  }
+  assert.deepEqual(got, [2_000, 2_500, 3_000, 3_500, 4_000], `实际：${got.join(', ')}`)
+  assert.equal(new Set(got).size, got.length, '每次等待都应不同（否则等于固定间隔）')
+})
+
+await test('上下限相等 → 退化为固定间隔（随机源不影响结果）', async () => {
+  const clock = fakeClock()
+  const gate = createRequestGate({
+    minIntervalMs: 3_000,
+    maxIntervalMs: 3_000,
+    now: clock.api.now,
+    sleep: clock.api.sleep,
+    random: () => 0.99,
+  })
+  const r1 = await gate.acquire('a')
+  r1()
+  const r2 = await gate.acquire('b')
+  r2()
+  assert.deepEqual(clock.sleeps, [3_000])
+})
+
+await test('只给下限（0.1.20 的老配置）→ 上限跟随下限，行为不变', () => {
+  const gate = createRequestGate({ minIntervalMs: 3_000 })
+  assert.deepEqual(gate.settings(), {
+    allowConcurrent: false,
+    minRequestIntervalMs: 3_000,
+    maxRequestIntervalMs: 3_000,
+  }, '老配置是固定间隔语义，升级后不该变成随机区间')
+})
+
+await test('上限小于下限 → 自动纠正，不会出现负区间', () => {
+  const gate = createRequestGate({ minIntervalMs: 8_000, maxIntervalMs: 2_000 })
+  assert.equal(gate.settings().maxRequestIntervalMs, 8_000)
 })
 
 await test('设置文件：写入后能读回（路径跟随 DSH_HOME）', () => {
@@ -322,13 +396,17 @@ await test('设置文件：写入后能读回（路径跟随 DSH_HOME）', () =>
     assert.equal(readGateSettings(), undefined, '文件不存在时应返回 undefined（回落 config）')
     assert.ok(gateSettingsPath().includes(tmp.dir), `路径应落在临时 DSH_HOME 内：${gateSettingsPath()}`)
 
-    writeGateSettings({ allowConcurrent: true, minRequestIntervalMs: 8_000 })
-    assert.deepEqual(readGateSettings(), { allowConcurrent: true, minRequestIntervalMs: 8_000 })
+    writeGateSettings({ allowConcurrent: true, minRequestIntervalMs: 8_000, maxRequestIntervalMs: 12_000 })
+    assert.deepEqual(readGateSettings(), {
+      allowConcurrent: true,
+      minRequestIntervalMs: 8_000,
+      maxRequestIntervalMs: 12_000,
+    })
 
-    // 只改一项时，另一项缺失也要能读（部分字段容错）
+    // 老文件（0.1.20 只存了 min）→ 上限跟随下限（固定间隔语义，升级后行为不变）
     mkdirSync(join(gateSettingsPath(), '..'), { recursive: true })
     writeFileSync(gateSettingsPath(), JSON.stringify({ minRequestIntervalMs: 1_500 }), 'utf8')
-    assert.deepEqual(readGateSettings(), { minRequestIntervalMs: 1_500 })
+    assert.deepEqual(readGateSettings(), { minRequestIntervalMs: 1_500, maxRequestIntervalMs: 1_500 })
   } finally {
     tmp.restore()
   }
@@ -355,14 +433,15 @@ await test('设置文件损坏 / 字段非法时不炸，回落默认', () => {
 await test('落盘的值与 configure 结果一致（重启后行为不变）', () => {
   const tmp = useTempDshHome()
   try {
-    const gate = createRequestGate({ minIntervalMs: 3_000 })
-    const applied = gate.configure({ allowConcurrent: true, minRequestIntervalMs: 30_000 })
+    const gate = createRequestGate({ minIntervalMs: 3_000, maxIntervalMs: 6_000 })
+    const applied = gate.configure({ allowConcurrent: true, minRequestIntervalMs: 30_000, maxRequestIntervalMs: 30_000 })
     writeGateSettings(applied)
     // 模拟「重启」：新实例按文件值初始化
     const saved = readGateSettings()
     const reborn = createRequestGate({
       allowConcurrent: saved.allowConcurrent,
       minIntervalMs: saved.minRequestIntervalMs,
+      maxIntervalMs: saved.maxRequestIntervalMs,
     })
     assert.deepEqual(reborn.settings(), applied)
   } finally {

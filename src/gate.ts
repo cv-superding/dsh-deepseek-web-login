@@ -21,17 +21,35 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-/** 推荐的调用间隔：3 秒。依据见 README 的「配置」一节。 */
-export const DEFAULT_MIN_REQUEST_INTERVAL_MS = 3_000
+/**
+ * 推荐的调用间隔：**随机区间 2~4 秒**（下限 / 上限）。
+ *
+ * 为什么是区间而不是固定值：固定间隔的方差≈0，在统计上就是「定时器特征」；
+ * 人的操作间隔是有方差的。同类项目 cuckoo-code（从未被风控）用的正是 2000~4000ms 随机区间。
+ */
+export const DEFAULT_MIN_REQUEST_INTERVAL_MS = 2_000
+export const DEFAULT_MAX_REQUEST_INTERVAL_MS = 4_000
 
-/** 间隔可选的推荐档位（设置页的快捷按钮用）。 */
-export const INTERVAL_PRESETS = [1_500, 3_000, 8_000] as const
+/** 间隔可选的推荐档位（设置页的快捷按钮用）：[下限, 上限]。 */
+export const INTERVAL_PRESETS = [
+  [1_500, 2_500],
+  [2_000, 4_000],
+  [5_000, 9_000],
+] as const
 /** 设置页滑块的取值上限。 */
 export const MAX_INTERVAL_MS = 30_000
 
 export interface GateSettings {
   allowConcurrent: boolean
+  /** 间隔下限（毫秒）。与上限相等时退化为固定间隔。 */
   minRequestIntervalMs: number
+  /** 间隔上限（毫秒）。实际等待在 [下限, 上限] 之间**随机**取值。 */
+  maxRequestIntervalMs: number
+  /**
+   * 临时会话清理策略。它不参与节流逻辑，只是**搭同一份设置文件与同一个设置页**存储，
+   * 实际执行在 webapi.ts 的 createSessionCleaner（类型放宽为字面量，避免循环依赖）。
+   */
+  sessionCleanup?: 'immediate' | 'deferred' | 'keep'
 }
 
 /** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
@@ -54,6 +72,17 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     if (typeof parsed?.allowConcurrent === 'boolean') out.allowConcurrent = parsed.allowConcurrent
     if (Number.isFinite(parsed?.minRequestIntervalMs)) {
       out.minRequestIntervalMs = clampInterval(Number(parsed.minRequestIntervalMs))
+    }
+    if (Number.isFinite(parsed?.maxRequestIntervalMs)) {
+      out.maxRequestIntervalMs = clampInterval(Number(parsed.maxRequestIntervalMs))
+    }
+    // 老配置（0.1.20 只存了 min）= 固定间隔语义：上限跟随下限
+    if (out.minRequestIntervalMs !== undefined && out.maxRequestIntervalMs === undefined) {
+      out.maxRequestIntervalMs = out.minRequestIntervalMs
+    }
+    const cleanup = parsed?.sessionCleanup
+    if (cleanup === 'immediate' || cleanup === 'deferred' || cleanup === 'keep') {
+      out.sessionCleanup = cleanup
     }
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
@@ -78,6 +107,10 @@ export interface RequestGateOptions {
   allowConcurrent?: boolean
   /** 两次调用之间的最小间隔（毫秒）。0 = 不限。 */
   minIntervalMs?: number
+  /** 间隔上限（毫秒）。缺省且未给 minIntervalMs 时用默认上限；给了 minIntervalMs 则取同值（保持「固定间隔」老语义）。 */
+  maxIntervalMs?: number
+  /** 随机源（单测注入用）。 */
+  random?: () => number
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
   /** 便于单测注入。 */
   now?: () => number
@@ -98,7 +131,14 @@ export interface RequestGate {
 export function createRequestGate(options: RequestGateOptions = {}): RequestGate {
   // 可运行时修改（设置页保存后立即生效，不必重启）
   let allowConcurrent = options.allowConcurrent === true
-  let minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? 0))
+  let minIntervalMs = clampInterval(
+    options.minIntervalMs ?? (options.maxIntervalMs !== undefined ? options.maxIntervalMs : DEFAULT_MIN_REQUEST_INTERVAL_MS),
+  )
+  let maxIntervalMs = clampInterval(
+    options.maxIntervalMs ?? (options.minIntervalMs !== undefined ? options.minIntervalMs : DEFAULT_MAX_REQUEST_INTERVAL_MS),
+  )
+  if (maxIntervalMs < minIntervalMs) maxIntervalMs = minIntervalMs
+  const random = options.random ?? Math.random
   const now = options.now ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const logger = options.logger
@@ -132,12 +172,15 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       waiting -= 1
     }
 
-    // 最小间隔：按「上一次结束」时刻算，而不是上一次开始 —— 否则长回答之后的连环请求仍然很密。
-    if (minIntervalMs > 0 && hasFinished) {
-      const waitMs = lastFinishedAt + minIntervalMs - now()
+    // 间隔：在 [下限, 上限] 之间**随机**取值，按「上一次结束」时刻算
+    // （不是上一次开始 —— 否则长回答之后的连环请求仍然很密）。每一次的等待都不同，避免定时器特征。
+    if (maxIntervalMs > 0 && hasFinished) {
+      const gap = nextGap()
+      const waitMs = lastFinishedAt + gap - now()
       if (waitMs > 0) {
         logger?.info?.(
-          `deepseek-web: 距上次请求不足 ${minIntervalMs}ms，等 ${Math.round(waitMs)}ms 再发「${label}」（防账号级限流）`,
+          `deepseek-web: 距上次请求不足 ${gap}ms（区间 ${minIntervalMs}~${maxIntervalMs}），` +
+            `等 ${Math.round(waitMs)}ms 再发「${label}」（防账号级限流）`,
         )
         await sleep(waitMs)
       }
@@ -155,15 +198,34 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     }
   }
 
+  /** 本次实际使用的间隔：区间内随机；上下限相等则固定。 */
+  function nextGap(): number {
+    if (maxIntervalMs <= minIntervalMs) return minIntervalMs
+    return Math.round(minIntervalMs + random() * (maxIntervalMs - minIntervalMs))
+  }
+
+  /** 会话清理策略不在本模块实现，只借用设置文件存储（由宿主读取后交给 cleaner）。 */
+  let cleanupMode: GateSettings['sessionCleanup']
+
   function settings(): GateSettings {
-    return { allowConcurrent, minRequestIntervalMs: minIntervalMs }
+    return {
+      allowConcurrent,
+      minRequestIntervalMs: minIntervalMs,
+      maxRequestIntervalMs: maxIntervalMs,
+      ...(cleanupMode ? { sessionCleanup: cleanupMode } : {}),
+    }
   }
 
   function configure(next: Partial<GateSettings>): GateSettings {
     if (typeof next.allowConcurrent === 'boolean') allowConcurrent = next.allowConcurrent
     if (next.minRequestIntervalMs !== undefined) minIntervalMs = clampInterval(Number(next.minRequestIntervalMs))
+    if (next.maxRequestIntervalMs !== undefined) maxIntervalMs = clampInterval(Number(next.maxRequestIntervalMs))
+    if (next.sessionCleanup !== undefined) cleanupMode = next.sessionCleanup
+    // 设置页两个滑块可能拖出「上限 < 下限」，这里纠正（不报错，直接夹住）
+    if (maxIntervalMs < minIntervalMs) maxIntervalMs = minIntervalMs
     logger?.info?.(
-      `deepseek-web: 请求节流设置已更新 —— ${allowConcurrent ? '允许并发（不推荐）' : '串行'} · 间隔 ${minIntervalMs}ms`,
+      `deepseek-web: 请求节流设置已更新 —— ${allowConcurrent ? '允许并发（不推荐）' : '串行'} · ` +
+        `间隔 ${minIntervalMs}~${maxIntervalMs}ms（随机）`,
     )
     return settings()
   }

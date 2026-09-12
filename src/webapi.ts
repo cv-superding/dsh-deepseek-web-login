@@ -465,20 +465,183 @@ export async function createChatSession(auth: WebAuth, signal?: AbortSignal): Pr
 }
 
 /** 尽力删除一个网页端会话（避免污染用户网页端聊天列表）。失败静默。 */
-export function scheduleDeleteSession(auth: WebAuth, sessionId: string, delayMs = 1_500): void {
-  const timeout = setTimeout(() => {
-    void (async () => {
+// ── 会话清理：把「每轮建一个立刻删一个」的机器特征压下来 ──────────────
+//
+// 背景：一次模型调用要发 4 个请求 —— 建会话 → 取 PoW → completion → 删会话。
+// 其中「每轮新建一个临时会话、用完立刻删掉」是最强的机器行为特征之一（真人绝不会这样）。
+//
+// 为什么不能直接复用会话：DSH 每次把**全量历史**交给我们，而网页端会话是**有状态**的，
+// 复用会让服务端看到「历史 + 全量 prompt」两份上下文，迅速撑爆窗口。所以只能优化**删除侧**。
+//
+//   immediate = 老行为：调用结束后 1.5s 删掉（每轮 1 个 DELETE 请求）
+//   deferred  = 默认：攒够 batchSize 个、或从第一个入队起等满 delayMs 才清理；
+//               清理时**先尝试一个请求批量删**（服务端支持的话 N 个会话只花 1 个请求），
+//               不支持则回退逐个删，并且此后不再尝试批量（只浪费一次）。
+//   keep      = 完全不删：请求数最少，但网页端会留下临时会话。
+
+export type SessionCleanupMode = 'immediate' | 'deferred' | 'keep'
+
+export interface SessionCleanupPolicy {
+  mode: SessionCleanupMode
+  /** deferred：从第一个会话入队起最多等多久就清理（毫秒）。 */
+  delayMs: number
+  /** deferred：攒够多少个立即清理。 */
+  batchSize: number
+}
+
+export const DEFAULT_SESSION_CLEANUP: SessionCleanupPolicy = {
+  mode: 'deferred',
+  delayMs: 90_000,
+  batchSize: 8,
+}
+
+export interface SessionCleanerOptions {
+  policy?: Partial<SessionCleanupPolicy>
+  logger?: { info?: (msg: string) => void; debug?: (msg: string) => void }
+  /** 单测注入。 */
+  fetchImpl?: typeof fetch
+  setTimeoutImpl?: (fn: () => void, ms: number) => any
+  clearTimeoutImpl?: (t: any) => void
+}
+
+export interface SessionCleaner {
+  schedule(auth: WebAuth, sessionId: string): void
+  /** 立即清理队列（测试 / 卸载时用）。 */
+  flush(): Promise<void>
+  pendingCount(): number
+  policy(): SessionCleanupPolicy
+  /** 运行时改策略（设置页保存后调用），返回改完后的值。 */
+  configure(next: Partial<SessionCleanupPolicy>): SessionCleanupPolicy
+}
+
+export function createSessionCleaner(options: SessionCleanerOptions = {}): SessionCleaner {
+  const policy: SessionCleanupPolicy = {
+    mode: options.policy?.mode ?? DEFAULT_SESSION_CLEANUP.mode,
+    delayMs: Math.max(0, Math.floor(options.policy?.delayMs ?? DEFAULT_SESSION_CLEANUP.delayMs)),
+    batchSize: Math.max(1, Math.floor(options.policy?.batchSize ?? DEFAULT_SESSION_CLEANUP.batchSize)),
+  }
+  /** 策略切换时按模式给默认延迟/批量（immediate 用老参数）。 */
+  function applyModeDefaults(): void {
+    if (policy.mode === 'immediate') {
+      policy.delayMs = 1_500
+      policy.batchSize = 1
+    } else if (policy.mode === 'deferred' && policy.batchSize <= 1) {
+      policy.delayMs = DEFAULT_SESSION_CLEANUP.delayMs
+      policy.batchSize = DEFAULT_SESSION_CLEANUP.batchSize
+    }
+  }
+  const doFetch = options.fetchImpl ?? fetch
+  const setT = options.setTimeoutImpl ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
+  const clearT = options.clearTimeoutImpl ?? ((t: any) => clearTimeout(t))
+  const logger = options.logger
+
+  let queue: { auth: WebAuth; sessionId: string }[] = []
+  let timer: any
+  /** 探测到服务端不接受批量删除后置位 —— 之后一律逐个删，不再浪费请求。 */
+  let batchUnsupported = false
+
+  async function deleteOne(auth: WebAuth, sessionId: string): Promise<void> {
+    try {
+      await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
+        method: 'POST',
+        headers: buildDsHeaders(auth),
+        body: JSON.stringify({ chat_session_id: sessionId }),
+        signal: AbortSignal.timeout(10_000),
+      })
+    } catch {
+      /* 清理失败不影响主流程 */
+    }
+  }
+
+  async function flush(): Promise<void> {
+    if (timer !== undefined) {
+      clearT(timer)
+      timer = undefined
+    }
+    const batch = queue
+    queue = []
+    if (batch.length === 0) return
+
+    if (batch.length > 1 && !batchUnsupported) {
       try {
-        await fetch(`${DS_BASE}/api/v0/chat_session/delete`, {
+        const resp = await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
           method: 'POST',
-          headers: buildDsHeaders(auth),
-          body: JSON.stringify({ chat_session_id: sessionId }),
-          signal: AbortSignal.timeout(10_000),
+          headers: buildDsHeaders(batch[0].auth),
+          body: JSON.stringify({ chat_session_ids: batch.map((b) => b.sessionId) }),
+          signal: AbortSignal.timeout(15_000),
         })
-      } catch {}
-    })()
-  }, delayMs)
-  ;(timeout as any).unref?.()
+        let ok = resp.ok
+        if (ok) {
+          const text = await resp.text().catch(() => '')
+          try {
+            const json = text ? JSON.parse(text) : undefined
+            if (json && envelopeError(json)) ok = false
+          } catch {
+            ok = false
+          }
+        }
+        if (ok) {
+          logger?.debug?.(`deepseek-web: 已批量清理 ${batch.length} 个临时会话（只用了 1 个请求）`)
+          return
+        }
+        batchUnsupported = true
+        logger?.debug?.('deepseek-web: 服务端不接受批量删除会话，之后改为逐个删除')
+      } catch {
+        // 网络异常 ≠ 不支持，下次仍可尝试
+      }
+    }
+
+    for (const item of batch) await deleteOne(item.auth, item.sessionId)
+    logger?.debug?.(`deepseek-web: 已清理 ${batch.length} 个临时会话`)
+  }
+
+  function schedule(auth: WebAuth, sessionId: string): void {
+    if (policy.mode === 'keep') return
+    queue.push({ auth, sessionId })
+    // 只有 deferred 才「攒够就立即清理」。immediate 始终走延迟 —— 保持老行为：
+    // 调用结束后过一会儿才删，避免「流刚结束就紧跟一个 DELETE」这种过紧的节奏。
+    if (policy.mode === 'deferred' && queue.length >= policy.batchSize) {
+      void flush()
+      return
+    }
+    if (timer === undefined) {
+      timer = setT(() => {
+        void flush()
+      }, policy.delayMs)
+      ;(timer as any)?.unref?.()
+    }
+  }
+
+  function configure(next: Partial<SessionCleanupPolicy>): SessionCleanupPolicy {
+    const modeChanged = next.mode !== undefined && next.mode !== policy.mode
+    if (next.mode !== undefined) policy.mode = next.mode
+    if (next.delayMs !== undefined) policy.delayMs = Math.max(0, Math.floor(next.delayMs))
+    if (next.batchSize !== undefined) policy.batchSize = Math.max(1, Math.floor(next.batchSize))
+    if (modeChanged) applyModeDefaults()
+    if (policy.mode === 'keep') void flush() // 切到「不删」时把已排队的清掉，避免残留
+    logger?.info?.(
+      `deepseek-web: 会话清理策略已更新 —— ${policy.mode}` +
+        (policy.mode === 'deferred' ? `（攒 ${policy.batchSize} 个或 ${Math.round(policy.delayMs / 1000)}s 后清理）` : ''),
+    )
+    return { ...policy }
+  }
+
+  return {
+    schedule,
+    flush,
+    pendingCount: () => queue.length,
+    policy: () => ({ ...policy }),
+    configure,
+  }
+}
+
+/** 默认清理器（immediate 语义，兼容旧调用方）。 */
+const defaultCleaner = createSessionCleaner({
+  policy: { mode: 'immediate', delayMs: 1_500, batchSize: 1 },
+})
+
+export function scheduleDeleteSession(auth: WebAuth, sessionId: string): void {
+  defaultCleaner.schedule(auth, sessionId)
 }
 
 /** 验证登录态：优先 users/current，端点不存在时退回 PoW challenge 探活。 */
