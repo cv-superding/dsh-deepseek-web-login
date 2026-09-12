@@ -106,6 +106,9 @@ const checks = {
   'host 伪标记清单里含 ide_result_status（模型自造的那个，实测漏过一次）':
     host.includes('ide_result_status'),
   'host 仍保留原有伪标记 ds_system（老现场不能回退）': host.includes('ds_system'),
+  'host 工具目录超预算时必须列出被省略的工具名（不许静默丢弃）': host.includes('NOT described above'),
+  'host 工具目录省略时明确要求「别猜参数」': host.includes('do NOT guess'),
+  'host 老的那句「remaining tools omitted for length」已不再出现': !host.includes('remaining tools omitted for length'),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':

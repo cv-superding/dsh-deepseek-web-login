@@ -43,8 +43,30 @@ export interface FilterOutput {
   rejected?: { raw: string; mode: 'json' | 'xml'; reason?: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' }
 }
 
-const MAX_DESCRIPTION_CHARS = 400
-const MAX_TOOLS_SECTION_CHARS = 24_000
+/**
+ * 单个工具描述的上限。
+ *
+ * 2026-09-12 从 400 提到 3200。理由：DSH 实际下发 61 个工具，其中 17 个描述超过 400 字符，
+ * 而**被砍掉的恰恰是最要紧的部分** —— `pwsh` 的 3010 字符里有 2610 个字符在讲
+ * 「沙箱拒绝（file access denied）是策略判定、不是命令的 bug，别换个方式重试」
+ * 「命名管道不可用时 stdio:'pipe' 的 spawn 会报 EPERM，同样别换方式」
+ * 「只读沙箱下 .NET 静态调用 / Add-Type / COM / 反射会失败」这类**遇错该怎么办**的指引；
+ * `workflow` 的 2500 字符里是 agent() / pipeline() / parallel() 的钩子签名。
+ * 把它们砍掉，模型一遇错就只能瞎猜 —— 实测这两个工具正是 rejected.jsonl 里失败最多的。
+ */
+const MAX_DESCRIPTION_CHARS = 3_200
+
+/**
+ * 工具目录（一节）的总预算。
+ *
+ * 2026-09-12 从 24_000 提到 56_000。理由：实测 DSH 下发 61 个工具、不截描述时共需
+ * **50,942 字符**，旧预算只装得下 35 个。更糟的是**截断是按字母序发生的**（工具按名排序），
+ * 于是 `write`(w)、`web_search`、`web_fetch`、`subagent`、`todo_write`、`skill`、`read_image`、
+ * 全部 `ssh_*`/`sftp_*` 被砍，而极少用的 `db_tx_rollback`、`db_list_connections` 反而留下。
+ * 取 56_000 留约十分之一余量（够再添几个中等大小的工具）；再超就走下面的"列出名字"兜底。
+ * 不至于撑爆上下文：DeepSeek 网页端上下文 1M，我们的 maxChars 是 12 万。
+ */
+const MAX_TOOLS_SECTION_CHARS = 56_000
 const HOLD_BACK_CHARS = 24
 const MAX_CAPTURE_CHARS = 256 * 1024
 
@@ -80,7 +102,8 @@ export function buildToolSection(tools: readonly ToolSchemaLike[] | undefined): 
   if (!tools || tools.length === 0) return ''
   const parts: string[] = ['', '## Available tools']
   let budget = MAX_TOOLS_SECTION_CHARS
-  for (const tool of tools) {
+  for (let index = 0; index < tools.length; index += 1) {
+    const tool = tools[index]
     let schemaText = ''
     try {
       schemaText = JSON.stringify(tool.parameters ?? {})
@@ -94,7 +117,19 @@ export function buildToolSection(tools: readonly ToolSchemaLike[] | undefined): 
       `Parameters (JSON Schema): ${schemaText}`,
     ].join('\n')
     if (budget - block.length < 0) {
-      parts.push('\n(remaining tools omitted for length)')
+      // 预算用完。**必须把剩下的工具名说出来**：旧写法只有一句
+      // "(remaining tools omitted for length)"，模型连"还有哪些工具存在"都不知道，
+      // 只能盲猜名字和参数 —— 实测 61 个工具里 26 个就是这样静默消失的。
+      // 同时明确要求它别猜参数，改为向用户确认。
+      const rest = tools
+        .slice(index)
+        .map((item) => String(item?.name ?? ''))
+        .filter(Boolean)
+      parts.push(
+        `\n(⚠️ The following ${rest.length} tools are NOT described above (omitted for length): ` +
+          `${rest.join(', ')}. If you need one of them, ask the user for its exact parameters — ` +
+          'do NOT guess them.)',
+      )
       break
     }
     budget -= block.length
@@ -225,7 +260,12 @@ export function serializePrompt(options: SerializeOptions): string {
 
   if (merged.length <= maxChars) return merged
   // 超长：system+协议单独限预算，转写中段截断
-  const headBudget = Math.min(head.length, Math.floor(maxChars * 0.45))
+  // head（system + 工具协议 + 工具目录）**必须完整**：工具目录若被中段截断，
+  // 留下的是残缺的 JSON Schema —— 比"干脆不给这个工具"更误导（模型会照着半截定义猜参数）。
+  // 所以把 head 的占比从 0.45 提到 0.62：2026-09-12 实测 61 个工具时 head 约 6.35 万字符，
+  // 而 0.45 × 12 万 = 5.4 万已经装不下，会被 truncateMiddle 从中间挖掉一块。
+  // 转写仍余约 5.6 万字符，超出时照旧中段截断（历史可截，工具定义不可截）。
+  const headBudget = Math.min(head.length, Math.floor(maxChars * 0.62))
   const boundedHead = head.length <= headBudget ? head : truncateMiddle(head, headBudget, 0.85)
   const transcriptBudget = Math.max(1_000, maxChars - boundedHead.length - 8)
   const boundedTranscript = truncateMiddle(transcript, transcriptBudget, 0.7)

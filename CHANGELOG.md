@@ -2,6 +2,47 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.33 — 2026-09-12
+
+### 修：DSH 的 61 个工具里，有 26 个从没告诉过模型
+
+DSH 下发给插件的 `tools` 数组共 **61 个工具**，而我们把它写进 prompt 时有两道砍：
+
+- `MAX_TOOLS_SECTION_CHARS = 24_000` → 只装下 **35 个**，剩下 **26 个完全没告知模型**。
+  ⚠️ 截断是**按字母序**发生的（工具按名排序），所以被砍的是
+  `write`(w)、`web_search`、`web_fetch`、`subagent`、`subagent_fork`、`todo_write`、`skill`、
+  `read_image`、全部 `ssh_*`/`sftp_*`、`tunnel_start/stop`、`update_goal`；
+  而极少用的 `db_tx_rollback`、`db_list_connections`、`job_list` 反而留下。
+  **`write` 恰恰是 `~/.dsh/deepseek-web/rejected.jsonl` 里失败最多的工具**
+  （27,616 字符 unbalanced、13,480 字符 echo）。模型看不到它的参数定义，只能猜。
+- `MAX_DESCRIPTION_CHARS = 400` → **17 个工具的描述被砍**，`pwsh` 3010→400（丢 87%）、
+  `workflow` 2500→400（丢 84%）。**丢掉的正是「遇错该怎么办」的指引**：沙箱拒绝不是命令的 bug
+  （别换方式重试）、命名管道不可用时 `stdio:'pipe'` 的 spawn 会报 EPERM、只读沙箱下
+  .NET 静态调用/Add-Type/COM/反射会失败；`workflow` 丢的是 `agent()`/`pipeline()`/`parallel()` 的钩子签名。
+
+改三处（**必须联动，单改一处会更糟**）：
+
+  MAX_DESCRIPTION_CHARS   400     → 3_200    （长描述基本不再砍）
+  MAX_TOOLS_SECTION_CHARS 24_000  → 56_000   （实测需 50,942，留约一成余量）
+  head 占比               0.45    → 0.62     （见下）
+
+⚠️ **第二道闸**：`serializePrompt` 里 `headBudget = maxChars * 0.45 = 54,000`。
+只把工具段预算调大会让 head（system + 协议 + 工具段 ≈ 63.5k）超过它，
+被 `truncateMiddle` **从中间挖空** —— 比原来的尾部省略更糟，留下的是残缺的 JSON Schema。
+所以 head 占比同时提到 0.62（转写仍余约 5.6 万字符，历史可截，工具定义不可截）。
+
+兜底改为**不再静默**：真超预算时列出被省略的工具名，并要求模型"别猜参数，向用户确认"。
+
+验证（用 DSH 真实下发的 61 个工具离线跑）：工具段 51,022 字符、**缺失 0 个**、
+17 个长描述全部完整保留、prompt 合计 63,771 字符且**没有触发中段截断**。
+代价：prompt 头部从约 3.7 万字符涨到约 6.3 万字符；工具段在最前且固定，前缀缓存友好。
+
+测试：新增 `check-tools-section` 14 项（这个模块此前**零覆盖**，所以这个 bug 一直没被发现）。
+反向验证四处全部变红：描述上限改回 400 / 预算改回 24_000 / 兜底改回静默 / head 占比改回 0.45。
+⚠️ 第一轮反向验证里 D **没变红** —— 因为那条用例的 `merged` 根本没超过 `maxChars`，
+压根没走到截断分支。已改为把转写撑长，并反转断言（必须出现 `chars omitted`，
+以证明"真的走到了那段逻辑"，否则就是无效用例）。
+
 ## 0.1.32 — 2026-09-12
 
 ### 修：模型自造的伪标记 `<ide_result_status>` 漏上了屏
