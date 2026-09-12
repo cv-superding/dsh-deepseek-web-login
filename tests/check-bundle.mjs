@@ -101,6 +101,11 @@ const checks = {
   'client 三滑块初始隐藏（只有「延迟」模式才显示）': client.includes('cleanupRanges'),
   'client 说明了取值随机（防止删除时机有固定规律）': client.includes('每次在区间内随机抽'),
   'client 说明了删除间隔只作用于逐个删除': client.includes('一下子连发几十个删除请求'),
+  'host 伪标记清单是数据驱动的（加名字不用改正则，改错也看得见）':
+    host.includes('IMITATED_MARKER_TAGS'),
+  'host 伪标记清单里含 ide_result_status（模型自造的那个，实测漏过一次）':
+    host.includes('ide_result_status'),
+  'host 仍保留原有伪标记 ds_system（老现场不能回退）': host.includes('ds_system'),
   'host 保留并规整 cookie 过期信息（老记录没有该字段也要能读出来）':
     host.includes('normalizeCookieMetaList') && host.includes('pickCookieMeta') && host.includes('cookieMeta'),
   'host /accounts 回传 cookieMeta（界面才知道该说"未记录"还是"全是会话级"）':

@@ -1,10 +1,16 @@
 /**
  * 回归：模型吐出的伪系统标记（<ds_system>/<system>）必须被剥掉，不能上屏。
  *
- * 现场（2026-09-11 实测，session-0e88c545）：模型在一条正文里连续输出 13 个
+ * 现场 A（2026-09-11 实测，session-0e88c545）：模型在一条正文里连续输出 13 个
  *   <ds_system>Tool result for call_1a2b3c</ds_system>
  * 调用 ID 还是字母递增编造的（1a2b3c→4d5e6f→7a8b9c…）—— 这是模型在**模仿**系统消息格式，
  * 与「转写回声」同类（但形态是 XML 标签而不是 [Tool Result] 行）。
+ *
+ * 现场 B（2026-09-12，session-15ac4c56）：正文里冒出
+ *   <ide_result_status>Tool ran without output or errors</ide_result_status>
+ * ⚠️ 这个串在 **DSH 的 app.asar、全部已装插件、`~/.dsh` 全树**里都搜不到（原始字节搜索 0 处），
+ * 而且会话日志里**只出现在模型的输出字段**（212 条 tool/result、用户消息、系统消息里一处都没有）
+ * → 判定是模型自己编的，不是 DSH 喂给它的。所以它属于同一类：**剥离，不要当成真实协议**。
  *
  * 用法: node tests/check-system-markers.mjs
  */
@@ -74,6 +80,61 @@ test('嵌套在其他文本中的标记只剥标记本身', () => {
   assert.ok(result.stripped)
   assert.ok(result.text.includes('| read |'), '表格结构要保留')
   assert.ok(!result.text.includes('<ds_system>'), '标记要被剥掉')
+})
+
+test('现场 B：编造的 ide_result_status 标记被剥掉，上下文文字保留', () => {
+  const input =
+    'Core backend written. Now I need to verify the module-resolution question before claiming it works.\n\n\n\n' +
+    '<ide_result_status>Tool ran without output or errors</ide_result_status>'
+  const result = stripSystemMarkers(input)
+  assert.ok(result.stripped, '必须报告剥掉了')
+  assert.ok(!result.text.includes('ide_result_status'), '正文里不能出现这个标记')
+  assert.ok(!result.text.includes('Tool ran without output'), '标记的内容也是垃圾，一起剥')
+  assert.ok(result.text.includes('Core backend written.'), '标记之前的正文要保留')
+})
+
+test('ide_result_status 夹在正文中间也只剥标记', () => {
+  const result = stripSystemMarkers('前文。<ide_result_status>Tool ran without output or errors</ide_result_status>后文。')
+  assert.ok(result.stripped)
+  assert.equal(result.text, '前文。后文。')
+})
+
+test('截断的半截 ide_result_status 同样被剥掉', () => {
+  const result = stripSystemMarkers('前文。\n<ide_result_status>Tool ran without output or erro')
+  assert.ok(result.stripped)
+  assert.ok(!result.text.includes('ide_result_status'))
+  assert.ok(result.text.includes('前文。'))
+})
+
+test('⚠️ 清单外的标签不动：<tool_call> 是**真协议**，剥了会把工具调用吃掉', () => {
+  const input = '好的，我来读文件。\n<tool_call>\n{"name":"read_file"}\n</tool_call>'
+  const result = stripSystemMarkers(input)
+  assert.ok(!result.stripped, '不能误报剥掉了')
+  assert.equal(result.text, input, '必须原样通过')
+})
+
+test('围栏代码块里的 ide_result_status 也保留（讨论这些标记时不该被吃掉）', () => {
+  const input = '说明：\n```\n<ide_result_status>示例</ide_result_status>\n```\n以上是示例。'
+  const result = stripSystemMarkers(input)
+  assert.ok(!result.stripped, '围栏内不该剥')
+  assert.ok(result.text.includes('<ide_result_status>示例</ide_result_status>'))
+})
+
+test('三种标记混在一起也能全部剥掉，且不碰上下文', () => {
+  const input = [
+    '开头。',
+    '<ds_system>Tool result for call_1a2b3c</ds_system>',
+    '<system>Tool results are not shown</system>',
+    '<ide_result_status>Tool ran without output or errors</ide_result_status>',
+    '结尾。',
+  ].join('\n')
+  const result = stripSystemMarkers(input)
+  assert.ok(result.stripped)
+  for (const tag of ['ds_system', 'system', 'ide_result_status']) {
+    assert.ok(!result.text.includes('<' + tag), '不该残留 ' + tag)
+  }
+  assert.ok(result.text.includes('开头。'))
+  assert.ok(result.text.includes('结尾。'))
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
