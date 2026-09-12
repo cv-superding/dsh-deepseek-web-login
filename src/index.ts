@@ -11,6 +11,7 @@
  */
 import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
+import { DEFAULT_MIN_REQUEST_INTERVAL_MS } from './gate.ts'
 import { browserLogin, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { validateAuth } from './webapi.ts'
@@ -78,6 +79,9 @@ export function apply(ctx: any, config: Config = {}): void {
     deleteWebSessions: config.deleteWebSessions !== false,
     autoContinue: config.autoContinue !== false,
     maxContinuations: config.maxContinuations ?? 2,
+    // 防风控：默认串行 + 每次调用之间至少 3 秒（见 README「配置」）
+    allowConcurrent: config.allowConcurrent === true,
+    minRequestIntervalMs: config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
     logger,
   }
 
@@ -161,6 +165,8 @@ export function apply(ctx: any, config: Config = {}): void {
                   maxPromptChars: adapterConfig.maxPromptChars,
                   idleTimeoutMs: adapterConfig.idleTimeoutMs,
                   deleteWebSessions: adapterConfig.deleteWebSessions !== false,
+                  allowConcurrent: adapterConfig.allowConcurrent === true,
+                  minRequestIntervalMs: adapterConfig.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
                 },
               })
               return

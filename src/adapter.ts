@@ -11,6 +11,7 @@ import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join as joinPath } from 'node:path'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
+import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS } from './gate.ts'
 import { scheduleDeleteSession, streamWebCompletion, uploadImageFile } from './webapi.ts'
 import { collectImageRefs, serializePrompt, stripSystemMarkers, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
@@ -164,6 +165,21 @@ export interface AdapterConfig {
   autoContinue?: boolean
   /** 自动续写的最大轮数（默认 2；每轮是一次新的网页端请求）。 */
   maxContinuations?: number
+  /**
+   * 是否允许同一账号并发请求（默认 **false = 串行排队**）。
+   *
+   * 网页端同一账号同时只能生成一条：DSH 的**会话标题生成**（purpose=session-title）
+   * 会和主回答撞在一起（实测 272 轮里有 16 对时间重叠），既会被拒、也会推高风控风险
+   * （实测：双窗口并发生成不到 6 分钟即被限制 1 天）。只有明确知道自己在做什么时才打开。
+   */
+  allowConcurrent?: boolean
+  /**
+   * 两次网页端调用之间的最小间隔（毫秒，默认 3000）。
+   *
+   * 按上一次调用的**结束**时刻计算 —— 真正压低请求密度、避免账号级限流的那一项。
+   * 设 0 可关闭。推荐值见 README「配置」一节。
+   */
+  minRequestIntervalMs?: number
   /** 日志器（cordis logger；缺省静默）。 */
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
 }
@@ -272,6 +288,13 @@ export function createAdapter(deps: AdapterDeps) {
   // 流函数可注入（单测用假流验证自动续写）；缺省走真实网页端实现
   const runStream = deps.streamCompletion ?? streamWebCompletion
 
+  // 请求闸门：串行 + 最小间隔，覆盖**每一次**模型调用（含 DSH 的会话标题/压缩等辅助调用）
+  const gate = createRequestGate({
+    allowConcurrent: deps.config.allowConcurrent === true,
+    minIntervalMs: deps.config.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    logger,
+  })
+
   const adapter = {
     providerInfo(provider: string) {
       return { id: provider, name: 'DeepSeek 网页版（免费）' }
@@ -314,12 +337,12 @@ export function createAdapter(deps: AdapterDeps) {
       const spec = resolveSpec(model)
       return Promise.resolve({
         model: resolvedModelInfo(provider, spec, String(model ?? '')),
-        stream: (options: any) => streamImpl(options),
+        stream: (options: any) => gatedStream(options),
       })
     },
 
     stream(options: any): AsyncGenerator<any> {
-      return streamImpl(options)
+      return gatedStream(options)
     },
   }
 
@@ -366,6 +389,22 @@ export function createAdapter(deps: AdapterDeps) {
       }
     }
     return ids
+  }
+
+  /**
+   * streamImpl 的闸门外壳：拿到许可后才真正开始请求，流结束（含被中断/抛错）才释放。
+   *
+   * ⚠️ 许可在 generator 体**内部**获取 —— 只有真正开始迭代（第一次 next()）才占位，
+   * 消费者拿了 generator 却没迭代时不会泄漏名额；流被 abort 时 finally 一定会释放。
+   */
+  async function* gatedStream(options: any): AsyncGenerator<any> {
+    const purpose = typeof options?.purpose === 'string' && options.purpose ? options.purpose : 'chat'
+    const release = await gate.acquire(purpose)
+    try {
+      yield* streamImpl(options)
+    } finally {
+      release()
+    }
   }
 
   async function* streamImpl(options: any): AsyncGenerator<any> {

@@ -112,6 +112,35 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `maxPromptChars` | `1500000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
+| `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer) |
+| `maxContinuations` | `2` | Max auto-continuation rounds (each round is a new web request, so it spends more of the free quota) |
+| `minRequestIntervalMs` | **`3000`** | Minimum gap between two web calls, measured from when the previous one **finished**. `0` disables it |
+| `allowConcurrent` | **`false`** | Allow concurrent requests on one account. Off by default: calls queue (FIFO) |
+
+### Why throttling is on by default, and which values to use
+
+The web client allows only one generation per account at a time; concurrent generations are rejected, and the
+real cost is worse — two windows generating at once triggered a **1-day account-level restriction** in under
+6 minutes (the login stays valid, but every request from that account is refused).
+
+DSH itself does call the same account concurrently. Reconstructing the start/end of 272 calls from the plugin
+log showed **16 real overlaps**: one side is the main answer, the other is only 8–17 characters taking 1–3
+seconds — that is DSH's **session-title generation** (`options.purpose === 'session-title'`). In other words,
+while you are still waiting for the answer, another request has already gone out to the same account.
+
+So the plugin now serialises calls (including title/compaction) and enforces a minimum gap between them.
+
+| Situation | `minRequestIntervalMs` | `allowConcurrent` |
+|---|---|---|
+| **Recommended (default)** | `3000` | `false` |
+| Speed over safety, short tasks only | `1500` | `false` |
+| Already throttled once / dense multi-step automation | `8000` | `false` |
+| No throttling at all (**not recommended**) | `0` | `false` |
+| Experimental: restore native concurrency | any | `true` ⚠️ |
+
+> The gap is measured from when the previous call **finished**, so a long answer is never followed by an
+> extra pointless wait — it only affects genuinely dense back-to-back calls. Change the config and **restart
+> DSH**; the settings page shows the currently effective values.
 
 ## Known limitations
 

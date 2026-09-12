@@ -27,7 +27,13 @@ interface StatusPayload {
   auth: { loggedIn: boolean; display?: string; capturedAt?: string; hasCookie: boolean; hasFingerprint: boolean; wasmHost?: string; unverified?: boolean; tokenLength?: number }
   validation?: { ok: boolean; error?: string }
   models: { id: string; name: string; description: string; modelType: string; thinking: boolean; contextWindow: number }[]
-  config: { maxPromptChars: number; idleTimeoutMs: number; deleteWebSessions: boolean }
+  config: {
+    maxPromptChars: number
+    idleTimeoutMs: number
+    deleteWebSessions: boolean
+    allowConcurrent?: boolean
+    minRequestIntervalMs?: number
+  }
 }
 
 async function api(path: string, init?: RequestInit): Promise<any> {
@@ -333,6 +339,16 @@ function Panel(): any {
         rows.push(['PoW WASM', status.auth.wasmHost || '默认地址'])
         rows.push(['token 长度', `${status.auth.tokenLength ?? 0} 字符`])
         if (status.validation) rows.push(['服务端校验', status.validation.ok ? '通过' : `失败：${status.validation.error ?? ''}`])
+        // 让用户能确认「防风控」到底生效成什么样（值来自配置，改配置后重启生效）
+        const interval = status.config?.minRequestIntervalMs
+        if (interval !== undefined) {
+          rows.push([
+            '请求节流',
+            status.config?.allowConcurrent
+              ? `⚠️ 允许并发 · 间隔 ${interval}ms（并发生成有账号级限制风险，不建议）`
+              : `串行（一次只发一条）· 间隔 ${interval}ms`,
+          ])
+        }
       } else {
         // 未登录时说明「能用哪条路登录」（不要笼统写成「非 Electron 环境」：
         // 2026-09-11 起宿主是 utility 进程，但真实浏览器登录是可用的）
