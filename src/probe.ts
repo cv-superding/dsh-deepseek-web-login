@@ -13,8 +13,10 @@
  * 为什么值得：登录态过期现在的表现是"几十步的任务跑到一半突然失败"。
  * 一次只读探活的成本可以忽略，换来的是提前知道 —— 而且探活失败**只提示、不阻断**。
  *
- * ⚠️ 注意与"账号级限制"是两回事：受限期间 `users/current` 依然返回 200，
- * 所以探活**探不出**限制状态（那个只能从生成请求被拒里学到，见 accounts.ts 的 limit 字段）。
+ * ⚠️ 更正（2026-09-12 实测）：本文档原先写"受限期间探不出限制状态"，**这是错的**。
+ * `users/current` 的响应体里就带着 `chat: { is_muted, mute_until }` —— 受限期间这个字段是有效的，
+ * 所以理论上探活**能**提前发现限制（目前尚未接上：限制状态仍由生成失败时的
+ * `mute_until` 记入 accounts 的 limit 字段，见 webapi.ts 的 muteUntilMs）。
  */
 import { hasUsableAuth, type WebAuth } from './auth.ts'
 import { listAccounts, updateAccount } from './accounts.ts'
@@ -24,6 +26,8 @@ export interface ProbeOutcome {
   ok: boolean
   at: string
   error?: string
+  /** 探活成功时顺带带回来的账号身份（用来补全显示名，见下面的写回）。 */
+  user?: { id?: string; display?: string }
 }
 
 interface ProbeLogger {
@@ -45,15 +49,25 @@ export async function probeOnce(auth: WebAuth | undefined, logger?: ProbeLogger)
   let outcome: ProbeOutcome
   try {
     const result = await validateAuth(auth, AbortSignal.timeout(20_000))
-    outcome = result.ok ? { ok: true, at } : { ok: false, at, error: result.error ?? '校验未通过' }
+    outcome = result.ok
+      ? { ok: true, at, ...(result.user ? { user: result.user } : {}) }
+      : { ok: false, at, error: result.error ?? '校验未通过' }
   } catch (error: any) {
     outcome = { ok: false, at, error: error?.message ?? String(error) }
   }
 
   if (target) {
     if (outcome.ok) {
-      // 成功：记录时间，并**清掉**上一次的失败（`undefined` 会被规范化为"字段不存在"）
-      updateAccount(target.id, { lastVerifiedAt: at, lastVerifyError: undefined })
+      // 成功：记录时间、并**清掉**上一次的失败（`undefined` 会被规范化为"字段不存在"）。
+      //
+      // 顺带把身份信息写回：捕获那一刻可能还没校验过（比如刚"登录新账号"加进来的），
+      // 于是列表只能显示内部 id。探活是零额度的只读调用，正好用来把显示名补上 ——
+      // 这样库里闲置的账号也会自己"长出名字"，不用等用户手动刷新。
+      // 用「旧值打底 + 新值覆盖」合并：新一次只有 id、没有 display 时，
+      // 不要把原来已经拿到的好名字冲掉（pickUserDisplay 保证空值不会写进 key）。
+      const patch: Record<string, unknown> = { lastVerifiedAt: at, lastVerifyError: undefined }
+      if (outcome.user) patch.user = { ...(target.user ?? {}), ...outcome.user }
+      updateAccount(target.id, patch as any)
     } else {
       updateAccount(target.id, { lastVerifyError: { at, message: String(outcome.error ?? '') } })
     }

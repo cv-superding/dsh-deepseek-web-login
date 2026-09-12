@@ -688,6 +688,40 @@ export function scheduleDeleteSession(auth: WebAuth, sessionId: string): void {
 }
 
 /** 验证登录态：优先 users/current，端点不存在时退回 PoW challenge 探活。 */
+/**
+ * 从 `users/current` 的 user 对象里挑一个**能看的账号标识**。
+ *
+ * 两个必须记住的坑（都是实测踩出来的，2026-09-12）：
+ *
+ *  1. **不能用 `??` 串起来。** 接口对"没设邮箱"的账号会返回 `email: ""`，
+ *     而空字符串**不是** nullish —— `"" ?? x` 的结果就是 `""`，整条回退链当场被它挡住，
+ *     display 永远是空，界面只好退回去显示内部 id（`acc_cd8e05ec`）。
+ *     所以必须按"**有内容**"取，跳过 undefined / null / 空白。
+ *
+ *  2. **字段名要和响应对齐。** 手机号是 `mobile_number`（不是 `mobile`），
+ *     而且服务端返回的**已经是脱敏形态**（如 `183******78`），可以直接展示。
+ *
+ * 实测响应形状（只列相关字段）：
+ *   { id, token, email: "", mobile_number: "183******78", area_code: "+86", chat: {...} }
+ */
+export function pickUserDisplay(user: any): string {
+  const candidates = [
+    user?.email,
+    user?.mobile_number,
+    user?.mobile,
+    user?.phone,
+    user?.username,
+    user?.nickname,
+    user?.name,
+  ]
+  for (const value of candidates) {
+    if (value === undefined || value === null) continue
+    const text = String(value).trim()
+    if (text) return text
+  }
+  return ''
+}
+
 export async function validateAuth(
   auth: WebAuth,
   signal?: AbortSignal,
@@ -705,12 +739,12 @@ export async function validateAuth(
       if (bizError) return { ok: false, error: bizError.msg }
       const payload = json?.data?.biz_data ?? json?.data
       const user = payload?.user ?? payload ?? {}
-      const display = user?.email ?? user?.mobile ?? user?.phone ?? user?.username ?? user?.nickname ?? user?.name ?? ''
+      const display = pickUserDisplay(user)
       return {
         ok: true,
         user: {
           ...(user?.id !== undefined ? { id: String(user.id) } : {}),
-          ...(display ? { display: String(display) } : {}),
+          ...(display ? { display } : {}),
         },
       }
     }

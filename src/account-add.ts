@@ -51,6 +51,11 @@ export interface CommitResult {
   mode: 'add' | 'switch'
   /** 仅 add 模式：这次捕获的账号是不是**新**的（false = 库里本来就有）。 */
   created?: boolean
+  /**
+   * 这次凭证落到了哪条记录上。调用方拿到它就能把"校验回来的身份信息"补写回去 ——
+   * 否则新加的账号在列表里只能显示内部 id（`acc_xxxxxxxx`），要等下一次探活才有名字。
+   */
+  recordId?: string
 }
 
 /**
@@ -62,7 +67,8 @@ export interface CommitResult {
 export function commitCapturedAuth(auth: WebAuth, now: number = Date.now()): CommitResult {
   if (!addModeActive(now)) {
     writeAuth(auth)
-    return { mode: 'switch' }
+    const active = activeAccountId()
+    return { mode: 'switch', ...(active ? { recordId: active } : {}) }
   }
   const before = new Set(listAccounts().map((item) => item.id))
   const hadActive = activeAccountId() !== undefined
@@ -72,5 +78,5 @@ export function commitCapturedAuth(auth: WebAuth, now: number = Date.now()): Com
   // 这不违反"添加不自动切换"：那条规则针对的是**别顶掉正在用的号**。
   if (!hadActive) setActiveAccount(record.id)
   endAddAccount()
-  return { mode: 'add', created: !before.has(record.id) }
+  return { mode: 'add', created: !before.has(record.id), recordId: record.id }
 }

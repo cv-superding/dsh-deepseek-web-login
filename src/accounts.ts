@@ -67,8 +67,10 @@ export interface AccountRecord extends WebAuth {
   /**
    * 观测到的账号级限制（来自**生成请求被拒**，不是探活）。
    *
-   * 注意：`users/current` 在账号被限制期间依然返回 200 —— 限制只作用于生成，
-   * 所以这个状态**只能从失败里学到**，探活是探不出来的。
+   * 更正（2026-09-12 实测）：这里原先写"受限期间 users/current 依然 200，所以探活探不出来" ——
+   * 返回 200 是对的，但**响应体里就带着 `chat: { is_muted, mute_until }`**，
+   * 也就是说探活其实探得出来，只是目前还没接上。
+   * 现在这个状态仍然只从**生成失败**里学到（失败信封里的 mute_until，见 webapi.ts 的 muteUntilMs）。
    */
   limit?: { untilMs: number; observedAt: string }
 }
@@ -383,7 +385,11 @@ export function migrateLegacyAuthIfNeeded(): AccountRecord | undefined {
 export function accountTitle(record: AccountRecord, mask: (raw: string) => string): string {
   if (record.label) return record.label
   const display = record.user?.display || record.user?.id || ''
-  return display ? mask(display) : record.id
+  // 一个名字都没拿到时（刚捕获、还没校验过），别把**内部 id**（`acc_cd8e05ec`）当名字摆出来 ——
+  // 用户看到一串 hex 只会以为是 bug（实测反馈）。写明"未识别"，并留一小截后缀，
+  // 这样多个未识别账号之间还能区分。
+  if (!display) return `未识别账号（${record.id.replace(/^acc_/, '').slice(0, 8)}）`
+  return mask(display)
 }
 
 /** 库文件体积（供界面提示"账号库占用"，也便于发现异常膨胀）。 */

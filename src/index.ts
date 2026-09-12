@@ -587,7 +587,8 @@ export function apply(ctx: any, config: Config = {}): void {
                   browser: findSystemBrowser()?.name ?? null,
                 },
                 // 账号元信息（限制解除时间 / 探活结果）跟着 auth 一起给界面。
-                // 注意 limit 只能从"生成被拒"里学到 —— 受限期间 users/current 依然 200。
+                // 注意 limit 目前仍只从"生成被拒"里学到 —— 虽然 users/current 的响应体里
+                // 也带着 chat.mute_until（2026-09-12 实测），但还没接上，见 accounts.ts 的说明。
                 // 本地状态位置（「关于」页展示）
                 paths: {
                   webLogin: webLoginDir(),
@@ -665,6 +666,19 @@ export function apply(ctx: any, config: Config = {}): void {
                 const commit = commitCapturedAuth(outcome.auth)
                 const check = await validateAuth(outcome.auth).catch(() => undefined)
                 const verified = !!check?.ok
+                // 把这个账号的身份写回记录。
+                // 为什么必须在这里补：捕获本身只拿到 token/cookie，**不含账号名**；
+                // 不补的话列表只能显示内部 id（`acc_xxxxxxxx`），要等下一次探活（最长 30 分钟）
+                // 才有名字 —— 实测用户加完账号一刷新就看到了那串 hex，会以为是 bug。
+                // 身份来自刚才这次零额度的只读校验，顺手就拿到了。
+                if (verified && check?.user && commit.recordId) {
+                  const record = listAccounts().find((item) => item.id === commit.recordId)
+                  updateAccount(commit.recordId, {
+                    user: { ...(record?.user ?? {}), ...check.user },
+                    lastVerifiedAt: new Date().toISOString(),
+                    lastVerifyError: undefined,
+                  } as any)
+                }
                 sendJson(res, 200, {
                   started: true,
                   mode: 'browser',
