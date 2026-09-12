@@ -91,6 +91,8 @@ font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12p
 }
 .dsw-title{margin:0 0 3px;font-size:14px;font-weight:500;color:var(--fg)}
 .dsw-sub{margin:0 0 14px;font-size:12px;line-height:1.55;color:var(--fg3)}
+/* provider 名带连字符，万一折行会断成 deepseek- / web（看着像故障）—— 整词不拆 */
+.dsw-nobreak{white-space:nowrap}
 .dsw-card{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;margin-bottom:10px}
 .dsw-cardhead{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
 .dsw-card > .name{margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
@@ -192,7 +194,16 @@ function Panel(): any {
 
     const page = el('div', 'dsw-page')
     const title = el('h3', 'dsw-title', 'DeepSeek 网页登录（免费模型）')
-    const sub = el('p', 'dsw-sub', '用 chat.deepseek.com 网页版登录态驱动 DSH agent —— 不需要 API Key。provider 路由：deepseek-web')
+    // 副标题的宽度是"预算"问题，不是随便写的：
+    // 上一版（78 字）单行要 558px，而宿主面板的内容宽约 560px —— 正好压在折行边界上。
+    // 「账号」页比「模型」页高，面板因此出现纵向滚动条，内容宽度少十几像素，
+    // 最后一个词就掉到第二行，还断在 `deepseek-web` 的连字符处（看着像故障）。
+    // 现在这版约 467px，留 ~90px 余量，切标签/缩放窗口都不会再翻行。
+    // ⚠️ 以后改这句话，请保持单行宽度 ≲ 470px（量法：white-space:nowrap 的 span 取 getBoundingClientRect）。
+    const sub = el('p', 'dsw-sub')
+    sub.append('用 chat.deepseek.com 的登录态驱动 DSH，不需要 API Key（provider：')
+    sub.append(el('span', 'dsw-nobreak', 'deepseek-web'))
+    sub.append('）')
     page.append(style, title, sub)
 
     // ── 操作反馈：常驻在标签栏之上 ──────────────────────────────

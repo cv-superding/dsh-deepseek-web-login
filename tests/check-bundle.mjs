@@ -61,6 +61,7 @@ const checks = {
   'client 标签页骨架（页签栏 + 页容器 + 切换函数）': client.includes('dsw-tabs') && client.includes('dsw-pane') && client.includes('selectTab'),
   'client 四个页签齐全（账号/模型/防风控/传输层）': ['账号', '模型', '防风控', '传输层'].every((label) => client.includes(label)),
   'client 操作反馈常驻标签栏之上（dsw-alert）': client.includes('dsw-alert'),
+  'client 副标题整词不拆（deepseek-web 不会被断在连字符）': client.includes('dsw-nobreak'),
   'client 传输层卡（切换 + 一键测试）': client.includes('/transport') && client.includes('测试传输层'),
   'client 未登录时说明可用登录路径': client.includes('调试协议，自动读取凭证'),
   'client 模块 id 正确': client.includes('id: "dsh-deepseek-web-login"'),
