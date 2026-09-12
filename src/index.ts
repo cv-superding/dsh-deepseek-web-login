@@ -39,6 +39,7 @@ import {
   createSessionCleaner,
   currentFetch,
   DEFAULT_SESSION_CLEANUP,
+  DEFAULT_SESSION_REUSE_TURNS,
   type SessionCleanupMode,
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
@@ -220,6 +221,8 @@ export function apply(ctx: any, config: Config = {}): void {
     maxPromptChars: config.maxPromptChars ?? 1_500_000,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
+    // 会话复用：默认 20 轮共用一个网页端会话。0 = 关闭（回到每请求一个会话）
+    sessionReuseTurns: config.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS,
     autoContinue: config.autoContinue !== false,
     maxContinuations: config.maxContinuations ?? 2,
     // 防风控：默认串行 + 每次调用之间至少 3 秒（见 README「配置」）。

@@ -15,7 +15,7 @@
  * 用法: node tests/check-session-lifecycle.mjs
  */
 import assert from 'node:assert/strict'
-import { envelopeError, isBusyGenerating, isInvalidSessionError, isMutedError, isThrottled, muteUntilMs, streamWebCompletion } from '../src/webapi.ts'
+import { envelopeError, isBusyGenerating, isInvalidSessionError, isMutedError, isThrottled, muteUntilMs, resetSessionReuse, streamWebCompletion } from '../src/webapi.ts'
 
 let passed = 0
 const failures = []
@@ -95,7 +95,12 @@ function jsonResponse(payload, status = 200) {
 }
 
 /** 装上假的 fetch，跑一次完成请求，返回时序日志与产出。 */
-async function scenario({ completionResponses }) {
+async function scenario({ completionResponses, sessionReuseTurns = 0 }) {
+  // 会话复用槽是**模块级**的（生产里一个进程就一个），跨场景必须清掉，
+  // 否则本场景会复用上一个场景留下的会话，断言里的 S1/S2 就对不上了。
+  resetSessionReuse()
+  // 本文件测的是「每请求一个会话」的时序（建→请求→流结束→删），所以默认关掉复用；
+  // 复用本身的行为（N 轮共用一个会话、轮换才回收）由 tests/check-session-reuse.mjs 覆盖。
   const log = []
   let sessionSeq = 0
   const transport = {
@@ -127,6 +132,7 @@ async function scenario({ completionResponses }) {
       thinkingEnabled: false,
       modelType: 'default',
       idleTimeoutMs: 5_000,
+      sessionReuseTurns,
       onDeleteSession: (id) => log.push(`delete:${id}`),
     }, transport)) {
       events.push(event)

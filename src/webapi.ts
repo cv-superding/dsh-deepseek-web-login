@@ -1369,6 +1369,74 @@ export async function* parseWebSse(body: any): AsyncGenerator<WebStreamEvent> {
 
 // ── 完成请求 ──────────────────────────────────────────────
 
+// ── 会话复用（2026-09-12 实测判定后新增）────────────────────
+
+/**
+ * 复用一个网页端会话最多发多少次请求，超过就换一个新的；0 = 关闭复用（回到「每请求一个会话」）。
+ *
+ * 为什么可以复用（**实测**，不是推理）：
+ * 每次 completion 都发 `parent_message_id: null` → 每条消息都是会话里的**根消息**、没有父链，
+ * 服务端按消息树回溯上下文时回溯到空。判定实验（2026-09-12）：同一会话先发
+ * 「记住编号 ZC-7391-KX，只回 OK」→ 得到 `OK`；再问「编号是什么」→ 答 `不知道`。
+ * 证明同会话历史**不会**进入上下文。
+ * （0.1.21 注释里「复用会让上下文翻倍」的说法是未经实测的推理，已被这次实验推翻。）
+ *
+ * 收益：实测 2026-09-12 一天建了 182 个网页端会话（峰值 74 个/小时、最密 8 个/分钟），
+ * 因为每个 DSH 回合 = 建一个会话、用完再删一个 —— 真人不会这样建删对话。
+ * 复用后建会话数降到「轮次 / N」。
+ */
+export const DEFAULT_SESSION_REUSE_TURNS = 20
+
+/** 复用槽：同一账号当前可复用的会话。key 是凭证摘要（不进日志、不拿明文当键）。 */
+let reuseSlot: { key: string; sessionId: string; turns: number } | undefined
+
+/** 凭证摘要：只用来判断「是不是同一个账号」。不做安全用途、不落日志。 */
+function accountKey(auth: WebAuth): string {
+  const raw = `${auth?.token ?? ''}|${auth?.cookie ?? ''}`
+  let hash = 2166136261
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+interface SessionLease {
+  sessionId: string
+  reused: boolean
+  /** 因轮换而作废的旧会话（调用方负责回收）。 */
+  retired?: string
+}
+
+async function leaseSession(
+  auth: WebAuth,
+  signal: AbortSignal,
+  transport: CompletionTransport,
+  maxTurns: number,
+): Promise<SessionLease> {
+  const key = accountKey(auth)
+  const limit = Number.isFinite(maxTurns) ? Math.max(0, Math.floor(maxTurns)) : DEFAULT_SESSION_REUSE_TURNS
+  if (limit > 0 && reuseSlot && reuseSlot.key === key && reuseSlot.turns < limit) {
+    reuseSlot.turns += 1
+    return { sessionId: reuseSlot.sessionId, reused: true }
+  }
+  // 换账号 / 轮换到上限：旧会话作废（换账号时不回收别人的会话，避免误删）
+  const retired = reuseSlot && reuseSlot.key === key ? reuseSlot.sessionId : undefined
+  const sessionId = await transport.createSession(auth, signal)
+  reuseSlot = limit > 0 ? { key, sessionId, turns: 1 } : undefined
+  return { sessionId, reused: false, ...(retired ? { retired } : {}) }
+}
+
+/** 把某个会话从复用槽里摘掉（会话失效 / 请求失败时调用，下次会新建）。 */
+export function retireSession(sessionId?: string): void {
+  if (!sessionId || (reuseSlot && reuseSlot.sessionId === sessionId)) reuseSlot = undefined
+}
+
+/** 只给测试用：清空复用槽。 */
+export function resetSessionReuse(): void {
+  reuseSlot = undefined
+}
+
 export interface CompletionParams {
   prompt: string
   thinkingEnabled: boolean
@@ -1378,6 +1446,8 @@ export interface CompletionParams {
   refFileIds?: readonly string[]
   signal?: AbortSignal
   idleTimeoutMs?: number
+  /** 同一会话复用的轮次上限（0 = 每请求一个会话，用完即删）。 */
+  sessionReuseTurns?: number
   onDeleteSession?: (sessionId: string) => void
 }
 
@@ -1408,7 +1478,15 @@ async function openCompletion(
 ): Promise<{ sessionId: string; resp: Response }> {
   let lastFailure: AdapterLlmError | undefined
   for (let attempt = 0; attempt < 2; attempt++) {
-    const sessionId = await transport.createSession(auth, signal)
+    const lease = await leaseSession(
+      auth,
+      signal,
+      transport,
+      params.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS,
+    )
+    const sessionId = lease.sessionId
+    // 只有被**轮换**掉的旧会话在这里回收；当前会话留着给下一个请求复用
+    if (lease.retired) params.onDeleteSession?.(lease.retired)
     let resp: Response
     try {
       resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {
@@ -1446,6 +1524,7 @@ async function openCompletion(
           : code === 'RATE_LIMIT'
             ? ' —— 网页端频控（免费额度），稍后重试即可'
             : ''
+      retireSession(sessionId) // 失败即弃，下次换新会话
       params.onDeleteSession?.(sessionId)
       throw new AdapterLlmError(
         `DeepSeek web completion failed (HTTP ${resp.status})${text ? `: ${text.slice(0, 200)}` : ''}${hint}`,
@@ -1454,6 +1533,7 @@ async function openCompletion(
       )
     }
     if (!resp.body) {
+      retireSession(sessionId)
       params.onDeleteSession?.(sessionId)
       throw new AdapterLlmError('DeepSeek web completion returned no body', 'EMPTY_RESPONSE')
     }
@@ -1493,7 +1573,8 @@ async function openCompletion(
           'MALFORMED_RESPONSE',
           { status: resp.status },
         )
-    params.onDeleteSession?.(sessionId) // 这个会话已经废了，顺手回收，不留垃圾
+    retireSession(sessionId) // 这个会话已经废了，顺手回收，不留垃圾
+    params.onDeleteSession?.(sessionId)
     if (attempt === 0 && biz && isInvalidSessionError(biz)) {
       lastFailure = failure
       continue
@@ -1564,6 +1645,9 @@ export async function* streamWebCompletion(
     } catch {}
     // 会话回收排在**流结束之后**（正常结束 / 报错 / 调用方中止都会走到这里）。
     // 提前删除会让会话在生成中途消失 —— 见 streamWebCompletion 顶部的事故说明。
-    params.onDeleteSession?.(sessionId)
+    // 复用模式下**不删当前会话**（它要留给下一个请求）；只有关闭复用时才在这里回收。
+    if ((params.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS) === 0) {
+      params.onDeleteSession?.(sessionId)
+    }
   }
 }

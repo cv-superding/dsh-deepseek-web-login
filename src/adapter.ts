@@ -196,6 +196,13 @@ export interface AdapterConfig {
    * - `keep`：完全不删（请求最少，但网页端会留下临时会话）
    */
   sessionCleanup?: 'immediate' | 'deferred' | 'keep'
+  /**
+   * 同一网页端会话复用的轮次上限（默认 20）。
+   *
+   * 0 = 关闭复用，回到「每请求建一个会话、用完即删」。
+   * 复用的安全性由实测判定：每次都发 `parent_message_id: null`，服务端不带会话历史。
+   */
+  sessionReuseTurns?: number
   /** deferred 模式的等待上限（毫秒，默认 90000）。 */
   sessionCleanupDelayMs?: number
   /** deferred 模式攒够多少个立即清理（默认 8）。 */
@@ -591,6 +598,8 @@ export function createAdapter(deps: AdapterDeps) {
         refFileIds: rounds === 0 ? refFileIds : [],
         signal: options?.signal,
         idleTimeoutMs: deps.config.idleTimeoutMs ?? 120_000,
+        // 会话复用：同一账号连续多个回合共用一个网页端会话（见 webapi.ts 的实测判定）
+        ...(deps.config.sessionReuseTurns !== undefined ? { sessionReuseTurns: deps.config.sessionReuseTurns } : {}),
         onDeleteSession:
           deps.config.deleteWebSessions === false
             ? undefined

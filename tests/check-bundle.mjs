@@ -141,6 +141,8 @@ const checks = {
   'client 槽位名合法': client.includes('settings.section'),
   // F14：spawn 的异步错误必须有监听 —— 否则 ENOENT/EACCES 会变成未捕获异常带崩宿主
   'host 监听浏览器启动的异步错误': host.includes('spawnError'),
+  // 会话复用：常量会被打包内联，断言会存活的行为标记（见 grep 实测 2 处）
+  'host 有会话复用（同一会话多轮共用）': host.includes('reuseSlot') && host.includes('retireSession'),
 }
 
 let failed = 0
