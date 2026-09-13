@@ -140,9 +140,14 @@ run('F09：业务错误码与形状不符也判失败', () => {
 
 run('F09：正常信封仍判成功（别矫枉过正）', () => {
   assert.equal(classifyAuthEnvelope({ code: 0, msg: '', data: { biz_data: { user: { id: 'u1' } } } }).ok, true)
-  assert.equal(classifyAuthEnvelope({ data: { biz_data: { id: 'u1' } } }).ok, true)
-  // 只有 code 也算（某些响应 data 为空对象）
-  assert.equal(classifyAuthEnvelope({ code: 0, data: {} }).ok, true)
+  assert.equal(classifyAuthEnvelope({ code: 0, msg: '', data: { biz_data: { id: 'u1' } } }).ok, true)
+  assert.equal(classifyAuthEnvelope({ code: 0, msg: '', data: { user: { email: 'a@b.c' } } }).ok, true)
+  // ⚠️ 2026-09-13 第二轮审计 N09 纠正了两条**期望本身就错**的断言，不是放松实现：
+  //    1) `{ code: 0, data: {} }` 曾是 true —— 空壳信封被判成功，正是"校验成功却没拿到身份"的根源；
+  //    2) 没有 code 的 `{ data: { biz_data: { id: 'u1' } } }` 也曾是 true ——
+  //       但现在要求业务码必须是**数值**（否则 `{code:"401",data:null}` 这种错型信封会混过去）。
+  assert.equal(classifyAuthEnvelope({ code: 0, data: {} }).ok, false, '空壳信封不能算成功')
+  assert.equal(classifyAuthEnvelope({ data: { biz_data: { id: 'u1' } } }).ok, false, '缺少数值业务码不能算成功')
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

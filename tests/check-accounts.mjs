@@ -13,6 +13,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+// F02 的夹具用得到：默认导出对象用来**替换** renameSync，再用 syncBuiltinESMExports()
+// 把改动同步给命名导入（accounts.ts 用的是 `import { renameSync }`）。
+const fsDefault = (await import('node:fs')).default
+const { syncBuiltinESMExports } = await import('node:module')
+
 const HOME = mkdtempSync(join(tmpdir(), 'dswl-accounts-'))
 process.env.DSH_HOME = HOME
 
@@ -242,31 +247,39 @@ test('F02：重复写入（覆盖）后文件仍在、内容已更新', () => {
   assert.equal(saved.token, 't2', '覆盖写入后内容应更新')
 })
 
-test('F02：写入失败时原文件必须保留（旧实现先 rmSync，凭证直接丢失）', () => {
+test('F02：注入 rename 失败后原凭证与临时文件状态必须正确', () => {
+  // ⚠️ 2026-09-13 第二轮审计：旧夹具用"持有文件句柄让 rename 失败"，
+  //    那是**平台假设** —— 在 Linux/Node 上打开 r 句柄并不阻止 rename，
+  //    用例会直接失败（夹具无效，不是代码没修）。改为**注入确定的 rename 失败**。
   const rec = upsertAccount({ token: 'keep-me', cookie: 'c', userAgent: 'ua', serverId: 'srv-f02b' })
-  const file = join(accountsDir(), `${rec.id}.json`)
-  assert.ok(existsSync(file))
-  // Windows 上 chmod 只读**挡不住** rename 覆盖（实测 rename 照样成功），
-  // 改用"持有文件句柄"来让 rename 失败 —— 这是能可靠模拟的方式。
-  const fd = openSync(file, 'r')
-  let threw = false
-  let errCode = ''
-  try {
-    upsertAccount({ token: 'new', cookie: 'c', userAgent: 'ua', serverId: 'srv-f02b' })
-  } catch (error) {
-    threw = true
-    errCode = String(error?.code ?? error)
-  } finally {
-    try { closeSync(fd) } catch {}
+  const file = accountFilePath(rec.id)
+  const originalRename = fsDefault.renameSync
+  let injected = 0
+  fsDefault.renameSync = (from, to) => {
+    if (to === file) {
+      injected += 1
+      throw Object.assign(new Error('AUDIT_RENAME_FAILURE'), { code: 'EACCES' })
+    }
+    return originalRename(from, to)
   }
-  assert.ok(threw, `占用目标文件时写入应当失败（错误码 ${errCode}）—— 否则这条用例没测到东西`)
-  // 关键断言：失败了，原凭证还在
-  assert.ok(existsSync(file), '写入失败后原文件不该消失')
-  const saved = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(saved.token, 'keep-me', '原凭证内容必须完好')
-  // 也不该留下临时文件
-  const leftovers = readdirSync(accountsDir()).filter((n) => n.includes('.tmp-'))
-  assert.equal(leftovers.length, 0, `残留临时文件：${leftovers.join(', ')}`)
+  syncBuiltinESMExports()
+  try {
+    assert.throws(
+      () => upsertAccount({ token: 'new', cookie: 'c', userAgent: 'ua', serverId: 'srv-f02b' }),
+      /AUDIT_RENAME_FAILURE/,
+    )
+  } finally {
+    fsDefault.renameSync = originalRename
+    syncBuiltinESMExports()
+  }
+  // 自证：必须真的命中目标 rename，而不是提前失败（只 assert.throws 的话，提前失败也会满足它）
+  assert.equal(injected, 1, '必须真的命中目标 rename')
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, 'keep-me', '原凭证内容必须完好')
+  assert.deepEqual(
+    readdirSync(accountsDir()).filter((n) => n.includes('.tmp-')),
+    [],
+    '不该残留临时文件',
+  )
 })
 
 test('F01：账号 id 含路径分隔符/相对路径段一律拒绝（防越界读写）', () => {

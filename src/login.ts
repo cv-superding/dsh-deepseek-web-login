@@ -196,6 +196,20 @@ export function getFingerprintReport(): FingerprintReport | undefined {
  * ⚠️ 2026-09-11：插件宿主在 **utility 进程**里没有 `shell`（主进程专属），所以加了
  * 纯 Node 的打开方式（Windows `start` / macOS `open` / Linux `xdg-open`），保证任何宿主都能用。
  */
+/** 单测注入：替换 spawn（默认用 node:child_process 的真身）。 */
+let spawnImpl: typeof import('node:child_process').spawn | undefined
+export function setSpawnImpl(impl?: typeof import('node:child_process').spawn): void {
+  spawnImpl = impl
+}
+
+/**
+ * 用系统浏览器打开登录页。
+ *
+ * ⚠️ 2026-09-13 第二轮审计 N10：旧实现在 `spawn(...)` 之后立刻 `return {ok:true}`，
+ * 外面那层 try/catch **只能接同步异常**；`error` 是 EventEmitter 在下一个事件循环异步发出的，
+ * 没有监听就意味着**未处理错误 → 宿主进程直接退出**（同一类问题在 browser-login.ts 修过，
+ * 这条路径漏了）。现在等 `spawn`/`error` 之一落地再返回。
+ */
 export async function openExternalLogin(): Promise<{ ok: boolean; url: string; message?: string; via?: string }> {
   // 主进程：用 Electron 的 shell（最干净）
   if (canOpenElectronWindow()) {
@@ -203,30 +217,32 @@ export async function openExternalLogin(): Promise<{ ok: boolean; url: string; m
       const electron = createRequire(import.meta.url)('electron')
       await electron.shell.openExternal(LOGIN_URL)
       return { ok: true, url: LOGIN_URL, via: 'electron-shell' }
-    } catch (error: any) {
+    } catch {
       // 继续走下面的纯 Node 兜底
-      void error
     }
   }
-  // 非主进程：直接调系统命令
+  const failed = (error: unknown) => ({
+    ok: false,
+    url: LOGIN_URL,
+    message: `${error instanceof Error ? error.message : String(error)} —— 请手动在浏览器打开 ${LOGIN_URL}`,
+  })
   try {
-    const { spawn } = createRequire(import.meta.url)('node:child_process')
-    const args =
-      process.platform === 'win32'
-        ? ['/c', 'start', '', LOGIN_URL]
-        : process.platform === 'darwin'
-          ? [LOGIN_URL]
-          : [LOGIN_URL]
     const command = process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open'
-    const child = spawn(command, args, { stdio: 'ignore', detached: true })
-    child.unref?.()
-    return { ok: true, url: LOGIN_URL, via: command }
-  } catch (error: any) {
-    return {
-      ok: false,
-      url: LOGIN_URL,
-      message: `${error?.message ?? error} —— 请手动在浏览器打开 ${LOGIN_URL}`,
-    }
+    const args = process.platform === 'win32' ? ['/c', 'start', '', LOGIN_URL] : [LOGIN_URL]
+    return await new Promise((resolve) => {
+      const child = (spawnImpl ?? createRequire(import.meta.url)('node:child_process').spawn)(command, args, {
+        stdio: 'ignore',
+        detached: true,
+      })
+      // 必须监听：不监听的话这里会在下一个事件循环把宿主整个带走
+      child.once('error', (error: Error) => resolve(failed(error)))
+      child.once('spawn', () => {
+        child.unref?.()
+        resolve({ ok: true, url: LOGIN_URL, via: command })
+      })
+    })
+  } catch (error) {
+    return failed(error)
   }
 }
 

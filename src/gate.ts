@@ -320,6 +320,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
 
     waiting += 1
     try {
+      if (signal?.aborted) throw aborted()
       // 串行：等前面所有调用结束。并发模式跳过这一步（间隔仍然生效）。
       if (!allowConcurrent) {
         if (running > 0 || waiting > 1) {
@@ -340,7 +341,6 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (hasFinished && (needsBreak || maxIntervalMs > 0)) {
       const waitMs = lastFinishedAt + gap - now()
       if (needsBreak) {
-        consecutive = 0
         logger?.info?.(
           `deepseek-web: 已连续 ${longRunThreshold} 次请求 —— 长休 ${Math.round(gap / 1000)}s 再继续（长任务保护：连续跑比间隔小更像脚本）`,
         )
@@ -355,6 +355,12 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
         await waitOrAbort(sleep(waitMs))
       }
     }
+
+    // 2026-09-13 审计 N08：清计数必须放在**长休真正走完且未被取消之后**。
+    // 旧写法在 sleep 之前就 `consecutive = 0`，于是「取消一次长休」等于把休息债务一笔勾销 ——
+    // 下一次请求直接绕过长休（把「闸门可取消」的正确修复和长任务保护组合出了旁路）。
+    if (signal?.aborted) throw aborted()
+    if (needsBreak) consecutive = 0
 
     } catch (error) {
       // 取消（或前序出错）时必须把自己从队列里摘掉：本节点的 mine 一旦不 resolve，

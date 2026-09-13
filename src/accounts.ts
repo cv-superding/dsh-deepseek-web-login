@@ -96,6 +96,9 @@ export function accountsIndexPath(): string {
  * 这里只挡"危险字符"而不强求格式：历史 id 形态不止一种（acc_ 前缀 + 8/16 位十六进制、
  * 迁移期还可能有过别的），按白名单收紧会误伤老账号。真正要拦的只有能穿越路径的那些。
  */
+/** 单次导入的账号条数上限（N01）：避免一次导入对全库做重复扫描。 */
+export const MAX_IMPORT_ACCOUNTS = 500
+
 function assertSafeAccountId(id: string): string {
   const text = String(id ?? '')
   if (!text || text.includes('\0') || text === '.' || text === '..' || /[/\\]/.test(text)) {
@@ -348,13 +351,27 @@ export function exportAccountsToFile(): { path: string; count: number } {
   return { path: file, count: listAccounts().length }
 }
 
-/** 导入（校验 + 去重 + 补 id）。返回新增/更新数量。 */
+/**
+ * 导入（校验 + 去重 + 补 id）。返回新增/更新数量。
+ *
+ * ⚠️ **绝不相信备份文件自报的 `id`**（2026-09-13 第二轮审计 N01）：
+ * 旧实现用 `normalizeRecord(raw)` 时**不传 fallbackId 根本不生效** ——
+ * `normalizeRecord` 内部仍是 `raw.id ?? fallbackId ?? newAccountId()`，
+ * 于是备份里写同一个 `id` 的两条不同 token 账号会**互相覆盖**（不需要路径穿越）。
+ * 现在导入一律**生成本地主键**，只有 token 命中才允许更新已有账号。
+ *
+ * `serverId` 同样不用于匹配：它是**备份自报**字段，不能拿它授权覆盖不同 token 的账号。
+ * 代价：同账号刷新 token 的备份会多出一条，需要用户手动确认合并 —— 但保护了旧凭证。
+ *
+ * 上限 500 条，避免一次导入触发对全库的重复扫描；整批非事务，中途磁盘失败可能部分导入。
+ */
 export function importAccounts(payload: unknown): { imported: number; updated: number; skipped: number } {
-  const list: any[] = Array.isArray(payload)
-    ? payload
-    : Array.isArray((payload as any)?.accounts)
-      ? (payload as any).accounts
-      : []
+  const list = Array.isArray(payload) ? payload : (payload as any)?.accounts
+  if (!Array.isArray(list)) return { imported: 0, updated: 0, skipped: 0 }
+  if (list.length > MAX_IMPORT_ACCOUNTS) throw new RangeError(`每批最多导入 ${MAX_IMPORT_ACCOUNTS} 个账号`)
+  const records = listAccounts()
+  const ids = new Set(records.map((r) => r.id))
+  const tokens = new Map(records.map((r) => [r.token, r]))
   let imported = 0
   let updated = 0
   let skipped = 0
@@ -364,21 +381,26 @@ export function importAccounts(payload: unknown): { imported: number; updated: n
       skipped += 1
       continue
     }
-    const before = listAccounts()
-    const matched =
-      (candidate.serverId ? before.find((item) => item.serverId && item.serverId === candidate.serverId) : undefined) ??
-      before.find((item) => item.token === candidate.token)
+    const matched = tokens.get(candidate.token)
+    let record: AccountRecord
     if (matched) {
-      // 保留本地已有的元信息（备注名、探活时间、限制状态），只替换凭证
-      updateAccount(matched.id, { ...candidate, id: matched.id, label: candidate.label ?? matched.label })
+      // 保留本地元信息（备注名、探活、限制状态），只替换凭证
+      record = { ...matched, ...candidate, id: matched.id, label: candidate.label ?? matched.label }
       updated += 1
     } else {
-      saveAccount(candidate)
+      let id: string
+      do {
+        id = newAccountId()
+      } while (ids.has(id))
+      ids.add(id)
+      record = { ...candidate, id }
       imported += 1
     }
+    saveAccount(record)
+    tokens.set(record.token, record)
   }
   // 一个账号都没有时，把导入进来的第一个设为当前（否则导入了却"未选择账号"，很莫名其妙）
-  if (!readIndex().activeId) {
+  if (!activeAccountId()) {
     const first = listAccounts()[0]
     if (first) setActiveAccount(first.id)
   }

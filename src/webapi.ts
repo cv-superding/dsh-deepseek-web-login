@@ -939,17 +939,41 @@ export function pickUserDisplay(user: any): string {
  *
  * 抽成纯函数是为了能单测（validateAuth 要发网络请求，测不了这条分支）。
  */
+/**
+ * 校验 `users/current` 的信封。**必须能辨认出一个用户身份**才算成功。
+ *
+ * 2026-09-13 第二轮审计 N09：旧实现只拒绝"不是对象"和"data、code 都缺"，
+ * 于是 `{code:0}`、`{data:null}`、`{code:"401",data:null}` 这类空壳/错型信封全部被判成功 ——
+ * 而 `validateAuth` 之后又会回落空对象，导致"校验成功"与"拿到有效身份"脱节。
+ * 现在：业务码必须是数值、data 必须是对象、且里面要能找到一个可辨认的用户字段。
+ */
 export function classifyAuthEnvelope(json: unknown): { ok: true } | { ok: false; error: string } {
+  const fail = (error: string): { ok: false; error: string } => ({ ok: false, error })
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
-    return { ok: false, error: 'users/current 响应不是 JSON 对象（可能是反爬页面或网关拦截）' }
+    return fail('users/current 响应不是 JSON 对象（可能是反爬页面或网关拦截）')
   }
-  const bizError = envelopeError(json)
-  if (bizError) return { ok: false, error: bizError.msg }
-  // 形状兜底：既没有 data 也没有 code，说明不是我们认识的业务信封。
-  if ((json as any).data === undefined && (json as any).code === undefined) {
-    return { ok: false, error: 'users/current 响应既无 data 也无 code（形状不符）' }
+  const obj = json as any
+  // 业务码必须是**数值**：字符串 "401" 这种错型信封不能当成功
+  if (typeof obj.code !== 'number') return fail('users/current 缺少数值业务码（形状不符）')
+  const bizError = envelopeError(obj)
+  if (bizError) return fail(bizError.msg)
+  if (obj.code !== 0 || !obj.data || typeof obj.data !== 'object' || Array.isArray(obj.data)) {
+    return fail('users/current 缺少用户数据（形状不符）')
   }
-  return { ok: true }
+  if (obj.data.biz_code !== undefined && typeof obj.data.biz_code !== 'number') {
+    return fail('users/current 内层业务码无效')
+  }
+  const payload = obj.data.biz_data ?? obj.data
+  const user = payload?.user ?? payload
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return fail('users/current 用户形状无效')
+  const hasId =
+    (typeof user.id === 'string' && user.id.trim().length > 0) ||
+    (typeof user.id === 'number' && Number.isFinite(user.id))
+  const named = ['email', 'mobile_number', 'mobile', 'phone', 'username', 'nickname', 'name'].some(
+    (k) => typeof user[k] === 'string' && user[k].trim(),
+  )
+  // 空壳信封（data 里什么都没有）不能算校验成功
+  return hasId || named ? { ok: true } : fail('users/current 缺少可辨认的用户身份')
 }
 
 export async function validateAuth(
