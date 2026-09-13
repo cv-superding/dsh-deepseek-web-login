@@ -1248,9 +1248,53 @@ export class ToolCallStreamFilter {
  */
 const IMITATED_MARKER_TAGS = ['ds_system', 'system', 'ide_result_status'] as const
 
+/**
+ * 需要「正文够长」才剥的**跨行**标记。
+ *
+ * `tool_result`（2026-09-13 现场，会话 `15ac4c56` 记录 `[1480]`）：模型把 SSH 插件一次
+ * 读取工具的结果**整段复述**进正文，形如
+ *   `<tool_result>Path: …` + 换行 + `<path>…</path>` + 换行 + `<type>file</type>` + 换行 + `<content>` …
+ * 它比 `ds_system` 那批更「可讨论」——用户正在开发**产出它的那个插件**，正常回答里
+ * 可能出现简短示例。所以要求正文 ≥ 120 字才剥：真实回声是整份文件（实测那处上千字），
+ * 随口举例不会有那么长。围栏代码块内同样不剥。
+ */
+const LONG_MARKER_TAGS: readonly { tag: string; minBody: number }[] = [{ tag: 'tool_result', minBody: 120 }]
+
+const LONG_MARKER_ALT = LONG_MARKER_TAGS.map((entry) => entry.tag).join('|')
+/** 跨行闭合形态（`[\s\S]` 而不是逐行匹配 —— 真实回声的正文是跨行的）。 */
+const LONG_CLOSED_MARKER_RE = new RegExp(
+  `<(${LONG_MARKER_ALT})\\b[^>]*>([\\s\\S]*?)<\\/\\1>`,
+  'g',
+)
+/** 跨行未闭合形态（流被截断在标记中间）。 */
+const LONG_OPEN_MARKER_RE = new RegExp(`<(${LONG_MARKER_ALT})\\b[^>]*>([\\s\\S]*)$`, 'g')
+
+function minBodyFor(tag: string): number {
+  return LONG_MARKER_TAGS.find((entry) => entry.tag === tag)?.minBody ?? 0
+}
+
+/**
+ * 代码围栏区间（成对的 ``` 或 ~~~）。
+ * 跨行替换没法像逐行处理那样顺手跟踪 inFence，所以先算出区间再判断命中点是否落在里面。
+ */
+function fencedRanges(text: string): Array<[number, number]> {
+  const marks: number[] = []
+  const re = /^[ \t]*(?:```|~~~)/gm
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) marks.push(match.index)
+  const ranges: Array<[number, number]> = []
+  for (let i = 0; i + 1 < marks.length; i += 2) ranges.push([marks[i], marks[i + 1]])
+  return ranges
+}
+
+function insideFence(index: number, ranges: Array<[number, number]>): boolean {
+  return ranges.some(([from, to]) => index >= from && index < to)
+}
+
 /** 任一伪标记的开头是否出现（快速退出用，省掉对每段正文跑逐行循环）。 */
 function hasImitatedMarker(text: string): boolean {
-  return IMITATED_MARKER_TAGS.some((tag) => text.includes(`<${tag}`))
+  if (IMITATED_MARKER_TAGS.some((tag) => text.includes(`<${tag}`))) return true
+  return LONG_MARKER_TAGS.some((entry) => text.includes(`<${entry.tag}`))
 }
 
 /**
@@ -1266,9 +1310,29 @@ const OPEN_MARKER_RE = new RegExp(`<(${IMITATED_MARKER_TAGS.join('|')})\\b[^>]*>
 
 export function stripSystemMarkers(text: string): { text: string; stripped: boolean } {
   if (!hasImitatedMarker(text)) return { text, stripped: false }
+
+  // 第一遍：**跨行**长标记。逐行循环匹配不到跨行的闭合形式，所以先在全文上做一次
+  //（围栏区间先算好，落在围栏里的命中跳过，与逐行那遍的保护策略一致）。
+  const ranges = fencedRanges(text)
+  let strippedLong = false
+  let source = text
+    .replace(LONG_CLOSED_MARKER_RE, (match, tag, body, offset) => {
+      if (String(body).length < minBodyFor(String(tag))) return match
+      if (insideFence(offset, ranges)) return match
+      strippedLong = true
+      return ''
+    })
+    .replace(LONG_OPEN_MARKER_RE, (match, tag, body, offset) => {
+      if (String(body).length < minBodyFor(String(tag))) return match
+      if (insideFence(offset, ranges)) return match
+      strippedLong = true
+      return ''
+    })
+
+  text = source
   let out = ''
   let inFence = false
-  let stripped = false
+  let stripped = strippedLong
   let i = 0
   while (i < text.length) {
     const lineEnd = text.indexOf('\n', i)

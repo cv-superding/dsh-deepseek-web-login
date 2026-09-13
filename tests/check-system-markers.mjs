@@ -137,6 +137,80 @@ test('三种标记混在一起也能全部剥掉，且不碰上下文', () => {
   assert.ok(result.text.includes('结尾。'))
 })
 
+// ── 现场 ④（2026-09-13，会话 15ac4c56 记录 [1480]）──────────────────
+// 模型把 SSH 插件一次读取工具的结果**整段复述**进正文，且是**跨行**的：
+//   "Found a real gap: … Fixing that, then doing the final pass." + 换行x4 +
+//   "<tool_result>Path: …" + 换行 + "<path>…</path>" + 换行 + "<type>file</type>" + 换行 + "<content>" …
+// 逐行处理匹配不到跨行的闭合标签，所以单独加了「跨行长标记」这一遍。
+// 这个标签比 ds_system 那批更「可讨论」（用户正在开发产出它的插件），
+// 于是要求正文 >= 120 字才剥 —— 真实回声是整份文件，随口举例不会那么长。
+const NL = String.fromCharCode(10)
+const longBody = Array.from({ length: 12 }, (_, i) => `${i + 1}: { "k": ${i} }`).join(NL)
+const echoedToolResult =
+  'Found a real gap: the patch file is documented but missing from files. Fixing that.' +
+  NL + NL + NL + NL +
+  '<tool_result>Path: F:/x/package.json' + NL +
+  '<path>F:/x/package.json</path>' + NL +
+  '<type>file</type>' + NL +
+  '<content>' + NL + longBody + NL + '</content>' + NL +
+  '</tool_result>'
+
+test('跨行 tool_result 回声：整段剥掉，正文保留', () => {
+  const r = stripSystemMarkers(echoedToolResult)
+  assert.equal(r.stripped, true, '自证：必须真的剥掉了东西')
+  assert.ok(r.text.includes('Fixing that.'), '模型真正说的话要留下')
+  assert.ok(!/tool_result/i.test(r.text), `不该残留标记：${JSON.stringify(r.text.slice(-80))}`)
+  assert.ok(!r.text.includes('package.json'), '回声里的工具结果内容也不该留下')
+})
+
+test('跨行 tool_result：回声在中间时，只剥块本身，后面的正文不能丢', () => {
+  // ⚠️ 这条是为了区分「闭合形态」与「未闭合形态」两条规则：
+  //    上面那条用例里回声正好在**末尾**，未闭合规则也能兜住 → 两条规则互为备份，
+  //    于是"把闭合规则改坏"也测不出来（反向验证假绿）。回声后面接正文才能区分。
+  const middle =
+    '前言。' +
+    NL + NL + NL + NL +
+    '<tool_result>Path: F:/x/package.json' + NL +
+    '<path>F:/x/package.json</path>' + NL +
+    '<type>file</type>' + NL +
+    '<content>' + NL + longBody + NL + '</content>' + NL +
+    '</tool_result>' +
+    NL + NL + '后记：接下来还要跑一遍测试。'
+  const r = stripSystemMarkers(middle)
+  assert.equal(r.stripped, true, '自证：必须真的剥掉了东西')
+  assert.ok(r.text.includes('前言。'), '回声前的正文要留下')
+  assert.ok(r.text.includes('后记：接下来还要跑一遍测试。'), `回声后的正文不能被一起吃掉：${JSON.stringify(r.text.slice(-80))}`)
+  assert.ok(!/tool_result/i.test(r.text), '回声块本身要剥掉')
+})
+
+test('跨行 tool_result：短示例保留（别把「讨论格式」的正常回答吃掉）', () => {
+  const short = '示例：<tool_result>short</tool_result> 就是那个格式'
+  const r = stripSystemMarkers(short)
+  assert.equal(r.stripped, false, '不到 120 字的示例不该剥')
+  assert.equal(r.text, short)
+})
+
+test('跨行 tool_result：围栏代码块内保留', () => {
+  const fenced = ['```xml', '<tool_result>Path: a', '<content>', 'x'.repeat(200), '</content>', '</tool_result>', '```'].join(NL)
+  const r = stripSystemMarkers(fenced)
+  assert.equal(r.stripped, false, '围栏内是正常文档内容')
+  assert.equal(r.text, fenced)
+})
+
+test('跨行 tool_result：未闭合（流被截断）同样剥掉', () => {
+  const truncated = '说明。' + NL + NL + '<tool_result>Path: a' + NL + '<content>' + NL + longBody
+  const r = stripSystemMarkers(truncated)
+  assert.ok(r.text.includes('说明。'), '正文要留下（自证）')
+  assert.ok(!/tool_result/i.test(r.text), '半截标记也是垃圾')
+})
+
+test('回归：单行 ds_system 仍照旧剥（新逻辑别改坏旧的）', () => {
+  const r = stripSystemMarkers('前 <ds_system>Tool result for call_1a2b3c</ds_system> 后')
+  assert.equal(r.stripped, true)
+  assert.ok(r.text.includes('前') && r.text.includes('后'))
+  assert.ok(!/ds_system/i.test(r.text))
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1

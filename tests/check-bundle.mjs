@@ -147,6 +147,8 @@ const checks = {
   // ⚠️ 断言「产物里没有某串」前先 grep 确认基线：`DSML|>` 在产物里实测 0 处（只出现在旧提示词里），
   //    而 `DSML|` 仍有若干处（正则源码里就是那样写的），所以不能拿它做否定断言。
   'host 提示词不再写出私有标记字面量': !host.includes('DSML|>') && host.includes('the private delimiter-prefixed variants'),
+  // 跨行伪标记（模型复述的工具结果）要被剥掉
+  'host 会剥掉跨行的伪标记': host.includes('LONG_MARKER_TAGS') && host.includes('insideFence'),
   // 退化块（开标签+闭合标签、无 invoke）不再当正文透出
   'host 会剥掉 DSML 裸包裹标签': host.includes('stripStrayToolMarkup') && /\|dsml-\)\(\?:dsml-\)\?/.test(host),
 }
