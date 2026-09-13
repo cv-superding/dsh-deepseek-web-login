@@ -269,31 +269,55 @@ let wasmModuleCache: { url: string; promise: Promise<WebAssembly.Module> } | nul
 /** 已验证可用/已发现的 WASM 地址（按凭证里记录的原值缓存，避免每次请求都探测）。 */
 let resolvedWasmUrl: { key: string; url: string } | null = null
 
-async function isReachable(url: string, signal?: AbortSignal): Promise<boolean> {
+async function readOfficialResource(url: string, max: number, outer?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+  const parsed = new URL(url)
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password ||
+      (parsed.port && parsed.port !== '443') ||
+      (parsed.hostname !== 'deepseek.com' && !parsed.hostname.endsWith('.deepseek.com'))) throw new Error('非官方资源地址')
+  const signal=outer?AbortSignal.any([outer,AbortSignal.timeout(15_000)]):AbortSignal.timeout(15_000)
+  const resp=await activeFetch(parsed.href,{signal,redirect:'error'})
+  if(!resp.ok||!resp.body){await resp.body?.cancel();throw new Error(`资源请求失败 HTTP ${resp.status}`)}
+  const reader=resp.body.getReader();const chunks:Uint8Array[]=[];let size=0
   try {
-    const resp = await activeFetch(url, { method: 'GET', headers: { range: 'bytes=0-0' }, signal: signal ?? AbortSignal.timeout(10_000) })
-    return resp.ok || resp.status === 206
-  } catch {
-    return false
-  }
+    for(;;){const item=await reader.read();if(item.done)break;size+=item.value.byteLength
+      if(size>max)throw new Error('资源超过字节上限');chunks.push(item.value)}
+  } finally {try{await reader.cancel()}catch{};reader.releaseLock()}
+  const bytes=new Uint8Array(size);let offset=0
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length}
+  return bytes
+}
+
+async function isReachable(url: string, outer?: AbortSignal): Promise<boolean> {
+  if(!checkedWasmUrl(url))return false
+  const signal=outer?AbortSignal.any([outer,AbortSignal.timeout(10_000)]):AbortSignal.timeout(10_000)
+  let resp:Response|undefined
+  try {resp=await activeFetch(url,{method:'GET',headers:{range:'bytes=0-0'},signal,redirect:'error'});return resp.ok}
+  catch {if(outer?.aborted)outer.throwIfAborted();return false}
+  finally {try{await resp?.body?.cancel()}catch{}}
 }
 
 /** 从网页端首页/JS chunk 里发现当前构建的 sha3 wasm 地址（哈希随版本变化）。 */
 async function discoverWasmUrl(signal?: AbortSignal): Promise<string | undefined> {
-  try {
-    const html = await (await activeFetch(`${DS_BASE}/`, { signal: signal ?? AbortSignal.timeout(15_000) })).text()
-    const direct = html.match(/https?:\/\/[^"'\s]*sha3[_a-z0-9.]*\.wasm/i)
-    if (direct) return direct[0]
-    const scripts = [...html.matchAll(/(?:src|href)="([^"]+\.js)"/g)].map((match) => match[1]).slice(0, 8)
-    for (const src of scripts) {
-      const url = src.startsWith('http') ? src : new URL(src, `${DS_BASE}/`).href
-      try {
-        const js = await (await activeFetch(url, { signal: AbortSignal.timeout(15_000) })).text()
-        const found = js.match(/[^"'\s]*sha3[_a-z0-9.]*\.wasm/i)
-        if (found) return found[0].startsWith('http') ? found[0] : new URL(found[0], url).href
-      } catch {}
+  const decode = (bytes:Uint8Array)=>new TextDecoder().decode(bytes)
+  const find = (text:string,base:string):string|undefined=>{
+    for(const match of text.matchAll(/[^"'\s<>]*sha3[_a-z0-9.]*\.wasm/gi)) {
+      try{const url=checkedWasmUrl(new URL(match[0],base).href);if(url)return url}catch{}
     }
-  } catch {}
+    return undefined
+  }
+  try {
+    signal?.throwIfAborted()
+    const html=decode(await readOfficialResource(`${DS_BASE}/`,2*1024*1024,signal))
+    const direct=find(html,`${DS_BASE}/`);if(direct)return direct
+    const scripts=[...html.matchAll(/(?:src|href)="([^"]+\.js)"/g)].slice(0,8)
+    for(const match of scripts){
+      signal?.throwIfAborted()
+      try{const url=new URL(match[1],`${DS_BASE}/`).href
+        const found=find(decode(await readOfficialResource(url,8*1024*1024,signal)),url)
+        if(found)return found
+      }catch{if(signal?.aborted)signal.throwIfAborted()}
+    }
+  }catch{if(signal?.aborted)signal.throwIfAborted()}
   return undefined
 }
 
@@ -362,25 +386,14 @@ export function checkedWasmUrl(raw: unknown): string | undefined {
 }
 
 async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
-  if (wasmModuleCache?.url === wasmUrl) return wasmModuleCache.promise
-  const promise = (async () => {
-    const resp = await activeFetch(wasmUrl, { signal: AbortSignal.timeout(15_000) })
-    if (!resp.ok) throw new Error(`PoW WASM fetch failed (HTTP ${resp.status})`)
-    // 体积上限：PoW 用的 sha3 wasm 只有几十 KB，8MB 足够宽松又能挡住「下个几百 MB 再编译」。
-    // 先读成字节再校验，避免把超大响应直接喂给 WebAssembly.compile。
-    const declared = Number(resp.headers?.get?.('content-length') ?? Number.NaN)
-    if (Number.isFinite(declared) && declared > MAX_WASM_BYTES) {
-      throw new Error(`PoW WASM 体积异常（${declared} 字节，上限 ${MAX_WASM_BYTES}）：拒绝加载`)
-    }
-    const bytes = new Uint8Array(await resp.arrayBuffer())
-    if (bytes.byteLength > MAX_WASM_BYTES) {
-      throw new Error(`PoW WASM 体积异常（${bytes.byteLength} 字节，上限 ${MAX_WASM_BYTES}）：拒绝加载`)
-    }
-    return WebAssembly.compile(bytes)
-  })()
-  wasmModuleCache = { url: wasmUrl, promise }
-  promise.catch(() => {
-    if (wasmModuleCache?.url === wasmUrl) wasmModuleCache = null
+  const url=checkedWasmUrl(wasmUrl)
+  if(!url)throw new Error('非法 WASM 地址')
+  if(wasmModuleCache?.url===url)return wasmModuleCache.promise
+  const promise=(async()=>WebAssembly.compile(await readOfficialResource(url,MAX_WASM_BYTES)))()
+  wasmModuleCache={url,promise}
+  promise.catch(()=>{
+    if(wasmModuleCache?.promise===promise)wasmModuleCache=null
+    if(resolvedWasmUrl?.url===url)resolvedWasmUrl=null
   })
   return promise
 }

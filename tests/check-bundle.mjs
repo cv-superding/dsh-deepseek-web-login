@@ -162,6 +162,15 @@ const checks = {
     host.includes('systemMarkerFilter.push(guarded.text)') &&
     host.includes('systemMarkerFilter.push(drained.text)') &&
     host.includes('systemMarkerFilter.flush()'),
+  // 审计 N05：官方资源下载统一白名单 + 拒绝重定向 + 分块限字节
+  'host 官方资源下载有白名单/拒绝重定向/限字节':
+    host.includes('readOfficialResource') &&
+    host.includes('redirect: "error"') &&
+    host.includes('资源超过字节上限'),
+  // 审计 N05 的核心：下载/编译失败必须连「已解析的地址」一起清，
+  // 否则会一直对着坏地址打，"保留 discovery 能力"等于没用
+  'host WASM 失效时连地址缓存一起清':
+    host.includes('resolvedWasmUrl?.url === url') && host.includes('resolvedWasmUrl = null'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),

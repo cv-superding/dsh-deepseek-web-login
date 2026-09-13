@@ -2,6 +2,57 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.48 — 2026-09-13
+
+### 第二轮审计第四批：N05（失效 WASM 地址阻断 discovery 恢复）
+
+**N05（高）资源下载收口到统一实现；失效时连「已解析的地址」一起清**
+
+`resolveWasmUrl` 命中 key 就直接返回缓存地址，而 `loadWasmModule` 的 rejection 只清
+`wasmModuleCache`、**没清 `resolvedWasmUrl`**。于是「保留了 discovery 能力」并不等于
+「失效后真的会再进 discovery」：地址已经 404 了，请求还会一直对着它打 ——
+唯一的兜底（页面发现）永远走不到。
+
+- 新增 `readOfficialResource(url, max, signal)`，把三处下载收口成一个实现：
+  **只走官方 HTTPS 域**（`deepseek.com` / `*.deepseek.com`，无凭据、标准端口）；
+  **`redirect: 'error'` 拒绝全部重定向**；**分块累计字节上限**（首页 2 MiB / 脚本 8 MiB /
+  WASM `MAX_WASM_BYTES`），超限抛错并 `reader.cancel()`，不再先读完 `arrayBuffer()` 再检查大小；
+  独立超时（下载 15s、探测 10s）。
+- `loadWasmModule` 的失败回调现在**同时清编译缓存与已解析地址**；`isReachable` 也先过白名单。
+
+**关于「拒绝重定向」的可用性代价 —— 已实测（不只静态推理）**
+
+直接跟随重定向会被当成"任意跳转都放行"，所以这里选择拒绝。代价是若官方某天需要 CDN 跳转，
+就会拒掉合法请求。**用真实资源实测过（不发任何账号请求）**：
+
+| 检查项 | 结果 |
+| --- | --- |
+| 默认 WASM 地址（`fe-static.deepseek.com`…） | HTTP 206（range 探测）、**无重定向** |
+| 完整下载 | 200、`redirected: false`、26612 字节、魔数 `00 61 73 6d` |
+| `WebAssembly.compile` | 通过 |
+| `resolveWasmUrl` 解析耗时 | 257ms（命中默认地址，未进 discovery） |
+
+结论：当前部署满足「无跳转」约束。**但 discovery 路径另有一个既存注意点**：
+`chat.deepseek.com` 的首页在不带浏览器 UA 时实测返回 **429**（带 UA 则 200，无重定向）。
+这是 0.1.48 之前就有的行为（`activeFetch` 一直用 Node 默认 UA），
+只在「默认地址不可达」时才会踩到；若将来默认地址随构建变化而失效，这一条需要一并处理
+（给 discovery 的请求补 UA，或实现"手动跟随若干跳 + 逐跳白名单"）。
+
+### 测试
+
+- `check-round2.mjs` 18 → **20 项**：两条 N05 用例（下载 404 / 编译失败），走真实 `createPowHeader`
+  链路 + 注入 fetch，并用 `range` 头区分「探测」与「下载」。断言链含三处自证：
+  第一轮必须真的失败、探测与下载都真的发生过、第一轮探测通过（说明地址确实进了缓存）。
+- `check-bundle.mjs` 新增两条产物断言（下载统一入口 + 限字节；失效时清地址缓存）。
+- 反向验证：只移除 `if (resolvedWasmUrl?.url === url) resolvedWasmUrl = null` 一句
+  （命中数强制 = 1）→ 两条新断言变红，而 `check-sse-wasm` **仍全绿** ——
+  这是覆盖空洞，不是"原用例没用"。复原后全绿。
+- 33 个测试文件全绿。
+
+### 未处理
+
+N02（迟到的 `/status` 校验把当前账号切回去）、F04（`serverId` 的生产身份链是断的）。
+
 ## 0.1.47 — 2026-09-13
 
 ### 第二轮审计第三批：N03（tool_result 跨流残片泄漏）+ N06（续写漏记 usage）

@@ -372,6 +372,108 @@ await test('建流阶段已是 AdapterLlmError 时，不得被包成 TRANSPORT�
   assert.equal(thrown.code, 'AUTH', `结构化错误码必须保留，实际 ${thrown.code}`)
 })
 
+// ── 第二轮审计 N05（高）：WASM 下载失败只清编译缓存，失效地址阻断 discovery 恢复 ──
+// 触发现场：已缓存成功的官方地址后来下载失败 / 编译失败，进程继续运行并重试。
+// 旧实现：resolveWasmUrl 命中 key 就直接返回；loadWasmModule 的 rejection 只清
+// wasmModuleCache，**没清 resolvedWasmUrl** —— 于是「保留了 discovery 能力」并不等于
+// 「失效后真的会再进 discovery」，请求会一直对着一个坏地址打。
+const N05_MINIMAL_WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+const n05Json = (obj) =>
+  new Response(JSON.stringify(obj), { status: 200, headers: { 'content-type': 'application/json' } })
+
+/**
+ * 跑两轮 PoW：第一轮「探测通过（地址进缓存）+ 下载按 makeDownload 失败」，
+ * 第二轮把探测也变成 404（= 资源整体失效），看会不会重新请求首页走 discovery。
+ */
+async function n05Run(makeDownload) {
+  const { createPowHeader, DS_BASE } = await import('../src/webapi.ts')
+  let homeHits = 0
+  let probes = 0
+  let downloads = 0
+  let broken = false
+  setFetchImpl(async (input, init) => {
+    const url = String(input)
+    if (url.includes('/api/v0/chat/create_pow_challenge')) {
+      return n05Json({
+        code: 0,
+        data: {
+          biz_data: {
+            challenge: {
+              algorithm: 'sha3',
+              challenge: 'abc',
+              salt: 'salt',
+              signature: 'sig',
+              difficulty: 1,
+              expire_at: 1700000000,
+            },
+          },
+        },
+      })
+    }
+    // 首页 discovery 走的是 DS_BASE（https://chat.deepseek.com），不是裸域名
+    if (url === DS_BASE + '/') {
+      homeHits += 1
+      return new Response('<!doctype html><html><body>no scripts here</body></html>', { status: 200 })
+    }
+    if (url.endsWith('.wasm')) {
+      // isReachable 用 `range: bytes=0-0` 探测；readOfficialResource 才是真的下载
+      const isProbe = !!(init?.headers && init.headers.range)
+      if (isProbe) {
+        probes += 1
+        return broken ? new Response('', { status: 404 }) : new Response(N05_MINIMAL_WASM, { status: 200 })
+      }
+      downloads += 1
+      return makeDownload()
+    }
+    return new Response('', { status: 404 })
+  })
+  const auth = {
+    token: 'tok',
+    cookie: '',
+    hifDliq: '',
+    hifLeim: '',
+    wasmUrl: '',
+    userAgent: 'ua',
+    capturedAt: '2026-09-13T00:00:00.000Z',
+  }
+  const tryOne = async () => {
+    try {
+      await createPowHeader(auth, '/api/v0/chat/completion')
+      return false
+    } catch {
+      return true
+    }
+  }
+  const firstFailed = await tryOne()
+  const homeAfterFirst = homeHits
+  broken = true // 资源整体失效：探测与下载都拿不到
+  const secondFailed = await tryOne()
+  const homeAfterSecond = homeHits
+  setFetchImpl(undefined)
+  return { firstFailed, secondFailed, homeAfterFirst, homeAfterSecond, probes, downloads }
+}
+
+function assertN05(r, label) {
+  assert.ok(r.firstFailed, `${label}：第一轮必须失败（下载/编译坏了）——自证确实走到了这条路径`)
+  assert.ok(r.probes >= 1, `${label}：自证探测发生过（probes=${r.probes}）`)
+  assert.ok(r.downloads >= 1, `${label}：自证下载发生过（downloads=${r.downloads}）`)
+  assert.equal(r.homeAfterFirst, 0, `${label}：第一轮探测通过，不该走 discovery（说明地址真的进了缓存）`)
+  assert.ok(r.secondFailed, `${label}：第二轮也必须失败（地址仍然坏）`)
+  assert.ok(
+    r.homeAfterSecond > r.homeAfterFirst,
+    `${label}：失效地址必须被清掉、重新请求首页做 discovery，实际 homeHits=${r.homeAfterSecond}（基线 ${r.homeAfterFirst}）`,
+  )
+}
+
+await test('N05：WASM 下载 404 后必须重新走 discovery（不能卡在坏地址上）', async () => {
+  assertN05(await n05Run(() => new Response('gone', { status: 404 })), '下载 404')
+})
+
+await test('N05：WASM 编译失败后同样要清地址缓存', async () => {
+  // HTTP 200 但字节不是合法 wasm → WebAssembly.compile reject（走的是同一条清理回调）
+  assertN05(await n05Run(() => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })), '编译失败')
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
