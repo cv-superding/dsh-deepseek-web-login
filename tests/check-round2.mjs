@@ -1310,7 +1310,17 @@ await test('F20：开发依赖固定精确版本 + 声明 engines（有锁文件
   if (existsSync(join(PKG_ROOT, 'package-lock.json'))) {
     const lock = JSON.parse(readRepoFile('package-lock.json'))
     assert.equal(lock.name, pkg.name, 'lockfile 必须与 package.json 同源')
-    assert.equal(lock.version, pkg.version, 'lockfile 版本必须跟上 package.json')
+    // 断的是 `npm ci` **真正校验**的东西：根条目的依赖要与 package.json 完全一致，
+    // 否则 npm ci 会报 "can only install packages when your package.json and
+    // package-lock.json are in sync" 并让整个 CI 失败。
+    // ⚠️ 刻意**不**断 `lock.version === pkg.version`：npm ci 并不看这个字段，
+    //    断它等于要求每次升版本都重新生成本表 —— 在这台机器上（npm 元数据很慢）
+    //    会给每次发版加一道无关的摩擦。
+    assert.deepEqual(
+      lock.packages?.['']?.devDependencies,
+      pkg.devDependencies,
+      'lockfile 根条目的 devDependencies 必须与 package.json 完全一致',
+    )
   } else {
     const install = readRepoFile('scripts/install-deps.mjs')
     assert.ok(install.includes('npm install'), '没有锁文件时安装脚本必须回退到 npm install')
