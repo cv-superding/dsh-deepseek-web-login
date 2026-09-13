@@ -26,6 +26,10 @@ const {
 const { setFetchImpl, resetSessionReuse, streamWebCompletion } = await import('../src/webapi.ts')
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
+
+// N04 用的两个账号（token 不同 → 复用键不同）
+const authA = { token: 'token-A', cookie: 'c=A' }
+const authB = { token: 'token-B', cookie: 'c=B' }
 const { openExternalLogin } = await import('../src/login.ts')
 
 let passed = 0
@@ -211,6 +215,161 @@ await test('spawn 成功 → 返回 ok:true 并 unref', async () => {
   } finally {
     setSpawnImpl()
   }
+})
+
+console.log()
+console.log('N07 固定头不得被按比例静默截断')
+
+const { serializePrompt } = await import('../src/protocol.ts')
+
+/** 把 system 撑到指定长度，并在**中间**埋一个哨兵（被中段截断就先丢它）。 */
+function longSystem(chars) {
+  const half = Math.floor(chars / 2)
+  return 'S'.repeat(half - 12) + 'UNIQUE_POLICY_SENTINEL' + 'S'.repeat(chars - half - 12)
+}
+
+await test('预算够放完整 system 时，system 必须一字不少', () => {
+  // 审计构造：约 8 万字符 system + 15 万字符消息 + 12 万预算。
+  // 旧代码 headBudget = min(head.length, 120000*0.62) = 74400 < head(约 8.3 万)
+  //   → truncateMiddle 从**中间**挖掉一块 → 哨兵丢失。
+  const system = longSystem(80_000)
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(150_000) }] }]
+  const out = serializePrompt({ system, messages, tools: [], maxChars: 120_000 })
+  assert.ok(out.includes('UNIQUE_POLICY_SENTINEL'), 'system 中段被截掉了（固定头必须完整）')
+  assert.ok(out.includes(system), '完整 system 都必须出现')
+  assert.ok(out.length <= 120_000, `输出必须不超预算，实际 ${out.length}`)
+})
+
+await test('固定头自己放不下 → 明确报错，而不是静默丢指令', () => {
+  const system = 'S'.repeat(200_000)
+  let thrown
+  try {
+    serializePrompt({ system, messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], tools: [], maxChars: 120_000 })
+  } catch (error) {
+    thrown = error
+  }
+  assert.ok(thrown, '应当抛错（自证：确实走到了这条路径）')
+  assert.equal(thrown.code, 'CONTEXT_WINDOW_EXCEEDED', `错误码应为 CONTEXT_WINDOW_EXCEEDED，实际 ${thrown.code}`)
+})
+
+await test('maxChars 非法值明确拒绝（小数 / NaN / 过小）', () => {
+  for (const bad of [Number.NaN, 0.5, 100, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => serializePrompt({ system: 's', messages: [], tools: [], maxChars: bad }),
+      RangeError,
+      `maxChars=${bad} 应被拒绝`,
+    )
+  }
+})
+
+await test('没超预算时原样返回（别把正常路径也改了）', () => {
+  const out = serializePrompt({
+    system: 'sys',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    tools: [],
+    maxChars: 120_000,
+  })
+  assert.ok(out.includes('sys') && out.includes('hello'))
+  assert.ok(!out.includes('不超预算'))
+})
+
+console.log()
+console.log('N04 复用槽：提前结束必须退役、在用不得被回收')
+
+/** 假传输 + 假 SSE，专供 N04 的三条路径。 */
+function mkReuseFixture() {
+  const created = []
+  const transport = {
+    createSession: async () => {
+      const id = `sess-${created.length + 1}`
+      created.push(id)
+      return id
+    },
+    powHeader: async () => 'pow',
+  }
+  const sse = 'data: {"v":{"response":{"content":"hi"}}}\n\ndata: [DONE]\n\n'
+  setFetchImpl(async () => new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+  return { created, transport }
+}
+
+await test('调用方取到正文就 return → 下一次必须换新会话', async () => {
+  // ⚠️ 反向验证：去掉 finally 里的 `!complete` 判断（即只在正常结束时退役）→ 这条变红。
+  //    旧实现只在 HTTP 失败分支退役，stream generator 被提前 return 时不退役。
+  resetSessionReuse()
+  const { created, transport } = mkReuseFixture()
+  const params = () => ({
+    prompt: 'P',
+    thinkingEnabled: false,
+    modelType: 'default',
+    idleTimeoutMs: 5_000,
+    onDeleteSession: () => {},
+  })
+  for await (const _ of streamWebCompletion(authA, params(), transport)) break
+  for await (const _ of streamWebCompletion(authA, params(), transport)) void _
+  assert.equal(created.length, 2, `提前 return 的会话不该被继续复用，实际建了 ${created.length} 个`)
+})
+
+await test('复用会话仍在消费中时，并发请求不得回收它', async () => {
+  resetSessionReuse()
+  const { created, transport } = mkReuseFixture()
+  const deleted = []
+  const mk = () => ({
+    prompt: 'P',
+    thinkingEnabled: false,
+    modelType: 'default',
+    idleTimeoutMs: 5_000,
+    sessionReuseTurns: 1, // 第二次请求必然触发轮换
+    onDeleteSession: (id) => deleted.push(id),
+  })
+  const it = streamWebCompletion(authA, mk(), transport)[Symbol.asyncIterator]()
+  const first = await it.next()
+  assert.equal(first.done, false, '自证：第一条流确实已经开始了')
+
+  const it2 = streamWebCompletion(authA, mk(), transport)[Symbol.asyncIterator]()
+  const pending = it2.next()
+  pending.catch(() => {})
+  await new Promise((r) => setImmediate(r))
+  assert.equal(deleted.length, 0, '在用的会话不得被并发请求回收')
+  assert.equal(created.length, 1, '第二个请求应当等第一个结束（复用互斥）')
+
+  for (;;) {
+    const r = await it.next()
+    if (r.done) break
+  }
+  for (;;) {
+    const r = await it2.next()
+    if (r.done) break
+  }
+  assert.equal(created.length, 2, '第一个结束后，第二个才轮换出新会话')
+  assert.deepEqual(deleted, ['sess-1'], '轮换掉的旧会话要归还')
+})
+
+await test('建流阶段已是 AdapterLlmError 时，不得被包成 TRANSPORT（会抹掉 AUTH/RATE_LIMIT）', async () => {
+  // ⚠️ 反向验证：在 openCompletion 的 catch 里去掉 `if (error instanceof AdapterLlmError) throw error`
+  //    → 这条变红（AUTH 被抹成 TRANSPORT，宿主会按"可重试的传输错误"去重试本该停下的情况）。
+  resetSessionReuse()
+  const { AdapterLlmError } = await import('../src/auth.ts')
+  const transport = {
+    createSession: async () => 'sess-auth',
+    powHeader: async () => {
+      throw new AdapterLlmError('登录态已失效', 'AUTH')
+    },
+  }
+  setFetchImpl(async () => new Response('', { status: 200 }))
+  let thrown
+  try {
+    for await (const _ of streamWebCompletion(
+      authA,
+      { prompt: 'P', thinkingEnabled: false, modelType: 'default', idleTimeoutMs: 5_000, onDeleteSession: () => {} },
+      transport,
+    )) {
+      void _
+    }
+  } catch (error) {
+    thrown = error
+  }
+  assert.ok(thrown, 'powHeader 抛错时必须向上抛（自证：确实走到了这条路径）')
+  assert.equal(thrown.code, 'AUTH', `结构化错误码必须保留，实际 ${thrown.code}`)
 })
 
 console.log()

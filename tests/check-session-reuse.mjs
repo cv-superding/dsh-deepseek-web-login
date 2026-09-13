@@ -212,23 +212,31 @@ await test('会话失效（invalid chat session id）→ 换新会话透明重�
   assert.deepEqual(deleted, ['sess-1'], '失效的会话要回收')
 })
 
-await test('换账号不复用，也不误删另一个账号的会话', async () => {
+await test('换账号不复用，旧会话交还原账号的回调', async () => {
+  // ⚠️ 2026-09-13 第二轮审计 N04 指出**原期望写错了**：
+  //    原断言是"不能回收上一个账号的会话"→ `deleted` 必须为空。
+  //    但正确设计不是"永不回收"，而是**用原账号的回调回收**——
+  //    "不能用 B 的回调去删 A"，不等于"永远不应回收 A"。
+  //    原用例两个账号共用同一个回调，所以断言不到"归属"这件事。
   resetSessionReuse()
   const { created, transport } = mkTransport()
   const deleted = []
   setFetchImpl(okFetch)
-  const params = {
-    prompt: 'P',
-    thinkingEnabled: false,
-    modelType: 'default',
-    idleTimeoutMs: 5_000,
-    onDeleteSession: (id) => deleted.push(id),
-  }
-  for (const auth of [authA, authB]) {
+  for (const [owner, auth] of [
+    ['A', authA],
+    ['B', authB],
+  ]) {
+    const params = {
+      prompt: 'P',
+      thinkingEnabled: false,
+      modelType: 'default',
+      idleTimeoutMs: 5_000,
+      onDeleteSession: (id) => deleted.push([owner, id]),
+    }
     for await (const _ of streamWebCompletion(auth, params, transport)) void _
   }
   assert.equal(created.length, 2, '换账号必须建新会话')
-  assert.deepEqual(deleted, [], `不能回收上一个账号的会话，实际 ${JSON.stringify(deleted)}`)
+  assert.deepEqual(deleted, [['A', 'sess-1']], '不得用 B 的回调回收 A，也不得静默丢弃旧槽')
 })
 
 // 复位，别把注入层留给别的测试

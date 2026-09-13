@@ -7,6 +7,7 @@
  *     本模块在流式文本上做 hold-back 扫描，命中即转成 tool-call 块，不命中则原样透传正文。
  */
 import { randomUUID } from 'node:crypto'
+import { AdapterLlmError } from './auth.ts'
 
 export interface ToolSchemaLike {
   name: string
@@ -233,6 +234,10 @@ export interface SerializeOptions {
  */
 export function serializePrompt(options: SerializeOptions): string {
   const maxChars = options.maxChars ?? 120_000
+  // N07：小数/NaN/极小值直接拒绝，别让它们一路漂到后面的算术里（`new Array(小数)` 这类坑在旁边就有）
+  if (!Number.isSafeInteger(maxChars) || maxChars < 128) {
+    throw new RangeError('maxChars 必须为至少 128 的整数')
+  }
   const system = String(options.system ?? '').trim()
   // ⚠️ F18（2026-09-12 审计）：**按剩余空间给工具目录算预算**，而不是"先渲染满、事后截 head"。
   // 旧做法是先把工具目录渲染到 5.6 万字符，再发现 head 超过 `maxChars * 比例`，
@@ -285,20 +290,24 @@ export function serializePrompt(options: SerializeOptions): string {
   const merged = transcript ? `${head}\n\n---\n\n${transcript}` : head
 
   if (merged.length <= maxChars) return merged
-  // 超长：system+协议单独限预算，转写中段截断
-  // head（system + 工具协议 + 工具目录）**必须完整**：工具目录若被中段截断，
-  // 留下的是残缺的 JSON Schema —— 比"干脆不给这个工具"更误导（模型会照着半截定义猜参数）。
-  // 所以把 head 的占比从 0.45 提到 0.62：2026-09-12 实测 61 个工具时 head 约 6.35 万字符，
-  // 而 0.45 × 12 万 = 5.4 万已经装不下，会被 truncateMiddle 从中间挖掉一块。
-  // 转写仍余约 5.6 万字符，超出时照旧中段截断（历史可截，工具定义不可截）。
-  // 有了上面的动态预算，head 理论上不会再超。这里保留兜底（防御用）：
-  // 万一真的超了，也**不抛错**（那会让整个请求失败、用户什么都拿不到），
-  // 而是照旧中段截断 —— 但这种情况应当被测试视为失败。
-  const headBudget = Math.min(head.length, Math.floor(maxChars * HEAD_RATIO))
-  const boundedHead = head.length <= headBudget ? head : truncateMiddle(head, headBudget, 0.85)
-  const transcriptBudget = Math.max(1_000, maxChars - boundedHead.length - 8)
-  const boundedTranscript = truncateMiddle(transcript, transcriptBudget, 0.7)
-  return `${boundedHead}\n\n---\n\n${boundedTranscript}`
+
+  // ⚠️ N07（2026-09-13 第二轮审计）：**固定头（system + 协议 + 工具目录）必须完整**，
+  // 不能再按 `maxChars * HEAD_RATIO` 去截它。
+  // 旧写法是 `headBudget = min(head.length, floor(maxChars * 0.62))`：
+  // 只要 system 长到超过预算的 62%，就会从**中间**被挖掉一块 ——
+  // 于是"预算明明够放完整 system"的请求，也会静默丢掉系统指令（模型照着残缺策略干活）。
+  // 现在：固定头独占它的长度，剩余预算全给历史；**固定头自己放不下就明确报错**。
+  // 代价：以前"静默丢指令还能生成"的请求现在会失败 —— 这是有意的，丢失系统指令比失败更糟。
+  const separator = transcript ? '\n\n---\n\n' : ''
+  const budget = maxChars - head.length - separator.length
+  if (budget < 128) {
+    throw new AdapterLlmError(
+      '系统/工具定义超出 prompt 预算，请减少固定输入或扩大上限',
+      'CONTEXT_WINDOW_EXCEEDED',
+    )
+  }
+  return head + separator + truncateMiddle(transcript, budget, 0.7)
+
 }
 
 // ── 流式工具调用过滤器 ────────────────────────────────────

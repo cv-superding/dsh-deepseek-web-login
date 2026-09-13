@@ -1438,7 +1438,11 @@ export async function* parseWebSse(body: any): AsyncGenerator<WebStreamEvent> {
 export const DEFAULT_SESSION_REUSE_TURNS = 20
 
 /** 复用槽：同一账号当前可复用的会话。key 是凭证摘要（不进日志、不拿明文当键）。 */
-let reuseSlot: { key: string; sessionId: string; turns: number } | undefined
+/**
+ * 复用槽。`cleanup` 记录**这个会话归谁回收**（2026-09-13 审计 N04）：
+ * 切号时旧槽要交回**原账号**的清理回调，不能用当前账号的去删别人的会话。
+ */
+let reuseSlot: { key: string; sessionId: string; turns: number; cleanup?: (id: string) => void } | undefined
 
 /** 凭证摘要：只用来判断「是不是同一个账号」。不做安全用途、不落日志。 */
 function accountKey(auth: WebAuth): string {
@@ -1454,8 +1458,6 @@ function accountKey(auth: WebAuth): string {
 interface SessionLease {
   sessionId: string
   reused: boolean
-  /** 因轮换而作废的旧会话（调用方负责回收）。 */
-  retired?: string
 }
 
 async function leaseSession(
@@ -1463,18 +1465,36 @@ async function leaseSession(
   signal: AbortSignal,
   transport: CompletionTransport,
   maxTurns: number,
+  cleanup?: (id: string) => void,
 ): Promise<SessionLease> {
+  signal.throwIfAborted()
   const key = accountKey(auth)
   const limit = Number.isFinite(maxTurns) ? Math.max(0, Math.floor(maxTurns)) : DEFAULT_SESSION_REUSE_TURNS
-  if (limit > 0 && reuseSlot && reuseSlot.key === key && reuseSlot.turns < limit) {
+  // 关闭复用：每次都要新会话（调用方会自己回收）
+  if (limit === 0) return { sessionId: await transport.createSession(auth, signal), reused: false }
+  if (reuseSlot && reuseSlot.key === key && reuseSlot.turns < limit) {
     reuseSlot.turns += 1
     return { sessionId: reuseSlot.sessionId, reused: true }
   }
-  // 换账号 / 轮换到上限：旧会话作废（换账号时不回收别人的会话，避免误删）
-  const retired = reuseSlot && reuseSlot.key === key ? reuseSlot.sessionId : undefined
+  // ⚠️ N04：轮换/切号时，旧槽必须交给**它自己的** cleanup 归还。
+  // 旧实现只在"同账号轮换"时返回 retired、切号时直接覆盖旧槽 ——
+  // 后者等于把旧会话的清理归属丢掉了（永远不会有人删它）。
+  const previous = reuseSlot
   const sessionId = await transport.createSession(auth, signal)
-  reuseSlot = limit > 0 ? { key, sessionId, turns: 1 } : undefined
-  return { sessionId, reused: false, ...(retired ? { retired } : {}) }
+  if (signal.aborted) {
+    // 建会话期间被取消：这个会话还没人认领，就地回收，别留垃圾
+    try {
+      cleanup?.(sessionId)
+    } catch {}
+    signal.throwIfAborted()
+  }
+  reuseSlot = { key, sessionId, turns: 1, ...(cleanup ? { cleanup } : {}) }
+  if (previous) {
+    try {
+      previous.cleanup?.(previous.sessionId)
+    } catch {}
+  }
+  return { sessionId, reused: false }
 }
 
 /** 把某个会话从复用槽里摘掉（会话失效 / 请求失败时调用，下次会新建）。 */
@@ -1533,10 +1553,9 @@ async function openCompletion(
       signal,
       transport,
       params.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS,
+      params.onDeleteSession,
     )
     const sessionId = lease.sessionId
-    // 只有被**轮换**掉的旧会话在这里回收；当前会话留着给下一个请求复用
-    if (lease.retired) params.onDeleteSession?.(lease.retired)
     let resp: Response
     try {
       resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {
@@ -1560,6 +1579,12 @@ async function openCompletion(
         signal,
       })
     } catch (error: any) {
+      retireSession(sessionId)
+      params.onDeleteSession?.(sessionId)
+      // ⚠️ N04：**先放行已经是 AdapterLlmError 的错误**。
+      // 旧写法无条件包成 TRANSPORT，会把 PoW/网络层带出来的 AUTH / RATE_LIMIT
+      // 等结构化分类抹掉 —— 宿主于是按"可重试的传输错误"处理本该停止重试的情况。
+      if (error instanceof AdapterLlmError) throw error
       if (params.signal?.aborted) throw new AdapterLlmError('DeepSeek web request aborted by caller', 'ABORTED', { cause: error })
       throw new AdapterLlmError(`DeepSeek web request failed: ${error?.message ?? error}`, 'TRANSPORT', { cause: error })
     }
@@ -1646,58 +1671,130 @@ async function openCompletion(
  * 工具调用没收全（正是我们一直在追的那类截断）。
  * 现在删除只发生在 finally（流正常结束、报错或调用方中止都算），会话在整个请求期间都活着。
  */
+/** 复用模式下的"飞行互斥"：保证同一时刻只有一个复用请求在跑，避免轮换撞上并发。 */
+let reuseFlightTail: Promise<void> = Promise.resolve()
+
 export async function* streamWebCompletion(
   auth: WebAuth,
   params: CompletionParams,
   transport: CompletionTransport = defaultTransport,
 ): AsyncGenerator<WebStreamEvent> {
-  const idle = params.idleTimeoutMs ?? 120_000
   const controller = new AbortController()
   const signal = params.signal ? AbortSignal.any([params.signal, controller.signal]) : controller.signal
+  const rawLimit = params.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS
+  const limit = Number.isFinite(rawLimit) ? Math.max(0, Math.floor(rawLimit)) : DEFAULT_SESSION_REUSE_TURNS
 
-  const { sessionId, resp } = await openCompletion(auth, params, signal, transport)
-
-  // 空闲看门狗：SSE 事件间隔超过 idle 即判定超时
-  let timer: ReturnType<typeof setTimeout> | null = null
-  let settled = false
-  let fireIdle: (error: unknown) => void = () => {}
-  const idlePromise = new Promise<never>((_, reject) => {
-    fireIdle = reject
-  })
-  const armIdle = (): void => {
+  let release: (() => void) | undefined
+  let sessionId: string | undefined
+  let iterator: AsyncGenerator<WebStreamEvent> | undefined
+  let body: any
+  let complete = false
+  let poisoned = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  /** 同一个会话只回收一次（复用/轮换/失败三条路径可能都想回收它）。 */
+  const deleted = new Set<string>()
+  const cleanup = (id: string): void => {
+    if (deleted.has(id)) return
+    deleted.add(id)
+    try {
+      params.onDeleteSession?.(id)
+    } catch {}
+  }
+  /** 让等待可被取消：abort 时立刻 reject，不等定时器/对端。 */
+  const wait = <T>(promise: Promise<T>): Promise<T> =>
+    new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        promise.catch(() => {})
+        reject(signal.reason)
+        return
+      }
+      const abort = () => {
+        signal.removeEventListener('abort', abort)
+        reject(signal.reason)
+      }
+      signal.addEventListener('abort', abort, { once: true })
+      promise.then(
+        (value) => {
+          signal.removeEventListener('abort', abort)
+          resolve(value)
+        },
+        (error) => {
+          signal.removeEventListener('abort', abort)
+          reject(error)
+        },
+      )
+    })
+  const arm = (ms: number, message: string): void => {
     if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
-      if (settled) return
-      controller.abort('idle timeout')
-      fireIdle(new AdapterLlmError(`DeepSeek web stream idle timeout after ${idle}ms`, 'TIMEOUT'))
-    }, idle)
+    timer = setTimeout(() => controller.abort(new AdapterLlmError(message, 'TIMEOUT')), ms)
     ;(timer as any).unref?.()
   }
-  armIdle()
 
   try {
-    const iterator = parseWebSse(resp.body)[Symbol.asyncIterator]()
-    while (true) {
-      const result = await Promise.race([iterator.next(), idlePromise])
-      armIdle()
-      if (result.done) break
-      yield result.value
+    signal.throwIfAborted()
+    // N04：复用开启时全程串行（含跨账号）—— 共享槽位要一致的并发状态；
+    // 关闭复用时保持原并发模式（每次自己建会话，彼此独立）。
+    if (limit > 0) {
+      const previous = reuseFlightTail
+      const mine = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      reuseFlightTail = previous.then(
+        () => mine,
+        () => mine,
+      )
+      await wait(previous)
+    }
+    arm(45_000, 'DeepSeek 建立流超时')
+    const opened = await openCompletion(
+      auth,
+      { ...params, sessionReuseTurns: limit, onDeleteSession: cleanup },
+      signal,
+      transport,
+    )
+    sessionId = opened.sessionId
+    body = opened.resp.body
+    if (timer) clearTimeout(timer)
+    iterator = parseWebSse(body)
+    const idle =
+      Number.isFinite(params.idleTimeoutMs) && (params.idleTimeoutMs as number) > 0
+        ? Math.min(params.idleTimeoutMs as number, 600_000)
+        : 120_000
+    for (;;) {
+      arm(idle, `DeepSeek 流等待超时（${idle}ms）`)
+      const item = await wait(iterator.next())
+      if (timer) clearTimeout(timer)
+      if (item.done) {
+        complete = true
+        break
+      }
+      if (item.value.kind === 'error') poisoned = true
+      yield item.value
     }
   } catch (error: any) {
+    if (params.signal?.aborted) throw new AdapterLlmError('请求已取消', 'ABORTED', { cause: error })
+    if (controller.signal.aborted && controller.signal.reason instanceof AdapterLlmError) throw controller.signal.reason
     if (error instanceof AdapterLlmError) throw error
-    if (params.signal?.aborted) throw new AdapterLlmError('DeepSeek web stream aborted by caller', 'ABORTED', { cause: error })
-    throw new AdapterLlmError(`DeepSeek web stream failed: ${error?.message ?? error}`, 'TRANSPORT', { cause: error })
+    throw new AdapterLlmError('DeepSeek 流请求失败', 'TRANSPORT', { cause: error })
   } finally {
-    settled = true
     if (timer) clearTimeout(timer)
-    try {
-      controller.abort('stream consumer stopped')
-    } catch {}
-    // 会话回收排在**流结束之后**（正常结束 / 报错 / 调用方中止都会走到这里）。
-    // 提前删除会让会话在生成中途消失 —— 见 streamWebCompletion 顶部的事故说明。
-    // 复用模式下**不删当前会话**（它要留给下一个请求）；只有关闭复用时才在这里回收。
-    if ((params.sessionReuseTurns ?? DEFAULT_SESSION_REUSE_TURNS) === 0) {
-      params.onDeleteSession?.(sessionId)
+    controller.abort()
+    // 主链不等待不合作的假/自定义流（否则仍会阻塞所有复用请求）
+    if (iterator) {
+      void iterator
+        .return(undefined)
+        .catch(() => {})
+        .finally(() => {
+          if (body && !body.locked) void body.cancel().catch(() => {})
+        })
     }
+    // N04：**提前结束（调用方 return / 取消）也必须退役会话**。
+    // 旧实现只在 HTTP 失败分支退役，stream generator 被提前 return 时不退役 ——
+    // 于是下一次请求会接着用一个"上一条流还没消费完"的会话。
+    if (sessionId && (!complete || poisoned || limit === 0)) {
+      retireSession(sessionId)
+      cleanup(sessionId)
+    }
+    release?.()
   }
 }
