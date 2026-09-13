@@ -154,29 +154,55 @@ function percentile(sorted: number[], ratio: number): number {
 /**
  * 汇总最近 `hours` 小时。
  *
- * 间隔只统计**对话类**调用（`purpose === 'chat'`）：会话标题生成是 DSH 自己发的旁路请求，
- * 把它算进去会让间隔分布失真（它常常紧跟在主回答后面）。
+ * `hours` 会先**取整并夹到 1–72**：以前直接把入参喂给 `new Array(hours)`，而路由只 clamp
+ * 没取整 → `?hours=1.5` 直接 `RangeError`（已复现）。
+ *
+ * 间隔只统计**对话类**调用（`purpose === 'chat'`），并且**按账号分组**：
+ *  - 跨账号算间隔没有意义（两个号的节奏互不相干，混在一起只会把分布拉平）；
+ *  - `at` 是**结束**时刻，所以"这次等了多久" = `本次开始 − 上次结束`（`at - ms` 即本次开始）。
+ *    直接拿相邻 `at` 相减，会把上一轮的生成耗时算进"等待"里；
+ *  - **失败的调用同样计入**：失败也占用了等待窗口，跳过它们只会把间隔拉大。
+ *
+ * 负数保留（表示可能与上一轮重叠，例如被抢占后重发）。要毫秒级精确就得新增显式
+ * `startedAt` 字段，而不是从 `ms` 反推 —— 旧台账只能按现在的算法近似。
  */
-export function summarizeLedger(hours = 24): LedgerSummary {
+export function summarizeLedger(input = 24): LedgerSummary {
+  const hours = Number.isFinite(input) ? Math.min(72, Math.max(1, Math.floor(input))) : 24
   const now = Date.now()
-  const since = now - hours * 3_600_000
-  const entries = readEntries(since)
+  const entries = readEntries(now - hours * 3_600_000).filter(
+    (entry) => entry.at <= now && Number.isFinite(entry.ms) && entry.ms >= 0,
+  )
 
   const failures: Record<string, number> = {}
+  const hourly = new Array<number>(hours).fill(0)
   let succeeded = 0
-  const hourly = new Array(hours).fill(0)
-  const chatTimes: number[] = []
+  const groups = new Map<string, LedgerEntry[]>()
 
   for (const entry of entries) {
     const bucket = Math.floor((now - entry.at) / 3_600_000)
     if (bucket >= 0 && bucket < hours) hourly[hours - 1 - bucket] += 1
     if (entry.ok) succeeded += 1
-    else failures[failureBucket(entry)] = (failures[failureBucket(entry)] ?? 0) + 1
-    if (entry.purpose === 'chat' && entry.ok) chatTimes.push(entry.at)
+    else {
+      const key = failureBucket(entry)
+      failures[key] = (failures[key] ?? 0) + 1
+    }
+    if (entry.purpose === 'chat') {
+      const key = entry.accountId ?? 'unknown'
+      const list = groups.get(key) ?? []
+      list.push(entry)
+      groups.set(key, list)
+    }
   }
 
   const gaps: number[] = []
-  for (let i = 1; i < chatTimes.length; i += 1) gaps.push(chatTimes[i] - chatTimes[i - 1])
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.at - a.ms - (b.at - b.ms))
+    let lastEnd: number | undefined
+    for (const entry of list) {
+      if (lastEnd !== undefined) gaps.push(entry.at - entry.ms - lastEnd)
+      lastEnd = Math.max(lastEnd ?? entry.at, entry.at)
+    }
+  }
   gaps.sort((a, b) => a - b)
 
   let files = 0
@@ -208,6 +234,7 @@ export function summarizeLedger(hours = 24): LedgerSummary {
     footprint: { files, bytes },
   }
 }
+
 
 /** 台账文件是否存在（界面用来区分"还没跑过"与"跑了但没数据"）。 */
 export function ledgerExists(): boolean {

@@ -77,9 +77,14 @@ await test('台账：写入后能汇总，且失败分类是人话', async () =>
   assert.equal(summary.succeeded, 3)
   assert.equal(summary.failed, 1)
   assert.equal(summary.failures['限流（发太频繁）'], 1)
-  assert.ok(summary.gaps, '有两次成功对话应能算出间隔')
-  assert.equal(summary.gaps.samples, 1, '间隔只统计 chat 成功调用（session-title 不算，否则分布失真）')
-  assert.equal(summary.gaps.min, 30_000)
+  assert.ok(summary.gaps, 'chat 调用之间应能算出间隔')
+  // 口径（审计 F19）：session-title 仍不算（DSH 自己发的旁路请求，会把分布拉平），
+  // 但**失败调用要算**（它同样占用了等待窗口，跳过只会把间隔拉大）。
+  // `at` 是结束时刻，所以"这次等了多久" = 本次开始 − 上次结束：
+  //   chat 三次（含一次失败）→ 两个间隔：29_100 与 19_800（排序后 min = 19_800）
+  assert.equal(summary.gaps.samples, 2, '失败调用也要计入间隔（它同样占用了等待窗口）')
+  assert.equal(summary.gaps.min, 19_800, '本次开始 − 上次结束（旧算法会把上一轮生成耗时算进等待）')
+  assert.equal(summary.gaps.max, 29_100)
   assert.equal(pruneLedger(7), 0, '刚写的文件不该被清理')
 })
 

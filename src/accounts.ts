@@ -411,9 +411,24 @@ export function importAccounts(payload: unknown): { imported: number; updated: n
 }
 
 /**
+ * 迁移指针：最近一次迁移是否**完整**完成（失败原因留给调用方记日志）。
+ *
+ * 为什么需要它（审计 F21）：以前迁移把旧文件 `rename` 成 `.migrated-<时间戳>` **留档**，
+ * 于是"退出登录"删掉的是账号库里的记录，而那份**明文旧凭证**还躺在磁盘上、照样能登录 ——
+ * "已登出"就成了一句谎话。现在成功迁移后**删掉源文件**，失败必须能被看见，不能静默。
+ */
+let lastMigrationError: string | undefined
+
+/** 最近一次迁移的失败原因（undefined = 没有失败）。 */
+export function legacyMigrationError(): string | undefined {
+  return lastMigrationError
+}
+
+/**
  * 一次性迁移：把 0.1.25 及以前的单账号文件搬进账号库。
  *
- * 旧文件**改名留档**（不删），成功后不再重复迁移。返回迁移出的账号（没有则 undefined）。
+ * 旧文件在**确认新记录已落盘**之后被删除（不再留 `.migrated-*` 明文副本）。
+ * 返回迁移出的账号（没有则 undefined）；写入校验失败会抛错，由调用方记录。
  */
 export function migrateLegacyAuth(): AccountRecord | undefined {
   const legacy = legacyAuthFilePath()
@@ -421,12 +436,15 @@ export function migrateLegacyAuth(): AccountRecord | undefined {
   if (!record) return undefined
   // 已经在库里（同 token）就不重复导入
   const existing = listAccounts().find((item) => item.token === record.token)
-  const saved = existing ?? record
-  if (!existing) saveAccount(record)
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  try {
-    renameSync(legacy, `${legacy}.migrated-${stamp}`)
-  } catch {}
+  const saved = existing ?? { ...record, id: newAccountId() }
+  if (!existing) saveAccount(saved)
+  // 先确认这次迁移真的落盘了，再删源文件 —— 顺序反了就会丢凭证
+  const verified = readAccount(saved.id)
+  if (!verified || verified.token !== record.token) {
+    throw new Error('迁移写入验证失败：账号库里的记录与旧凭证不一致')
+  }
+  rmSync(legacy)
+  lastMigrationError = undefined
   if (!activeAccountId()) setActiveAccount(saved.id)
   return saved
 }
@@ -437,10 +455,13 @@ export function migrateLegacyAuthIfNeeded(): AccountRecord | undefined {
     if (listAccounts().length > 0) return undefined
     if (!existsSync(legacyAuthFilePath())) return undefined
     return migrateLegacyAuth()
-  } catch {
+  } catch (error: any) {
+    // 不静默：旧凭证可能还在磁盘上，调用方要把这句记进日志/界面
+    lastMigrationError = `旧凭证未清除，迁移未完整完成：${error?.message ?? error}`
     return undefined
   }
 }
+
 
 /** 账号展示名：备注名优先，其次掩码账号，再次 id。 */
 export function accountTitle(record: AccountRecord, mask: (raw: string) => string): string {

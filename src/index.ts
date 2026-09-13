@@ -59,6 +59,7 @@ import {
   exportAccounts,
   exportAccountsToFile,
   importAccounts,
+  legacyMigrationError,
   listAccounts,
   migrateLegacyAuthIfNeeded,
   removeAccount,
@@ -203,10 +204,15 @@ export function apply(ctx: any, config: Config = {}): void {
     logger,
   })
   // 旧版（≤0.1.25）只有一份 deepseek-auth.json；首次启动时迁进账号库。
-  // 只在「库为空 且 旧文件在」时跑一次，旧文件改名留档（不删），所以不会重复导入。
+  // 只在「库为空 且 旧文件在」时跑一次；成功迁移后**删掉旧文件**（审计 F21：
+  // 留 `.migrated-*` 明文副本会让"退出清凭证"变成谎话）。
   const migratedAccount = migrateLegacyAuthIfNeeded()
   if (migratedAccount) {
     logger.info?.(`deepseek-web: 已把旧的单账号凭证迁移进账号库（${migratedAccount.id}）`)
+  } else {
+    // ⚠️ 迁移失败不能静默：旧凭证可能还明文躺在磁盘上、照样能登录，用户有权知道
+    const migrationError = legacyMigrationError()
+    if (migrationError) logger.warn?.(`deepseek-web: ${migrationError}`)
   }
 
   // 传输层：默认走 Chromium 网络栈（TLS/HTTP2 指纹与真实浏览器一致，见 transport.ts 的模块注释）。

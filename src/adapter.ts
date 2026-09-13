@@ -7,9 +7,10 @@
  *  - 无 temperature / stop / max_tokens 字段 → 忽略（不报错）
  *  - 每次调用新建 chat_session 并在结束后删除（保持无状态 + 不污染网页端列表）
  */
-import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { appendFileSync, mkdirSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join as joinPath } from 'node:path'
+import { webLoginDir } from './paths.ts'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
@@ -31,23 +32,137 @@ import { collectImageRefs, serializePrompt, stripSystemMarkers, SystemMarkerStre
  *
  * 失败必须无声（诊断代码绝不能影响主流程）。
  */
-function dumpRejectedPayload(raw: string, mode: string, reason: string | undefined, logger?: any): void {
+/**
+ * 丢弃载荷的**诊断元信息**落盘。
+ *
+ * ⚠️ 默认**不落原文**（审计 F23）：被丢弃的是模型吐坏的工具调用参数，里面完全可能带着
+ * 命令里的 token、文件内容、个人信息 —— 以前默认把整段 raw 写进 `~/.dsh/deepseek-web/rejected.jsonl`，
+ * 等于给这些内容在磁盘上留了一份没人在看的副本。而且那个路径是**硬编码 homedir** 的，
+ * 无视 `DSH_HOME`（我们自己的测试就是被它坑到的：写到了真实用户目录）。
+ *
+ * 现在只记「什么时候 / 哪种模式 / 什么原因 / 多长 / 摘要」：
+ * 足够回答"是不是同一段坏输出反复出现"，又不需要保存原文。
+ * 需要看完整内容时，应该走"用户显式开启 + 有效期 + 0600 + 清理策略"的独立诊断，
+ * 而不是默认打开（本版没做）。
+ *
+ * ⚠️ 摘要（sha256）挡不住低熵内容被猜出来，它只是"不存原文"而非"内容不可还原"。
+ */
+export function dumpRejectedPayload(raw: string, mode: string, reason: string | undefined, logger?: any): void {
   try {
-    const dir = joinPath(homedir(), '.dsh', 'deepseek-web')
-    mkdirSync(dir, { recursive: true })
-    const file = joinPath(dir, 'rejected.jsonl')
+    const dir = joinPath(webLoginDir(), 'diagnostics')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const file = joinPath(dir, 'rejected-meta.jsonl')
+    const knownMode = ['json', 'xml', 'dsml'].includes(mode) ? mode : 'other'
+    const knownReason = ['unbalanced', 'unparsable', 'oversize', 'echo'].includes(reason ?? '') ? reason : 'other'
+    const line =
+      JSON.stringify({
+        at: new Date().toISOString(),
+        mode: knownMode,
+        reason: knownReason,
+        length: raw.length,
+        sha256: createHash('sha256').update(raw).digest('hex'),
+      }) + '\n'
+    let size = 0
     try {
-      if (statSync(file).size > 4_000_000) writeFileSync(file, '')
+      size = statSync(file).size
     } catch {
-      /* 首次写入或读大小失败都无所谓 */
+      /* 首次写入 */
     }
-    appendFileSync(
-      file,
-      `${JSON.stringify({ at: new Date().toISOString(), mode, reason, length: raw.length, raw })}\n`,
-      'utf8',
-    )
-  } catch (error: any) {
-    logger?.debug?.(`deepseek-web: 落盘被丢弃载荷失败：${error?.message ?? error}`)
+    if (size + Buffer.byteLength(line) > 4_000_000) return
+    appendFileSync(file, line, { encoding: 'utf8', mode: 0o600 })
+  } catch {
+    try {
+      logger?.debug?.('deepseek-web: 诊断元信息写入失败')
+    } catch {}
+  }
+}
+
+/**
+ * 图片上传缓存：`attachmentId → fileId`。
+ *
+ * ⚠️ 为什么必须按账号分作用域（审计 F06）：`fileId` 是**归属某个账号**的服务端对象。
+ * 缓存原先只按 `attachmentId` 记，切到另一个账号后会把上一个账号的 `fileId` 复用出去 ——
+ * 服务端是否接受是它的事（不能据此断言"跨账号能读到图"），但"把我们这边两个号的引用串了"
+ * 本身就已经是错的。另外只检查"被查中的那一项"的 TTL 不叫淘汰：一直换新图、不换旧 key 时，
+ * 旧项会永久滞留在内存里。
+ *
+ * 三条纪律：切账号（token 变）立刻整批清空；每次使用前清掉**所有**过期项；条数封顶。
+ * `token` 只在本进程内存里当作用域，不写日志、不落盘。
+ */
+export class ImageUploadCache {
+  private scope = ''
+  private readonly entries = new Map<string, { fileId: string; at: number }>()
+  // ⚠️ 不要写成「constructor 的参数属性」（`constructor(private readonly ttlMs: number)`）：
+  // 测试是 `node src/xxx.ts` 直接跑的，而 Node 的类型剥离只支持「擦除型」语法 ——
+  // 参数属性需要生成赋值代码，会被判为不支持的语法（实测报 ERR_INVALID_TYPESCRIPT_SYNTAX）。
+  private readonly ttlMs: number
+  private readonly maxEntries: number
+  constructor(ttlMs = 2 * 60 * 60 * 1000, maxEntries = 256) {
+    this.ttlMs = ttlMs
+    this.maxEntries = maxEntries
+  }
+
+  /** 绑定当前账号：token 变了就整批清掉（上一个账号的 fileId 不能跨号复用）。 */
+  useScope(token: string): void {
+    if (this.scope !== token) {
+      this.entries.clear()
+      this.scope = token
+    }
+  }
+
+  /** 当前作用域（`set` 前校验用：await 期间可能被别的账号切走）。 */
+  currentScope(): string {
+    return this.scope
+  }
+
+  /** 清掉**所有**过期项，返回清掉的条数（不只清理"这次要查的那一个"）。 */
+  prune(now: number = Date.now()): number {
+    let removed = 0
+    for (const [key, value] of this.entries) {
+      if (now - value.at >= this.ttlMs) {
+        this.entries.delete(key)
+        removed += 1
+      }
+    }
+    return removed
+  }
+
+  /** 命中且未过期才返回；顺手清掉这一条过期项。 */
+  get(key: string, now: number = Date.now()): string | undefined {
+    const hit = this.entries.get(key)
+    if (!hit) return undefined
+    if (now - hit.at >= this.ttlMs) {
+      this.entries.delete(key)
+      return undefined
+    }
+    return hit.fileId
+  }
+
+  /**
+   * 写入并封顶（超出时丢最早写入的项）。
+   * `expectScope` 用于防"await 期间账号被切走"：作用域已变则拒绝写入。
+   */
+  set(key: string, fileId: string, now: number = Date.now(), expectScope?: string): boolean {
+    if (expectScope !== undefined && expectScope !== this.scope) return false
+    this.entries.delete(key)
+    this.entries.set(key, { fileId, at: now })
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value
+      if (oldest === undefined) break
+      this.entries.delete(oldest)
+    }
+    return true
+  }
+
+  /** 当前条数（测试用）。 */
+  get size(): number {
+    return this.entries.size
+  }
+
+  /** 清空（测试隔离用）。 */
+  reset(): void {
+    this.entries.clear()
+    this.scope = ''
   }
 }
 
@@ -416,29 +531,33 @@ export function createAdapter(deps: AdapterDeps) {
     },
   }
 
-  /** 上传缓存：attachmentId → fileId（内容寻址，跨轮次复用，避免重复上传同一张图）。 */
-  const uploadCache = new Map<string, { fileId: string; at: number }>()
-  const UPLOAD_TTL_MS = 2 * 60 * 60 * 1000
+  /** 图片上传缓存：按账号作用域 + TTL + 条数封顶（见 ImageUploadCache 的说明）。 */
+  const uploadCache = new ImageUploadCache()
 
   /**
    * 把请求里出现的图片全部上传到网页端并返回 file_id 列表。
    * 失败不致命：记日志后跳过该图（prompt 里仍有 [image attached] 标记，模型会知道有图但看不到）。
+   * 但**取消**要照常传播 —— 用户点了停止就不该继续传图，也不该把它降级成"纯文本继续跑"。
    */
   async function uploadRequestImages(auth: WebAuth, messages: readonly any[] | undefined, signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted()
+    uploadCache.useScope(auth.token)
+    const scope = uploadCache.currentScope()
     const refs = collectImageRefs(messages)
     if (refs.length === 0) return []
     if (!deps.readImage) {
       logger?.warn?.('deepseek-web: 收到图片但附件服务不可用（ctx.attachments），图片被忽略')
       return []
     }
+    uploadCache.prune()
     const ids: string[] = []
-    const now = Date.now()
     for (const ref of refs) {
+      signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
       if (!key) continue
       const cached = uploadCache.get(key)
-      if (cached && now - cached.at < UPLOAD_TTL_MS) {
-        ids.push(cached.fileId)
+      if (cached) {
+        ids.push(cached)
         continue
       }
       try {
@@ -452,9 +571,10 @@ export function createAdapter(deps: AdapterDeps) {
           },
           signal,
         )
-        uploadCache.set(key, { fileId: uploaded.fileId, at: Date.now() })
+        uploadCache.set(key, uploaded.fileId, Date.now(), scope)
         ids.push(uploaded.fileId)
       } catch (error: any) {
+        if (signal?.aborted) throw error
         logger?.warn?.(`deepseek-web: 图片上传失败（已降级为纯文本）：${error?.message ?? error}`)
       }
     }
@@ -724,12 +844,13 @@ export function createAdapter(deps: AdapterDeps) {
         if (drained.rejected) {
           // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
           // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
-          // 完整载荷落盘：日志的 400 字符截断看不到后半段的坏点（见 dumpRejectedPayload 说明）
+          // 只落**元信息**（长度 + 摘要，不落原文，见 dumpRejectedPayload 的说明）；
+          // 下面这段截断内容只写进宿主日志、不写盘，方便当场看出"坏在哪一步"。
           dumpRejectedPayload(drained.rejected.raw, drained.rejected.mode, drained.rejected.reason ?? 'unparsable', logger)
           logger?.warn?.(
             `deepseek-web: 工具调用${drained.rejected.mode === 'xml' ? '（XML）' : ''}解析失败` +
               `[${drained.rejected.reason ?? 'unparsable'}]` +
-              `，已丢弃 ${drained.rejected.raw.length} 字符（完整原文见 ~/.dsh/deepseek-web/rejected.jsonl）：` +
+              `，已丢弃 ${drained.rejected.raw.length} 字符（原文不落盘；以下片段仅写入宿主日志）：` +
               drained.rejected.raw.slice(0, 2000),
           )
           // 只有**首轮**的丢弃才触发整步重试；续写轮的丢弃记日志即可

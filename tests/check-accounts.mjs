@@ -28,6 +28,7 @@ const {
   activeAccountId,
   exportAccounts,
   importAccounts,
+  legacyMigrationError,
   listAccounts,
   migrateLegacyAuthIfNeeded,
   newAccountId,
@@ -204,7 +205,10 @@ test('导入会跳过没有 token 的垃圾条目', () => {
   assert.equal(importAccounts(undefined).imported, 0, '非法输入不该抛错')
 })
 
-test('旧版单账号文件：一次性迁移进库，旧文件改名留档', () => {
+test('旧版单账号文件：一次性迁移进库，且旧文件被删除（不留明文副本）', () => {
+  // 审计 F21：以前迁移把旧文件 rename 成 `.migrated-<时间戳>` 留档 —— 那份是**明文、可登录**的凭证，
+  // 于是"退出登录"删掉账号库记录之后，它还在磁盘上照样能用，"已登出"就成了谎话。
+  // 现在确认新记录落盘后直接删源文件；误删的保护交给账号库导出备份。
   resetLibrary()
   assert.equal(activeAccountId(), undefined)
   const legacy = legacyAuthFilePath()
@@ -215,9 +219,10 @@ test('旧版单账号文件：一次性迁移进库，旧文件改名留档', ()
   assert.ok(migrated, '应迁移出一个账号')
   assert.equal(readAuth().token, 'h'.repeat(64))
   assert.equal(activeAccountId(), migrated.id, '迁移出来的账号应成为当前')
-  assert.ok(!existsSync(legacy), '旧文件应被改名（不留在原位，避免与账号库不一致）')
-  const archived = readdirSync(join(HOME, 'web-login')).filter((name) => name.startsWith('deepseek-auth.json.migrated-'))
-  assert.equal(archived.length, 1, `旧文件应改名留档，实际 ${JSON.stringify(archived)}`)
+  assert.ok(!existsSync(legacy), '旧文件不能留在原位')
+  const leftovers = readdirSync(join(HOME, 'web-login')).filter((name) => name.startsWith('deepseek-auth.json'))
+  assert.equal(leftovers.length, 0, `不得留任何明文副本（含 .migrated-*），实际 ${JSON.stringify(leftovers)}`)
+  assert.equal(legacyMigrationError(), undefined, '成功迁移不该留下失败记录')
 })
 
 test('迁移不会重复跑（库非空时是 no-op）', () => {
@@ -300,6 +305,42 @@ test('F01：正常 id 不受影响（别矫枉过正）', () => {
   const fresh = newAccountId()
   assert.doesNotThrow(() => accountFilePath(fresh))
   assert.ok(accountFilePath(fresh).startsWith(accountsDir()))
+})
+
+test('F21：迁移写入失败时不静默 —— 旧凭证还在磁盘上，必须能被看见', () => {
+  // 注入 rename 失败（与 F02 同一套夹具）：saveAccount 抛 → 迁移中断 → **旧文件不能删**。
+  // 这时命令行/日志里必须留下原因：旧凭证是明文且可登录，悄悄忽略等于骗用户"已经清理干净"。
+  resetLibrary()
+  const legacy = legacyAuthFilePath()
+  mkdirSync(join(legacy, '..'), { recursive: true })
+  writeFileSync(legacy, JSON.stringify(makeAuth('m'.repeat(64), { user: { display: 'm***@qq.com' } })), 'utf8')
+
+  const originalRename = fsDefault.renameSync
+  let injected = 0
+  fsDefault.renameSync = (from, to) => {
+    if (String(to).includes('acc_') || String(to).endsWith('.json')) {
+      injected += 1
+      throw Object.assign(new Error('AUDIT_MIGRATE_FAILURE'), { code: 'EACCES' })
+    }
+    return originalRename(from, to)
+  }
+  syncBuiltinESMExports()
+  let migrated
+  try {
+    migrated = migrateLegacyAuthIfNeeded()
+  } finally {
+    fsDefault.renameSync = originalRename
+    syncBuiltinESMExports()
+  }
+
+  assert.equal(injected, 1, '自证：目标 rename 真的被注入失败了（否则这条用例什么都没测）')
+  assert.equal(migrated, undefined, '迁移没成功就不该返回账号')
+  assert.ok(legacyMigrationError(), '必须留下失败原因（调用方会记进日志）')
+  assert.ok(existsSync(legacy), '写入没成功时**绝不能**删旧凭证（顺序反了会丢号）')
+
+  // 清理：这条用例故意留下"未迁移的旧文件 + 空库"，不能污染后面的用例
+  rmSync(legacy, { force: true })
+  resetLibrary()
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

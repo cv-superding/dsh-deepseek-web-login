@@ -185,6 +185,20 @@ const checks = {
     host.includes('withVerifiedIdentity(auth, check.user)') &&
     host.includes('refreshVerifiedIdentity(target.id, target.token, check.user)') &&
     host.includes('!item.serverId && item.user?.id === serverId'),
+  // 审计 F06：图片缓存要有账号作用域（切号清空）、真的淘汰过期项、写入时校验作用域
+  'host 图片缓存按账号隔离并淘汰过期项':
+    host.includes('uploadCache.useScope(auth.token)') &&
+    host.includes('uploadCache.prune()') &&
+    host.includes('uploadCache.set(key, uploaded.fileId, Date.now(), scope)'),
+  // 审计 F23：诊断只落元信息（长度 + sha256），且写在 DSH_HOME 下
+  'host 丢弃载荷只记元信息（不落原文）':
+    host.includes('rejected-meta.jsonl') && host.includes('sha256: createHash'),
+  // 审计 F21：迁移成功后删掉旧凭证（不再留 .migrated-* 明文副本），失败可查
+  'host 迁移成功后删掉旧凭证':
+    host.includes('rmSync(legacy)') && host.includes('legacyMigrationError'),
+  // 审计 F19：hours 取整；间隔按「本次开始 − 上次结束」算
+  'host 台账 hours 取整且间隔按结束时刻算':
+    host.includes('Math.floor(input)') && host.includes('entry.at - entry.ms - lastEnd'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),

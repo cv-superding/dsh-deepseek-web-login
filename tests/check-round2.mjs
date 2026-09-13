@@ -27,6 +27,7 @@ const {
 const { setFetchImpl, resetSessionReuse, streamWebCompletion } = await import('../src/webapi.ts')
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
+const { existsSync } = await import('node:fs')
 // N02：造当前账号要走 writeAuth（它的语义是「写入并设为当前」）
 // F04：可信校验后的身份归一（user.id → serverId）
 const { writeAuth, withVerifiedIdentity, refreshVerifiedIdentity } = await import('../src/auth.ts')
@@ -674,6 +675,85 @@ await test('F04：/status 的迟到校验也要把 user.id 落成 serverId', asy
   assert.equal(after.user?.display, 'bing@example.com', '展示名也要刷新（自证这条路径走到了）')
   assert.equal(refreshVerifiedIdentity('acc_不存在', 'x', { id: 'y' }), false, '记录不存在时不得凭空新建')
   setFetchImpl(undefined)
+})
+
+// ── 第一轮审计 F06（高）：图片缓存跨账号复用且过期项不淘汰 ────────────────────
+// 现象：缓存只按 attachmentId 记 → 切到另一个账号后会把上一个账号的 fileId 复用出去；
+// 而且只检查"被查中的那一项"的 TTL，一直换新图不换旧 key 时旧项会永久滞留。
+await test('F06：图片上传缓存必须按账号隔离（换号不得复用上一个账号的 fileId）', async () => {
+  const { ImageUploadCache } = await import('../src/adapter.ts')
+  const cache = new ImageUploadCache(60_000, 8)
+  cache.useScope('tok-A')
+  cache.set('att-1', 'file-A', 0)
+  assert.equal(cache.get('att-1', 0), 'file-A', '自证：同一账号内可命中')
+  cache.useScope('tok-B')
+  assert.equal(cache.get('att-1', 0), undefined, '换账号后不得复用上一个账号的 fileId')
+  assert.equal(cache.size, 0, '换账号时应整批清空')
+})
+
+await test('F06：过期项要被整体淘汰，条数要有上限', async () => {
+  const { ImageUploadCache } = await import('../src/adapter.ts')
+  const cache = new ImageUploadCache(1_000, 8)
+  cache.useScope('t')
+  cache.set('a', 'f-a', 0)
+  cache.set('b', 'f-b', 500)
+  // t=1200：a 过期（1200-0 ≥ 1000），b 还新
+  assert.equal(cache.prune(1200), 1, 'prune 要清掉**所有**过期项，而不只是"这次要查的那一个"')
+  assert.equal(cache.get('b', 1200), 'f-b', '没过期的必须留着')
+  assert.equal(cache.get('a', 1200), undefined, '过期项不得命中')
+
+  const small = new ImageUploadCache(60_000, 2)
+  small.useScope('t')
+  small.set('1', 'x1', 0)
+  small.set('2', 'x2', 0)
+  small.set('3', 'x3', 0)
+  assert.equal(small.size, 2, '条数必须封顶（否则一直换图会无限涨）')
+  assert.equal(small.get('1', 0), undefined, '超出上限时丢最早写入的')
+  assert.equal(small.get('3', 0), 'x3')
+})
+
+await test('F06：await 期间账号被切走 → 拒绝写入（防串号）', async () => {
+  const { ImageUploadCache } = await import('../src/adapter.ts')
+  const cache = new ImageUploadCache()
+  cache.useScope('tok-A')
+  const scope = cache.currentScope()
+  cache.useScope('tok-B') // 上传 await 期间，用户切了账号
+  assert.equal(cache.set('att', 'file-A', Date.now(), scope), false, '作用域已变时必须拒绝写入')
+  assert.equal(cache.size, 0, '不能把 A 的 fileId 写进 B 的作用域')
+})
+
+// ── 第一轮审计 F19（中）：hours 小数抛 RangeError + 间隔口径 ────────────────────
+await test('F19：hours 传小数 / 负数 / Infinity 都不能抛错', async () => {
+  const { summarizeLedger } = await import('../src/ledger.ts')
+  for (const input of [1.5, -3, 0, 999, Infinity, -Infinity, NaN]) {
+    const summary = summarizeLedger(input)
+    assert.ok(Number.isInteger(summary.hours), `hours 必须是整数，实际 ${summary.hours}（输入 ${input}）`)
+    assert.ok(summary.hours >= 1 && summary.hours <= 72, `hours 应夹在 1–72，实际 ${summary.hours}`)
+    assert.equal(summary.hourly.length, summary.hours, 'hourly 分桶要跟着取整后的 hours')
+  }
+})
+
+// ── 第一轮审计 F23（中）：拒绝载荷默认明文落盘 + 忽略 DSH_HOME ──────────────────
+await test('F23：丢弃载荷只记元信息（不落原文），且写在 DSH_HOME 下', async () => {
+  const { dumpRejectedPayload } = await import('../src/adapter.ts')
+  const secret = 'SECRET-PASSWORD-abc123'
+  const raw = secret + 'x'.repeat(200)
+  dumpRejectedPayload(raw, 'json', 'unparsable')
+  const file = join(HOME, 'web-login', 'diagnostics', 'rejected-meta.jsonl')
+  assert.ok(existsSync(file), '诊断元信息应写在 DSH_HOME 下（旧实现硬编码 homedir，无视 DSH_HOME）')
+  const text = readFileSync(file, 'utf8')
+  assert.ok(!text.includes(secret), '不得把原文写进诊断文件（里面可能有命令里的 token / 文件内容）')
+  const line = JSON.parse(text.trim().split('\n').pop())
+  assert.equal(line.length, raw.length, '长度要记下来（够判断"是不是同一段坏输出反复出现"）')
+  assert.equal(line.mode, 'json')
+  assert.equal(line.reason, 'unparsable')
+  assert.equal(typeof line.sha256, 'string')
+  assert.equal(line.sha256.length, 64, '摘要用 sha256')
+  // 未知取值要归一到 'other'（不把任意字符串写进诊断文件）
+  dumpRejectedPayload('x', 'weird-mode', 'weird-reason')
+  const last = JSON.parse(readFileSync(file, 'utf8').trim().split('\n').pop())
+  assert.equal(last.mode, 'other')
+  assert.equal(last.reason, 'other')
 })
 
 console.log()
