@@ -64,7 +64,9 @@ const MAX_DESCRIPTION_CHARS = 3_200
  * 于是 `write`(w)、`web_search`、`web_fetch`、`subagent`、`todo_write`、`skill`、`read_image`、
  * 全部 `ssh_*`/`sftp_*` 被砍，而极少用的 `db_tx_rollback`、`db_list_connections` 反而留下。
  * 取 56_000 留约十分之一余量（够再添几个中等大小的工具）；再超就走下面的"列出名字"兜底。
- * 不至于撑爆上下文：DeepSeek 网页端上下文 1M，我们的 maxChars 是 12 万。
+ * 不至于撑爆上下文：DeepSeek 网页端上下文 1M token，而实际生效的 maxChars 是
+ * **150 万字符**（`index.ts` 的 `maxPromptChars` 默认值；这里 12 万那个旧注释已过时 ——
+ * 2026-09-13 核对时发现写的还是旧默认值，容易让人误判 prompt 体量）。
  */
 const MAX_TOOLS_SECTION_CHARS = 56_000
 const HOLD_BACK_CHARS = 24
