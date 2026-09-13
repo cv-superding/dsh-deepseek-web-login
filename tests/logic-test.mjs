@@ -203,6 +203,62 @@ test('sse: 未收到数据时不产出 finish', () => {
   assert.deepEqual(state.finish(), [])
 })
 
+// ── F24：思考续段不得上屏（2026-09-13 实测）──────────────────────
+// 思考阶段服务端分两步下发：先 `response/thinking_content` 发开头一小段（建立 sink='thinking'），
+// 再用 `response/fragments/-1/content` 发**思考的其余全部**。旧实现在 fragments 为空时把这条
+// 路径无条件当正文发射 → 整段思考上屏（该会话 268 条消息里 7 条中招，最长 14877 字符），
+// 且这些正文块开头都缺 2~4 个字符（" me analyze…" 本该是 "Let me analyze…"）。
+test('sse: fragments 为空时 -1/content 必须跟随 sink=thinking（F24）', () => {
+  const state = createSseState()
+  const events = drain(state, [
+    [{ p: 'response/thinking_content', v: 'Let' }],
+    [{ p: 'response/fragments/-1/content', v: ' me analyze the situation.' }],
+    // 后续续段也要跟对 —— sink 不能被这条路径改掉，否则下面这条会退回正文
+    [{ p: 'response/fragments/-1/content', v: ' The user wants a plugin.' }],
+    // 裸续段走 appendSink，同样必须留在思考通道
+    [{ v: ' 结论：可行。' }],
+    [{ p: 'response/content', v: '正文开始' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), 'Let me analyze the situation. The user wants a plugin. 结论：可行。')
+  assert.equal(textOf(events, 'text'), '正文开始')
+})
+
+test('sse: fragments 非空时 -1/content 仍续在最后一个 fragment 上（F24 不回归）', () => {
+  const state = createSseState()
+  const events = drain(state, [
+    [{ p: 'response/fragments', o: 'APPEND', v: { type: 'THINK', content: '思考甲' } }],
+    [{ p: 'response/fragments/-1/content', v: '思考乙' }],
+    [{ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '正文甲' } }],
+    [{ p: 'response/fragments/-1/content', v: '正文乙' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '思考甲思考乙')
+  assert.equal(textOf(events, 'text'), '正文甲正文乙')
+})
+
+// 守"修 bug 别引入丢字"：首帧就是 -1/content 时没有通道信息可用，当正文是唯一合理兜底。
+test('sse: 首帧就是 -1/content 时不得丢字（F24 不回归）', () => {
+  const state = createSseState()
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '内容甲' }],
+    [{ v: '内容乙' }], // 裸续段：sink 已被置为 'fragments' → 应当继续按正文发
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'text'), '内容甲内容乙')
+})
+
+test('sse: sink=content 时 -1/content 仍归正文（F24 不回归）', () => {
+  const state = createSseState()
+  const events = drain(state, [
+    [{ p: 'response/content', v: '正文甲' }],
+    [{ p: 'response/fragments/-1/content', v: '正文乙' }],
+    [{ v: '正文丙' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'text'), '正文甲正文乙正文丙')
+})
+
 // ── 凭证解包（实测踩坑回归）─────────────────────────────
 // 2026-09 网页端把 userToken 存成 AppKit 包装 JSON：{"value":"<token>","__version":...}。
 // 早期实现把包装 JSON 原文当 token 用 → 服务端 40003 Authorization Failed →

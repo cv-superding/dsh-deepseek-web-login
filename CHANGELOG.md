@@ -2,6 +2,38 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.55 — 2026-09-13
+
+### 修：思考内容被当成正文上屏（真实会话 7/268 条中招）
+
+**现象**：跑 `deepseek-reasoner` 时偶发**整段思考直接显示成回答内容**（用户看到大段英文内心
+独白，如 `me analyze the situation. The user wants to…`）。一次真实会话（268 条 assistant
+消息）里 **7 条**中招，最长的一段 **14877 字符**。
+
+**根因**（`src/webapi.ts`）：思考阶段服务端是**分两步**下发的 —— 先 `response/thinking_content`
+发开头一小段（建立当前通道 `sink = 'thinking'`），接着用 `response/fragments/-1/content`
+发**思考的其余全部**。而这条路径走的 `appendToLastFragment()` 在 `fragments` 为空时无条件
+"当正文发射"，**完全没有使用 `sink`** —— 于是整段思考进了正文通道。
+
+旁证：这些上屏的正文块**开头都缺 2~4 个字符**（日志原文是 `" me analyze the situation…"`，
+本该是 `"Let me analyze the situation…"`）—— 缺掉的正是先走 `thinking_content` 的那一小段。
+两处现象由同一个分支同时解释。
+
+**修法**（两处，缺一不可）：
+1. `appendToLastFragment()` 在 `fragments` 为空时改为**按 `sink` 归属**；`sink` 未建立时
+   **保持旧行为**（当正文）—— 服务端也可能首帧就发 `-1/content`，那种情况没有通道信息可用，
+   当正文是唯一能避免丢字的兜底。
+2. `case` 分支里**只有真的续到 fragment 上**才把 `sink` 切成 `'fragments'`；否则紧接着的
+   裸续段会又退回正文，等于没修。
+
+**验证**：`tests/logic-test.mjs` 新增 4 条（核心 1 条 + 防回归 3 条），**46 → 50 项全过**；
+两处修法**分别**回退，都精确地只让那 1 条变红（说明两处都必要）；离线回放 6 组候选帧序列，
+修复前复刻出与线上日志**逐字符同构**的形态（`thinking="Let"` / `text=" me analyze…"`），
+修复后整段回到思考通道。
+
+（同一会话里还出现过 4 次 `user is muted` 账号限流，但**没有证据**表明两者相关 ——
+限流只影响稳定性。）
+
 ## 0.1.54 — 2026-09-13
 
 ### 修：CI / Release 被 `setup-node` 的 npm 缓存卡死（0.1.53 因此没能发布）

@@ -1194,6 +1194,21 @@ export function createSseState() {
   const appendToLastFragment = (text: string, out: WebStreamEvent[]): void => {
     const fragment = fragments[fragments.length - 1]
     if (!fragment) {
+      // 没有 fragment 可续 → 这段文字不是"续写 fragment"，而是**当前通道的裸续段**，必须尊重 sink。
+      //
+      // F24（实测）：思考阶段服务端就是分两步下发的 —— 先 `response/thinking_content` 发开头
+      // 一小段（建立 sink='thinking'），再用 `response/fragments/-1/content` 发**思考的其余全部**。
+      // 旧实现在这里无条件当正文发射，于是一整段思考被上屏：268 条 assistant 消息里 7 条中招
+      // （5016~14877 字符），且这些正文块开头都缺 2~4 个字符（" me analyze…" 本该是
+      // "Let me analyze…"）—— 缺掉的正是先走 thinking 通道的那一小段，两处现象由这一分支同时解释。
+      //
+      // sink 未建立时**保持旧行为**（当正文）：服务端也可能首帧就发 -1/content，
+      // 那种情况没有通道信息可用，当正文是唯一合理的兜底（不能为了修这个而丢字）。
+      if (sink === 'thinking') {
+        directThinking += text
+        emitThinking(out, text)
+        return
+      }
       directText += text
       emitText(out, text)
       return
@@ -1300,7 +1315,11 @@ export function createSseState() {
           case 'response/fragments/-1/content': {
             if (typeof value === 'string') {
               appendToLastFragment(value, out)
-              sink = 'fragments'
+              // F24：只有**真的续到 fragment 上**才把 sink 切到 'fragments'。
+              // fragments 为空但已建立 thinking/content 通道时必须保持原通道 ——
+              // 否则紧接着的裸续段会因 sink='fragments' 又退回"当正文"，等于没修。
+              const keepChannel = fragments.length === 0 && (sink === 'thinking' || sink === 'content')
+              if (!keepChannel) sink = 'fragments'
             }
             return out
           }

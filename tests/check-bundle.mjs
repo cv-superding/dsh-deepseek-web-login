@@ -233,6 +233,13 @@ const checks = {
   'host 会剥掉跨行的伪标记': host.includes('LONG_MARKER_TAGS') && host.includes('insideFence'),
   // 退化块（开标签+闭合标签、无 invoke）不再当正文透出
   'host 会剥掉 DSML 裸包裹标签': host.includes('stripStrayToolMarkup') && /\|dsml-\)\(\?:dsml-\)\?/.test(host),
+  // F24：思考续段不得被当成正文（`response/fragments/-1/content` 在 fragments 为空时要跟随 sink）。
+  // 断言两处修改的**调用点形态**：① 无 fragment 的分支里先判 sink；
+  // ② `sink` 不被无条件覆盖成 'fragments'（否则第一处修复会被紧接着的续段抵消）。
+  // 注：产物里 `keepChannel` 常量已被 esbuild 内联，必须按内联后的形态匹配。
+  'host 思考续段的通道归属（F24）':
+    /if \(!fragment\) \{\s*if \(sink === ["']thinking["']\)/.test(host) &&
+    /fragments\.length === 0 && \(sink === ["']thinking["']/.test(host),
 }
 
 let failed = 0
