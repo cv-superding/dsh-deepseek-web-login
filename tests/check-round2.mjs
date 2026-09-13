@@ -1344,6 +1344,19 @@ await test('F20：CI 三平台都装依赖、构建、跑全量用例，并固�
     'Node 版本必须固定到小版本（tsdown 要求 ^22.18.0 || >=24.11.0）',
   )
   assert.ok(ci.includes('windows-latest'), '必须覆盖 Windows（这正是「依赖 Bash」那类问题的现场）')
+  // 自相矛盾检查 —— 0.1.53 的 CI/Release 就是被这条坑掉的：
+  // setup-node 的 npm 缓存要求仓库里有 package-lock.json；没有锁文件时会**直接失败**
+  // （"Dependencies lock file is not found"），连"装依赖"都轮不到，三个平台全红。
+  // 所以"有没有锁文件"和"有没有开缓存"必须同时成立。
+  // ⚠️ 正则只认 YAML 键（行首缩进后的那段）—— 别让注释里的同名文本把它喂饱：
+  //    这个坑同一天踩过两次（注释里写着"不能写 npx"/"不能开缓存"，断言就命中了注释）。
+  const hasLock = existsSync(join(PKG_ROOT, 'package-lock.json'))
+  for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    assert.ok(
+      hasLock || !/(?:^|\n)[ \t]*cache:[ \t]*npm/m.test(readRepoFile(rel)),
+      `${rel} 在没有 package-lock.json 时不能开 npm 缓存（setup-node 会直接失败）`,
+    )
+  }
 })
 
 await test('F20：release.yml 也用同一套工具链（发布产物与 CI 同源）', async () => {

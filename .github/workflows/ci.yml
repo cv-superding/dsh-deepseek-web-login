@@ -20,10 +20,13 @@ jobs:
 
       # 固定小版本：`node-version: 24` 会装到当时的 24.x，而 tsdown 0.22.14 要求
       # `^22.18.0 || >=24.11.0` —— 早期 24.x（如 24.0~24.10）装上了也构建不了。
+      #
+      # ⚠️ 这里**不能**开 npm 缓存：那要求仓库里有 package-lock.json，
+      # 而没有锁文件时 setup-node 会直接失败（"Dependencies lock file is not found"），
+      # 整个 job 连装依赖的机会都没有。等锁文件生成后再把缓存打开。
       - uses: actions/setup-node@v4
         with:
           node-version: '24.21.0'
-          cache: npm
 
       # 装依赖：有锁文件走 npm ci，没有就回退 npm install（并打印警告）。
       # --ignore-scripts 跳过 prepare，构建在下面显式做。

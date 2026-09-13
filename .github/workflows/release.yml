@@ -21,10 +21,10 @@ jobs:
       - uses: actions/checkout@v4
 
       # 与 CI 同一套固定版本：发布产物必须由**确定的工具链**构建出来。
+      # 同样**不能**开 npm 缓存 —— 没有 package-lock.json 时 setup-node 会直接失败。
       - uses: actions/setup-node@v4
         with:
           node-version: '24.21.0'
-          cache: npm
 
       # 审计 F20：以前这里直接用环境里的全局工具，且只跑 2 个测试；
       # 现在走同一套安装入口 + 显式构建 + 全量离线用例（发出去的包必须与 CI 同源）。
