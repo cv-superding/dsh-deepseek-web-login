@@ -18,6 +18,9 @@ import {
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
   DEFAULT_MAX_REQUEST_INTERVAL_MS,
   DEFAULT_LONG_RUN_THRESHOLD,
+  MAX_PROMPT_CHARS_BOUNDS,
+  DEFAULT_MAX_PROMPT_CHARS,
+  clampMaxPromptChars,
   DEFAULT_LONG_RUN_BREAK_MS,
   LONG_RUN_THRESHOLD_BOUNDS,
   MAX_INTERVAL_MS,
@@ -296,20 +299,29 @@ await test('反向验证：allowConcurrent=true 时标题确实会与主回答�
   )
 })
 
+/**
+ * 只比对关心的字段。
+ *
+ * ⚠️ 为什么不整对象 deepEqual：`settings()` 每新增一个字段，所有整对象断言都会碎一次
+ * （`longRunThreshold`、`maxPromptChars` 各踩过一次）。改成取子集后，加字段不再误伤。
+ */
+const pick = (obj, keys) => Object.fromEntries(keys.map((k) => [k, obj[k]]))
+const GATE_CORE = ['allowConcurrent', 'minRequestIntervalMs', 'maxRequestIntervalMs', 'longRunThreshold']
+
 await test('configure：运行时改设置立即生效，且夹到合法范围', () => {
   const gate = createRequestGate({ minIntervalMs: 3_000, maxIntervalMs: 5_000 })
   assert.equal(gate.settings().allowConcurrent, false)
   assert.equal(gate.settings().minRequestIntervalMs, 3_000)
   assert.equal(gate.settings().maxRequestIntervalMs, 5_000)
 
-  assert.deepEqual(gate.configure({ allowConcurrent: true }), {
+  assert.deepEqual(pick(gate.configure({ allowConcurrent: true }), GATE_CORE), {
     allowConcurrent: true,
     minRequestIntervalMs: 3_000,
     maxRequestIntervalMs: 5_000,
     longRunThreshold: DEFAULT_LONG_RUN_THRESHOLD,
   })
   assert.deepEqual(
-    gate.configure({ minRequestIntervalMs: 999_999 }),
+    pick(gate.configure({ minRequestIntervalMs: 999_999 }), GATE_CORE),
     {
       allowConcurrent: true,
       minRequestIntervalMs: MAX_INTERVAL_MS,
@@ -320,7 +332,7 @@ await test('configure：运行时改设置立即生效，且夹到合法范围',
   )
   assert.equal(gate.configure({ minRequestIntervalMs: -1 }).minRequestIntervalMs, 0, '负数应归 0')
   // 空 patch 不改任何东西
-  assert.deepEqual(gate.configure({}), {
+  assert.deepEqual(pick(gate.configure({}), GATE_CORE), {
     allowConcurrent: true,
     minRequestIntervalMs: 0,
     maxRequestIntervalMs: MAX_INTERVAL_MS,
@@ -638,6 +650,47 @@ await test('F11 闸门可取消：排队等待中取消 → 能退出且不放�
     new Promise((resolve) => setTimeout(() => resolve('timeout'), 300)),
   ])
   assert.equal(raced, 'got', '取消之后队列必须还在流动（否则闸门被锁死）')
+})
+
+// ── prompt 上限（token 体量的总阀门，2026-09-13 加入设置页）──
+// 它不参与节流，只是搭同一份 gate.json 存储；执行方是 adapter。
+
+await test('prompt 上限：默认 150 万字符', () => {
+  const gate = createRequestGate({ longRunThreshold: 0 })
+  assert.equal(gate.settings().maxPromptChars, DEFAULT_MAX_PROMPT_CHARS)
+  assert.equal(DEFAULT_MAX_PROMPT_CHARS, 1_500_000)
+})
+
+await test('prompt 上限：越界夹到边界，非数回落默认', () => {
+  const gate = createRequestGate({ longRunThreshold: 0 })
+  const bounds = MAX_PROMPT_CHARS_BOUNDS
+  assert.equal(clampMaxPromptChars(1), bounds.min, '低于下限 → 夹到下限')
+  assert.equal(clampMaxPromptChars(99_999_999), bounds.max, '高于上限 → 夹到上限')
+  assert.equal(clampMaxPromptChars(Number.NaN), DEFAULT_MAX_PROMPT_CHARS, '非数 → 默认')
+  assert.equal(clampMaxPromptChars(300_000.6), 300_001, '小数取整')
+  gate.configure({ maxPromptChars: 200_000 })
+  assert.equal(gate.settings().maxPromptChars, 200_000)
+  gate.configure({ maxPromptChars: 0 })
+  assert.equal(gate.settings().maxPromptChars, bounds.min, 'configure 也要夹')
+})
+
+await test('prompt 上限：能落盘并读回（别只存内存）', () => {
+  const tmp = useTempDshHome()
+  try {
+    writeGateSettings({
+      allowConcurrent: false,
+      minRequestIntervalMs: 2_000,
+      maxRequestIntervalMs: 4_000,
+      maxPromptChars: 400_000,
+    })
+    assert.equal(readGateSettings()?.maxPromptChars, 400_000, '读回的应是落盘值')
+    // 文件里被写坏成越界值 → 读回时夹住，而不是原样带出来
+    mkdirSync(join(gateSettingsPath(), '..'), { recursive: true })
+    writeFileSync(gateSettingsPath(), JSON.stringify({ maxPromptChars: 10 }), 'utf8')
+    assert.equal(readGateSettings()?.maxPromptChars, MAX_PROMPT_CHARS_BOUNDS.min)
+  } finally {
+    tmp.restore()
+  }
 })
 
 console.log()

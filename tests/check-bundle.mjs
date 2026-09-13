@@ -147,6 +147,11 @@ const checks = {
   // ⚠️ 断言「产物里没有某串」前先 grep 确认基线：`DSML|>` 在产物里实测 0 处（只出现在旧提示词里），
   //    而 `DSML|` 仍有若干处（正则源码里就是那样写的），所以不能拿它做否定断言。
   'host 提示词不再写出私有标记字面量': !host.includes('DSML|>') && host.includes('the private delimiter-prefixed variants'),
+  // prompt 上限既可调、也真的被 adapter 读取（别只做了界面）
+  'host 的 prompt 上限可调且落到 adapter': host.includes('maxPromptCharsBounds') && host.includes('clampMaxPromptChars'),
+  'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
+  // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
+  'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),
   // 跨行伪标记（模型复述的工具结果）要被剥掉
   'host 会剥掉跨行的伪标记': host.includes('LONG_MARKER_TAGS') && host.includes('insideFence'),
   // 退化块（开标签+闭合标签、无 invoke）不再当正文透出

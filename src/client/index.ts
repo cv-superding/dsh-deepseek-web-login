@@ -1154,6 +1154,50 @@ function Panel(): any {
     const presetRow = el('div', 'dsw-gate-row')
     gateCard.append(presetRow)
 
+    // ── prompt 上限（token 体量的总阀门）──────────────────────────
+    // 为什么它比"间隔"更值得调：网页 API 无状态 → **每一轮都要把整段转写重发**，
+    // 转写越长、单次请求越贵。实测同一个会话里单次输入估算从 9.7k token 涨到 293k
+    // （180 轮累计约 2900 万），随后账号被限流。间隔只影响"多久发一次"，这个才影响"每次发多少"。
+    const promptRow = el('div', 'dsw-gate-row')
+    promptRow.append(el('span', 'dsw-gate-label', 'prompt 上限'))
+    const promptRange = el('input', 'dsw-range') as HTMLInputElement
+    promptRange.type = 'range'
+    promptRange.setAttribute('aria-label', 'prompt 字符上限')
+    promptRange.title = '每次请求最多发送多少字符（含工具目录与全部历史）'
+    const promptValue = el('span', 'dsw-gate-value', '—')
+    promptRow.append(promptRange, promptValue)
+    gateCard.append(promptRow)
+    const promptHint = el('p', 'dsw-hint', '')
+    gateCard.append(promptHint)
+
+    /** 字符数 → 「万字符」。界面上出现一长串 0 没人看得出差别。 */
+    const fmtChars = (n: number): string => `${Number.isFinite(n) ? (n / 10_000).toFixed(n % 10_000 === 0 ? 0 : 1) : '—'} 万字符`
+
+    const paintPromptCap = (): void => {
+      const chars = Number(promptRange.value)
+      promptValue.textContent = fmtChars(chars)
+      const level = chars >= 1_200_000 ? '偏高' : chars >= 600_000 ? '中等' : '省 token'
+      promptHint.textContent =
+        `每次请求最多发送 ${fmtChars(chars)}（${level}）。` +
+        '网页端是无状态的，每一轮都会把整段对话历史重新发一遍：' +
+        '上限越大，模型越不容易「忘事」，但单次消耗的 token 也越多。' +
+        '长任务建议调小，或拆成多个会话（新会话从零开始，单次最省）。'
+    }
+    // 把「底部那两个数字到底怎么来的」直接写在界面上：
+    // 否则「缓存命中 0%」会被当成"真的没命中"，而它其实只是我们没有上报。
+    const tokenNote = el('p', 'dsw-hint', '')
+    tokenNote.textContent =
+      '说明：DSH 底部的 token 数目前是**按字符估算**的（网页端只回一个「本消息累计 token」，' +
+      '我们还没接进来）；「缓存命中 0%」是因为网页端不提供缓存信息、我们也就没有上报 —— ' +
+      '不代表真的没命中。'
+    gateCard.append(tokenNote)
+
+    promptRange.addEventListener('input', paintPromptCap)
+    promptRange.addEventListener('change', () => {
+      paintPromptCap()
+      void saveGate({ maxPromptChars: Number(promptRange.value) })
+    })
+
     const cleanupRow = el('div', 'dsw-gate-row')
     cleanupRow.append(el('span', 'dsw-gate-label', '会话清理'))
     const cleanupBtns: Record<string, HTMLButtonElement> = {}
@@ -1653,6 +1697,13 @@ function Panel(): any {
         presetRow.append(btn)
       }
 
+      const capBounds = g.maxPromptCharsBounds ?? { min: 120_000, max: 1_500_000 }
+      promptRange.min = String(capBounds.min)
+      promptRange.max = String(capBounds.max)
+      promptRange.step = '20000'
+      promptRange.value = String(g.maxPromptChars ?? g.maxPromptCharsDefault ?? capBounds.max)
+      paintPromptCap()
+
       const mode = g.cleanup?.mode ?? 'deferred'
       for (const key of Object.keys(cleanupBtns)) {
         cleanupBtns[key].classList.toggle('active', key === mode)
@@ -1683,6 +1734,7 @@ function Panel(): any {
       minRequestIntervalMs?: number
       maxRequestIntervalMs?: number
       sessionCleanup?: string
+      maxPromptChars?: number
       cleanupBatch?: { min: number; max: number }
       cleanupDelayMs?: { min: number; max: number }
       cleanupGapMs?: { min: number; max: number }
@@ -1705,6 +1757,7 @@ function Panel(): any {
                   : '删除间隔关') +
                 '）'
               : '') +
+            ` · prompt 上限 ${fmtChars(Number(result.maxPromptChars ?? 0))}` +
             (result.persisted === false ? ` ⚠️ ${result.warning ?? '未能写入配置'}` : '（已写入配置，重启后仍生效）')
         } else {
           gateMsg.textContent = `保存失败：${result?.error ?? '未知原因'}`

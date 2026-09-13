@@ -46,6 +46,28 @@ export const LONG_RUN_BREAK_BOUNDS_MS: CleanupRange = { min: 30_000, max: 600_00
 /** 长休阈值的合法范围（0 = 关闭，上限 100 次）。 */
 export const LONG_RUN_THRESHOLD_BOUNDS = { min: 0, max: 100 }
 
+/**
+ * 每次请求发送的 prompt **字符上限**。
+ *
+ * 为什么它是防风的头号阀门（2026-09-13 实测）：网页 API 无状态，**每一轮都要把整段转写重发**，
+ * 所以转写越长、单次请求越贵。同一个会话里单次输入估算从 9.7k token 涨到 **293k**，
+ * 180 次请求累计约 **2900 万 token**（这是我们自己的估算值，不是服务端账单，
+ * 但"每次都在重发历史"是代码事实）。四个账号在两天内陆续被限制，体量是主要嫌疑。
+ *
+ * 边界取值理由：
+ * - 上限就取**原来的默认值 150 万**：再大就有撑爆 1M 上下文的风险
+ *   （纯中文 150 万字符 ≈ 100 万 token）。
+ * - 下限取**更早的默认值 12 万**：那是长期在用的值，说明这个量级还能干活（工具目录占约 5.6 万）。
+ */
+export const MAX_PROMPT_CHARS_BOUNDS = { min: 120_000, max: 1_500_000 } as const
+export const DEFAULT_MAX_PROMPT_CHARS = 1_500_000
+
+/** 规整 prompt 字符上限：非数 → 默认；越界 → 夹到边界。 */
+export function clampMaxPromptChars(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_PROMPT_CHARS
+  return Math.max(MAX_PROMPT_CHARS_BOUNDS.min, Math.min(MAX_PROMPT_CHARS_BOUNDS.max, Math.round(value)))
+}
+
 /** 距上次请求超过这么久就算"歇过了"，连续计数归零。 */
 const LONG_RUN_IDLE_RESET_MS = 120_000
 
@@ -124,6 +146,11 @@ export interface GateSettings {
   cleanupDelayMs?: CleanupRange
   /** 两次删除之间的间隔（毫秒）。每次删除前重新随机抽。 */
   cleanupGapMs?: CleanupRange
+  /**
+   * 每次请求发送的 prompt 字符上限。**不参与节流逻辑** —— 和 sessionCleanup 一样，
+   * 只是搭同一份设置文件（gate.json）与同一个设置页存储，真正的执行方是 adapter。
+   */
+  maxPromptChars?: number
 }
 
 /** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
@@ -173,6 +200,9 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     }
     const lrb = normalizeCleanupRange(parsed?.longRunBreakMs, LONG_RUN_BREAK_BOUNDS_MS)
     if (lrb) out.longRunBreakMs = lrb
+    if (Number.isFinite(parsed?.maxPromptChars)) {
+      out.maxPromptChars = clampMaxPromptChars(Number(parsed.maxPromptChars))
+    }
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
     return undefined
@@ -205,6 +235,8 @@ export interface RequestGateOptions {
   /** 随机源（单测注入用）。 */
   random?: () => number
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
+  /** prompt 字符上限（本模块不执行，只是存下来以便落盘与回显）。 */
+  maxPromptChars?: number
   /** 便于单测注入。 */
   now?: () => number
   sleep?: (ms: number) => Promise<void>
@@ -353,6 +385,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   }
 
   /** 会话清理策略不在本模块实现，只借用设置文件存储（由宿主读取后交给 cleaner）。 */
+  /** prompt 字符上限（同 cleanupMode：只是存着，执行在 adapter）。 */
+  let maxPromptChars = clampMaxPromptChars(options.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS)
   let cleanupMode: GateSettings['sessionCleanup']
   // 会话清理的三个区间（同样不参与节流逻辑）。存在这里是为了**能落盘**：
   // writeGateSettings 写的是 settings() 的返回值，不存就丢。
@@ -371,6 +405,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       ...(cleanupGapMs ? { cleanupGapMs } : {}),
       longRunThreshold,
       ...(longRunBreakMs ? { longRunBreakMs } : {}),
+      maxPromptChars,
     }
   }
 
@@ -379,6 +414,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (next.minRequestIntervalMs !== undefined) minIntervalMs = clampInterval(Number(next.minRequestIntervalMs))
     if (next.maxRequestIntervalMs !== undefined) maxIntervalMs = clampInterval(Number(next.maxRequestIntervalMs))
     if (next.sessionCleanup !== undefined) cleanupMode = next.sessionCleanup
+    if (next.maxPromptChars !== undefined) maxPromptChars = clampMaxPromptChars(Number(next.maxPromptChars))
     // 三个区间：非法的输入直接当"没给"（不报错、也不覆盖已有的有效值）
     if (next.cleanupBatch !== undefined) {
       const value = normalizeCleanupRange(next.cleanupBatch, CLEANUP_BATCH_BOUNDS)

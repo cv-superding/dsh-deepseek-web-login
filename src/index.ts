@@ -20,6 +20,9 @@ import {
   DEFAULT_MIN_REQUEST_INTERVAL_MS,
   DEFAULT_MAX_REQUEST_INTERVAL_MS,
   DEFAULT_LONG_RUN_THRESHOLD,
+  MAX_PROMPT_CHARS_BOUNDS,
+  DEFAULT_MAX_PROMPT_CHARS,
+  clampMaxPromptChars,
   INTERVAL_PRESETS,
   MAX_INTERVAL_MS,
   CLEANUP_BATCH_BOUNDS,
@@ -195,6 +198,7 @@ export function apply(ctx: any, config: Config = {}): void {
     maxIntervalMs: savedGate?.maxRequestIntervalMs ?? config.maxRequestIntervalMs ?? DEFAULT_MAX_REQUEST_INTERVAL_MS,
     // 长任务保护：连续 N 次请求后强制长休一次（0 = 关闭）。
     longRunThreshold: savedGate?.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD,
+    maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     longRunBreakMs: savedGate?.longRunBreakMs,
     logger,
   })
@@ -218,7 +222,7 @@ export function apply(ctx: any, config: Config = {}): void {
   )
 
   const adapterConfig: AdapterConfig = {
-    maxPromptChars: config.maxPromptChars ?? 1_500_000,
+    maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
     // 会话复用：默认 20 轮共用一个网页端会话。0 = 关闭（回到每请求一个会话）
@@ -375,6 +379,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 maxIntervalMs: MAX_INTERVAL_MS,
                 defaultMinIntervalMs: DEFAULT_MIN_REQUEST_INTERVAL_MS,
                 defaultMaxIntervalMs: DEFAULT_MAX_REQUEST_INTERVAL_MS,
+                maxPromptCharsBounds: MAX_PROMPT_CHARS_BOUNDS,
+                maxPromptCharsDefault: DEFAULT_MAX_PROMPT_CHARS,
                 cleanup: sessionCleaner.policy(),
                 // 界面的滑块边界/默认值由后端给 —— 免得两边各写一套数字、改了一边忘另一边
                 cleanupBounds: {
@@ -407,6 +413,19 @@ export function apply(ctx: any, config: Config = {}): void {
                 }
                 patch[field] = ms
               }
+              if (body.maxPromptChars !== undefined) {
+                const chars = Number(body.maxPromptChars)
+                if (!Number.isFinite(chars)) {
+                  sendJson(res, 400, { ok: false, error: 'maxPromptChars 必须是数字' })
+                  return
+                }
+                const clamped = clampMaxPromptChars(chars)
+                if (clamped !== chars) {
+                  // 越界不静默：直接告诉用户被夹到了哪里，否则"拖到底没反应"很难查
+                  logger.warn?.(`deepseek-web: maxPromptChars ${chars} 越界，夹到 ${clamped}`)
+                }
+                patch.maxPromptChars = clamped
+              }
               if (body.sessionCleanup !== undefined) {
                 if (!['immediate', 'deferred', 'keep'].includes(body.sessionCleanup)) {
                   sendJson(res, 400, { ok: false, error: 'sessionCleanup 只能是 immediate / deferred / keep' })
@@ -434,6 +453,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 return
               }
               const applied = gate.configure(patch)
+              // prompt 上限是 adapter 每次调用现读的 → 改这里即时生效，不必重启
+              if (applied.maxPromptChars !== undefined) adapterConfig.maxPromptChars = applied.maxPromptChars
               // 清理策略由 cleaner 执行 → 同步生效
               if (patch.sessionCleanup) sessionCleaner.configure({ mode: patch.sessionCleanup })
               // 三个区间即时作用到清理器（它会用新区间重新随机取值）
