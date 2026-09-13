@@ -199,6 +199,17 @@ const checks = {
   // 审计 F19：hours 取整；间隔按「本次开始 − 上次结束」算
   'host 台账 hours 取整且间隔按结束时刻算':
     host.includes('Math.floor(input)') && host.includes('entry.at - entry.ms - lastEnd'),
+  // 审计 F22：另存为失败必须 abort（否则留下未提交的临时文件/句柄）。file-picker 进 client bundle。
+  'client 另存为失败要 abort writable': client.includes('abort(error)'),
+  // 审计 F16：请求体超限给结构化错误；路径导入只接受普通文件
+  'host 请求体超限给结构化错误': host.includes('请求体过大（上限'),
+  'host 路径导入只接受普通文件': host.includes('不是普通文件'),
+  // 审计 F15：CDP 协议错误要 reject；页面筛选按 origin 严格比较
+  'host CDP 协议错误要 reject': host.includes('CDP 错误'),
+  // 注意：DS_BASE 会被打包器**内联**成字面量，所以这里断的是内联后的形态 ——
+  // 它比断 DS_BASE 更强：同时验证了「用 origin 比较」和「比的是正确的域名」。
+  'host CDP 页面筛选按 origin 严格比较':
+    host.includes('new URL(String(target.url)).origin === "https://chat.deepseek.com"'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),

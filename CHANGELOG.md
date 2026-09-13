@@ -2,6 +2,61 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.52 — 2026-09-13
+
+### 老账三条：F22（写盘失败不释放）、F16（请求体边界）、F15（CDP 未结算）
+
+**F22（中）另存为失败要 abort**
+
+`createWritable()` 成功之后，`write`/`close` 抛错时旧实现直接返回 failed、**没有 `abort`** ——
+Chromium 会留下未提交的临时文件与句柄（模拟磁盘写满时实测 `abort` 一次都没被调用）。
+现在留住 writable 引用、失败即 abort；成功路径走完清掉引用（不对已关闭的 writable 再动手）。
+
+**F16（中）请求体：生命周期、超时、结构化错误 + 路径导入的边界**
+
+`readJsonBody` 三处：
+
+- 旧实现只监听 `data`/`end`/`error` —— 客户端只 `close`/`aborted`（不发 `end`）时 **Promise 永不结算**，
+  监听器一起挂着。现在 `close`/`aborted` 也算结束，并且每种结局都清监听。
+- 没有应用层 deadline：一个慢连接可以永远占着。现在 10 秒。
+- 超限旧实现是 `destroy()` 后 `resolve(undefined)`，调用方只能报"缺少 payload"，客户端更可能只看到断连。
+  现在抛带状态码的 `BodyError`，handler 统一回 413/400/408，并把 `shouldKeepAlive` 置 false。
+
+**关于路径导入，这里没有按审计建议删掉它**：客户端在**优先用** path 路线，理由是
+"明文凭证不进 HTTP"（`/accounts/export-json` 那段也确认过同样的取舍）。删掉会让凭证回到渲染进程 ——
+那比审计担心的"渲染进程可让宿主读任意文件"更严重。所以**保留 path、自己加边界**：
+只接受**普通文件**（挡掉目录 / FIFO / 设备这类会阻塞或异常的东西），并限定大小。
+上限取 **2 MiB**：实测单个账号 1.1–1.8 KB、账号数上限 500 → ≈850 KB，2 MiB 留 2 倍余量
+（审计建议的 120 KiB 会挡住正常备份）。前端同样检查一道是为了不白传。
+更彻底的做法是"宿主批准的一次性句柄/令牌"，需要新的宿主 API，本版没做（代码里留了说明）。
+
+**F15（中）CDP：协议错误与连接关闭都要结算**
+
+- `{id, error:{…}}` 旧实现把 `message.result`（undefined）当成功 resolve → 调用方拿着 undefined
+  继续跑、真正的错误信息全丢。现在 reject。
+  （与 `Runtime.evaluate` 的 `exceptionDetails` 区分：那是**执行结果**，由调用方检查。）
+- 连接 `close` 旧实现不清 pending → 每个在途命令各自等到超时；建连阶段也不监听 `close`。
+  现在连接关闭立刻拒绝全部在途命令并清定时器；建连失败/超时主动收掉 socket
+  （不再留下"晚到的 open"造成的孤立连接）。
+- `send` 同步抛错时也不再留一个永远不结算的 pending。
+- HTTP 探测（`/json/version`、`/json/list`）收口成统一 helper：**每次请求各自 2 秒超时**
+  （旧写法只有外层循环的 deadline，一次请求挂住就再也回不到循环条件）；轮询开头检查 `signal`，
+  并从 `browserLogin` 一路传入。
+- 页面筛选改成 `new URL(url).origin === DS_BASE` **严格相等**：`includes('deepseek.com')`
+  会命中 `chat.deepseek.com.evil.example` 这类域名。
+
+### 测试
+
+- `check-round2.mjs` 30 → **38 项**：F22 一条、F16 三条（只 close 也结算 / 超限 413 / 正常解析）、
+  F15 四条（协议错误 reject / 关连接立刻结算 / send 抛错不留 pending / origin 严格比较）。
+  为可测性导出 `readJsonBody`、`BodyError`、`CdpClient`、`isDeepSeekPage`（与 `checkedWasmUrl` 同类做法）。
+- 反向验证 **6 处全红**，复原后全绿。
+- 33 个测试文件全绿。
+
+### 未处理
+
+F20（构建脚本的平台依赖）、F10（建流缺整体期限）、F08（登录轮询的 in-flight/代际约束）。
+
 ## 0.1.51 — 2026-09-13
 
 ### 老账四条：F06（图片缓存跨账号）、F19（台账口径）、F21（迁移留明文）、F23（诊断落原文）

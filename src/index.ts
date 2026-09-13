@@ -11,7 +11,7 @@
  */
 import { maskIdentifier, readAuth, refreshVerifiedIdentity, writeAuth, type WebAuth } from './auth.ts'
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
 import {
   createRequestGate,
@@ -79,6 +79,10 @@ import {
 export const name = 'dsh-deepseek-web-login'
 export const inject = ['llm', 'webServer']
 
+/** 账号备份导入的大小上限 —— 与前端 `IMPORT_FILE_LIMIT_BYTES` 保持一致（实测单账号
+ *  ~1.7 KB、账号数上限 500 → ~850 KB，取 2 MiB 留 2 倍余量）。 */
+const IMPORT_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+
 const API_PREFIX = '/deepseek-web-login/api'
 
 export interface Config extends AdapterConfig {
@@ -112,30 +116,83 @@ function normalizeLogger(logger: any): Logger {
   }
 }
 
-async function readJsonBody(req: any, limitBytes = 256 * 1024): Promise<any> {
-  return await new Promise((resolve) => {
+/**
+ * 读取并解析 JSON 请求体。
+ *
+ * ⚠️ 审计 F16 修的三件事：
+ *  - **生命周期**：客户端只触发 `close`/`aborted`（不发 `end`/`error`）时，旧实现会**永不结算**，
+ *    那个 Promise 连同它的监听器一起挂着；现在把 close/aborted 也当"结束"，并且**每种结局都清监听**。
+ *  - **应用层超时**：慢速上传没有 deadline，一个连接可以永远占着；现在 10 秒截止。
+ *  - **结构化错误**：超限旧实现是 `destroy()` 后 resolve(undefined)，调用方只能报"缺少 payload"，
+ *    客户端更可能只看到断连。现在抛带状态码的 BodyError，由 handler 统一回 413/400/408。
+ */
+export class BodyError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+export async function readJsonBody(req: any, limitBytes = 256 * 1024): Promise<any> {
+  return await new Promise((resolve, reject) => {
     let size = 0
+    let settled = false
     const chunks: Buffer[] = []
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > limitBytes) {
-        resolve(undefined)
+    const cleanup = () => {
+      clearTimeout(timer)
+      req.off('data', onData)
+      req.off('end', onEnd)
+      req.off('error', onError)
+      req.off('aborted', onAborted)
+      req.off('close', onClose)
+    }
+    const done = (error?: Error, value?: unknown) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error) {
+        // 主动把剩余请求体丢掉，避免连接卡在"客户端还在写、我们已不读"的状态
         try {
-          req.destroy()
+          req.resume?.()
         } catch {}
+        reject(error)
+      } else {
+        resolve(value)
+      }
+    }
+    const onData = (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += bytes.byteLength
+      if (size > limitBytes) {
+        done(new BodyError(413, `请求体过大（上限 ${Math.floor(limitBytes / 1024)} KiB）`))
         return
       }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      if (chunks.length === 0) return resolve({})
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch {
-        resolve(undefined)
+      chunks.push(bytes)
+    }
+    const onEnd = () => {
+      if (chunks.length === 0) {
+        done(undefined, {})
+        return
       }
-    })
-    req.on('error', () => resolve(undefined))
+      try {
+        done(undefined, JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch {
+        done(new BodyError(400, '请求体不是合法 JSON'))
+      }
+    }
+    const onError = () => done(new BodyError(400, '读取请求体失败'))
+    const onAborted = () => done(new BodyError(400, '请求已中止'))
+    const onClose = () => {
+      // `close` 在正常结束之后也会触发 —— 只有"还没收完就关了"才算中止
+      if (!req.complete) onAborted()
+    }
+    const timer = setTimeout(() => done(new BodyError(408, '读取请求体超时')), 10_000)
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+    req.on('aborted', onAborted)
+    req.on('close', onClose)
   })
 }
 
@@ -582,24 +639,46 @@ export function apply(ctx: any, config: Config = {}): void {
               return
             }
             if (req.method === 'POST' && route === '/accounts/import') {
-              const body = await readJsonBody(req)
-              const path = typeof body?.path === 'string' ? body.path.trim() : ''
-              let payload: unknown = body?.payload
-              if (!payload && path) {
+              const body = await readJsonBody(req, IMPORT_FILE_LIMIT_BYTES)
+              if (!body || typeof body !== 'object') {
+                sendJson(res, 400, { ok: false, error: '请提供备份内容（payload）或文件路径' })
+                return
+              }
+              let payload: unknown = (body as any).payload
+              const path = typeof (body as any).path === 'string' ? (body as any).path.trim() : ''
+              if (payload === undefined && path) {
+                // 路径导入：**由宿主自己读**，明文凭证不进 HTTP（见 client 侧 readImportSource 的注释）。
+                // ⚠️ 但路径来自渲染进程，不能因为"前端有文件选择框"就当它可信（审计 F16）：
+                // 只接受**普通文件**（挡掉目录 / FIFO / 设备这类会阻塞或异常的东西），并限定大小。
+                // 更进一步的做法是"宿主批准的一次性句柄/令牌"，需要新的宿主 API，本版没做。
                 try {
+                  const info = statSync(path)
+                  if (!info.isFile()) throw new Error('不是普通文件')
+                  if (info.size > IMPORT_FILE_LIMIT_BYTES) {
+                    throw new Error(`文件 ${Math.ceil(info.size / 1024)} KiB，超过上限 ${Math.floor(IMPORT_FILE_LIMIT_BYTES / 1024 / 1024)} MiB`)
+                  }
                   payload = JSON.parse(readFileSync(path, 'utf8'))
                 } catch (error: any) {
                   sendJson(res, 400, { ok: false, error: `读取导入文件失败：${error?.message ?? error}` })
                   return
                 }
               }
-              if (!payload) {
-                sendJson(res, 400, { ok: false, error: '请提供要导入的文件路径（或 payload）' })
+              if (payload === undefined || payload === null) {
+                sendJson(res, 400, { ok: false, error: '请提供要导入的内容或文件路径' })
                 return
               }
-              const result = importAccounts(payload)
-              logger.info?.(`deepseek-web: 账号库导入完成（新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}）`)
-              sendJson(res, 200, { ok: true, ...result, activeId: activeAccountId() ?? null })
+              try {
+                const result = importAccounts(payload)
+                logger.info?.(`deepseek-web: 账号库导入完成（新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}）`)
+                sendJson(res, 200, { ok: true, ...result, activeId: activeAccountId() ?? null })
+              } catch (error: any) {
+                // 内容不合格（形状/数量/类型）算客户端错误，别报 500 让人以为是插件坏了
+                if (error instanceof TypeError || error instanceof RangeError) {
+                  sendJson(res, 400, { ok: false, error: error?.message ?? String(error) })
+                  return
+                }
+                throw error
+              }
               return
             }
 
@@ -926,6 +1005,16 @@ export function apply(ctx: any, config: Config = {}): void {
 
             sendJson(res, 404, { error: `unknown route ${route}` })
           } catch (error: any) {
+            if (error instanceof BodyError) {
+              // 请求体问题不是"插件坏了"：给出结构化状态码，并关掉 keep-alive
+              // —— 否则超大的请求会继续占着这条连接（审计 F16）。
+              logger.warn?.(`deepseek-web api ${route} 请求体被拒：${error.message}`)
+              try {
+                res.shouldKeepAlive = false
+              } catch {}
+              if (!res.destroyed && !res.headersSent) sendJson(res, error.status, { ok: false, error: error.message })
+              return
+            }
             logger.warn?.(`deepseek-web api ${route} failed: ${error?.message ?? error}`)
             sendJson(res, 500, { error: error?.message ?? String(error) })
           }

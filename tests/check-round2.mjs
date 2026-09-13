@@ -756,6 +756,203 @@ await test('F23：丢弃载荷只记元信息（不落原文），且写在 DSH_
   assert.equal(last.reason, 'other')
 })
 
+// ── 第一轮审计 F22（中）：另存为失败不释放 writable ───────────────────────────
+// 触发：createWritable 成功，但 write 或 close 抛错；catch 直接返回 failed、**没有 abort**
+// → 遗留未提交的临时文件与句柄（模拟磁盘写满时实测 abort 从未被调用）。
+await test('F22：写盘失败必须 abort（否则留下未提交的临时文件/句柄）', async () => {
+  const { saveWithPicker } = await import('../src/file-picker.ts')
+  const seen = []
+  const fakeWin = {
+    showSaveFilePicker: async () => ({
+      name: 'backup.json',
+      createWritable: async () => ({
+        write: async () => {
+          throw new Error('磁盘空间不足')
+        },
+        close: async () => {},
+        abort: async (reason) => {
+          seen.push(reason)
+        },
+      }),
+    }),
+  }
+  const outcome = await saveWithPicker('backup.json', async () => '{"a":1}', fakeWin)
+  assert.equal(outcome.kind, 'failed', `写盘失败应返回 failed，实际 ${outcome.kind}`)
+  assert.equal(seen.length, 1, '自证：write 失败后必须调用一次 abort（旧实现一次都没有）')
+
+  // 成功路径不该误调 abort
+  const seen2 = []
+  const okWin = {
+    showSaveFilePicker: async () => ({
+      name: 'ok.json',
+      createWritable: async () => ({
+        write: async () => {},
+        close: async () => {},
+        abort: async (reason) => {
+          seen2.push(reason)
+        },
+      }),
+    }),
+  }
+  const ok = await saveWithPicker('ok.json', async () => '{}', okWin)
+  assert.equal(ok.kind, 'saved')
+  assert.equal(seen2.length, 0, '成功路径不得 abort')
+})
+
+// ── 第一轮审计 F16（中）：请求体与文件导入边界 ────────────────────────────────
+// 旧实现只监听 data/end/error：客户端只 close/aborted 就**永不结算**，监听器与 Promise 一起挂着。
+await test('F16：请求体只关闭不 end 时必须结算（不能永远挂着）', async () => {
+  const { readJsonBody } = await import('../src/index.ts')
+  const { EventEmitter } = await import('node:events')
+  const req = new EventEmitter()
+  req.complete = false
+  req.resume = () => {}
+  const pending = readJsonBody(req)
+  req.emit('close')
+  await assert.rejects(() => pending, /中止|失败/, '只 close 也要结算，而不是挂到天荒地老')
+  assert.equal(req.listenerCount('data'), 0, '结算后必须把监听器摘干净')
+  assert.equal(req.listenerCount('close'), 0)
+})
+
+await test('F16：超限要抛带状态码的错误（不能静默 resolve(undefined)）', async () => {
+  const { readJsonBody, BodyError } = await import('../src/index.ts')
+  const { EventEmitter } = await import('node:events')
+  const req = new EventEmitter()
+  req.complete = false
+  req.resume = () => {}
+  const pending = readJsonBody(req, 100)
+  req.emit('data', Buffer.alloc(200))
+  await assert.rejects(
+    () => pending,
+    (error) => error instanceof BodyError && error.status === 413,
+    '超限应报 413，调用方才能回结构化错误（旧实现 destroy 后 resolve(undefined)，客户端只看到断连）',
+  )
+})
+
+await test('F16：正常请求体照旧能解析', async () => {
+  const { readJsonBody } = await import('../src/index.ts')
+  const { EventEmitter } = await import('node:events')
+  const req = new EventEmitter()
+  req.complete = false
+  req.resume = () => {}
+  const pending = readJsonBody(req)
+  req.emit('data', Buffer.from('{"payload":{"accounts":[]}}'))
+  req.emit('end')
+  const body = await pending
+  assert.ok(body?.payload, `应解析出 payload，实际 ${JSON.stringify(body)}`)
+})
+
+// ── 第一轮审计 F15（中）：CDP 错误与连接关闭未结算请求 ─────────────────────────
+class FakeWebSocket {
+  constructor() {
+    this.listeners = new Map()
+    this.readyState = 1
+    this.sent = []
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, [])
+    this.listeners.get(type).push(fn)
+  }
+  removeEventListener(type, fn) {
+    const list = this.listeners.get(type) ?? []
+    const i = list.indexOf(fn)
+    if (i >= 0) list.splice(i, 1)
+  }
+  emit(type, event) {
+    for (const fn of [...(this.listeners.get(type) ?? [])]) fn(event)
+  }
+  send(data) {
+    this.sent.push(data)
+  }
+  close() {
+    this.readyState = 3
+  }
+}
+
+function withFakeWebSocket() {
+  const original = globalThis.WebSocket
+  let socket
+  class Recording extends FakeWebSocket {
+    constructor(url) {
+      super()
+      this.url = url
+      socket = this
+    }
+  }
+  globalThis.WebSocket = Recording
+  return { get: () => socket, restore: () => { globalThis.WebSocket = original } }
+}
+
+await test('F15：CDP 协议错误必须 reject（旧实现当成 result=undefined 的成功）', async () => {
+  const { CdpClient } = await import('../src/browser-login.ts')
+  const ws = withFakeWebSocket()
+  try {
+    const cdp = new CdpClient('ws://127.0.0.1:1/devtools/page/x')
+    const connecting = cdp.connect(1_000)
+    ws.get().emit('open')
+    await connecting
+    const pending = cdp.send('Runtime.evaluate', { expression: '1' })
+    const id = JSON.parse(ws.get().sent.at(-1)).id
+    ws.get().emit('message', { data: JSON.stringify({ id, error: { code: -32000, message: 'boom' } }) })
+    await assert.rejects(() => pending, /boom/, '协议错误必须 reject，不能把 message.result(undefined) 当成功')
+    cdp.close()
+  } finally {
+    ws.restore()
+  }
+})
+
+await test('F15：连接关闭要立刻结算所有在途命令（不能各自等到超时）', async () => {
+  const { CdpClient } = await import('../src/browser-login.ts')
+  const ws = withFakeWebSocket()
+  try {
+    const cdp = new CdpClient('ws://127.0.0.1:1/devtools/page/x')
+    const connecting = cdp.connect(1_000)
+    ws.get().emit('open')
+    await connecting
+    const a = cdp.send('A', {}, 60_000)
+    const b = cdp.send('B', {}, 60_000)
+    ws.get().emit('close')
+    await assert.rejects(() => a, /已关闭/, '关连接后 A 应立刻被拒')
+    await assert.rejects(() => b, /已关闭/, '关连接后 B 应立刻被拒')
+  } finally {
+    ws.restore()
+  }
+})
+
+await test('F15：send 同步抛错时不留 pending（旧实现会挂到超时）', async () => {
+  const { CdpClient } = await import('../src/browser-login.ts')
+  const ws = withFakeWebSocket()
+  try {
+    const cdp = new CdpClient('ws://127.0.0.1:1/devtools/page/x')
+    const connecting = cdp.connect(1_000)
+    ws.get().emit('open')
+    await connecting
+    ws.get().send = () => {
+      throw new Error('socket 已坏')
+    }
+    await assert.rejects(() => cdp.send('C', {}, 60_000), /socket 已坏/)
+    // 自证：不留 pending —— close() 时不该再有任何在途命令
+    let rejected = 0
+    const probe = cdp.send('D', {}, 60_000).catch(() => {
+      rejected += 1
+    })
+    cdp.close()
+    await probe
+    assert.equal(rejected, 1, '坏掉的 socket 上发的命令也要结算')
+  } finally {
+    ws.restore()
+  }
+})
+
+await test('F15：页面筛选按 origin 严格比较（不能 includes 命中伪造域名）', async () => {
+  const { isDeepSeekPage } = await import('../src/browser-login.ts')
+  assert.equal(isDeepSeekPage({ type: 'page', url: 'https://chat.deepseek.com/a/chat/s/1' }), true)
+  assert.equal(isDeepSeekPage({ type: 'page', url: 'https://chat.deepseek.com.evil.example/x' }), false, 'includes 写法会在这里放行')
+  assert.equal(isDeepSeekPage({ type: 'page', url: 'https://evil.example/?u=deepseek.com' }), false)
+  assert.equal(isDeepSeekPage({ type: 'iframe', url: 'https://chat.deepseek.com/' }), false)
+  assert.equal(isDeepSeekPage(null), false)
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)

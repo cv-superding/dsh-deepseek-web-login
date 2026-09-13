@@ -121,11 +121,14 @@ export function pickExtraHeaders(headers: Record<string, any> | undefined): Reco
 }
 
 /** 极简 CDP 客户端：只需 send + 事件监听。 */
-class CdpClient {
+export class CdpClient {
   private socket: any
   private nextId = 0
-  private readonly pending = new Map<number, (value: any) => void>()
-  private readonly listeners: ((method: string, params: any) => void)[] = []
+  private readonly pending = new Map<
+    number,
+    { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+  >()
+  private listeners: ((method: string, params: any) => void)[] = []
   private opened = false
   private readonly url: string
 
@@ -136,23 +139,47 @@ class CdpClient {
     this.url = url
   }
 
+  /**
+   * 建连（审计 F15）。
+   *
+   * 三处旧问题：① 只监听 open/error，**close 不结算** → 建连时对端关闭会一直等到超时；
+   * ② 超时后 socket 仍可能在之后 open —— 成为一条**没人持有的孤立连接**；
+   * ③ error/超时后没有主动释放 socket。现在统一走 `finish()`：只结算一次、清掉定时器与监听，
+   * 失败时顺便 `this.close()` 把 socket 收掉。
+   */
   async connect(timeoutMs = 10_000): Promise<void> {
     const WebSocketCtor = (globalThis as any).WebSocket
     if (typeof WebSocketCtor !== 'function') throw new Error('当前 Node 没有全局 WebSocket，无法使用 CDP')
     const socket = new WebSocketCtor(this.url)
     this.socket = socket
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('CDP 连接超时')), timeoutMs)
-      socket.addEventListener('open', () => {
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
-        this.opened = true
-        resolve()
-      })
-      socket.addEventListener('error', () => {
-        clearTimeout(timer)
-        reject(new Error('CDP 连接失败'))
-      })
+        socket.removeEventListener('open', onOpen)
+        socket.removeEventListener('error', onFail)
+        socket.removeEventListener('close', onClosed)
+        if (error) {
+          this.close()
+          reject(error)
+        } else {
+          this.opened = true
+          resolve()
+        }
+      }
+      const onOpen = () => finish()
+      const onFail = () => finish(new Error('CDP 连接失败'))
+      const onClosed = () => finish(new Error('CDP 建连时连接被关闭'))
+      const timer = setTimeout(() => finish(new Error('CDP 连接超时')), timeoutMs)
+      socket.addEventListener('open', onOpen)
+      socket.addEventListener('error', onFail)
+      socket.addEventListener('close', onClosed)
     })
+    // 连接建立后的任何关闭/错误 → 立刻结算所有在途命令（不再等到各自超时）
+    socket.addEventListener('close', () => this.close())
+    socket.addEventListener('error', () => this.close())
     socket.addEventListener('message', (event: any) => {
       let message: any
       try {
@@ -160,12 +187,28 @@ class CdpClient {
       } catch {
         return
       }
-      if (message.id && this.pending.has(message.id)) {
-        this.pending.get(message.id)?.(message)
+      if (typeof message.id === 'number') {
+        const item = this.pending.get(message.id)
+        if (!item) return
         this.pending.delete(message.id)
+        clearTimeout(item.timer)
+        // ⚠️ 协议层错误（`{id, error}`）必须 reject（审计 F15）：旧实现把它当 result=undefined 的成功，
+        // 调用方会拿着 undefined 继续跑，报错信息完全丢失。
+        // 注意与 Runtime.evaluate 的 exceptionDetails 区分：后者是**执行结果**，由调用方自己检查。
+        if (message.error) {
+          item.reject(new Error(`CDP 错误 ${message.error.code ?? ''}: ${message.error.message ?? ''}`))
+        } else {
+          item.resolve(message.result)
+        }
         return
       }
-      if (message.method) for (const listener of this.listeners) listener(message.method, message.params)
+      if (message.method) {
+        for (const listener of this.listeners) {
+          try {
+            listener(message.method, message.params)
+          } catch {}
+        }
+      }
     })
   }
 
@@ -181,17 +224,30 @@ class CdpClient {
         this.pending.delete(id)
         reject(new Error(`CDP ${method} 超时`))
       }, timeoutMs)
-      this.pending.set(id, (message) => {
+      this.pending.set(id, { resolve, reject, timer })
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }))
+      } catch (error) {
+        // send 同步抛错时不能留一个永远不结算的 pending（旧实现会挂到超时）
         clearTimeout(timer)
-        resolve(message.result)
-      })
-      this.socket.send(JSON.stringify({ id, method, params }))
+        this.pending.delete(id)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
   close(): void {
+    this.opened = false
+    for (const item of this.pending.values()) {
+      clearTimeout(item.timer)
+      item.reject(new Error('CDP 已关闭'))
+    }
+    this.pending.clear()
+    this.listeners = []
+    const socket = this.socket
+    this.socket = undefined
     try {
-      this.socket?.close()
+      if (socket && socket.readyState < 2) socket.close()
     } catch {}
   }
 }
@@ -224,19 +280,55 @@ const DEFAULT_PROFILE_DIR = join(process.env.DSH_HOME || join(homedir(), '.dsh')
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * 探一次 CDP 的 HTTP 端点。
+ *
+ * ⚠️ 每次请求都要有**自己的**超时（审计 F15）：旧写法只有外层循环的 deadline，
+ * 一次请求挂住就再也回不到循环条件上，"deadline"形同虚设。
+ */
+async function cdpJson(port: number, endpoint: '/json/version' | '/json/list', signal?: AbortSignal): Promise<any> {
+  const bounded = signal ? AbortSignal.any([signal, AbortSignal.timeout(2_000)]) : AbortSignal.timeout(2_000)
+  const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: bounded, redirect: 'error' })
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {})
+    throw new Error('CDP HTTP 请求失败')
+  }
+  return await res.json()
+}
+
+/**
+ * 这个 target 是不是 chat.deepseek.com 的页面。
+ *
+ * 用 `origin` **严格相等**，不用 `includes`（审计 F15）：`includes('deepseek.com')` 会命中
+ * `chat.deepseek.com.evil.example` 这类域名，也会命中深链页/其它子域，可能选错 target。
+ */
+export function isDeepSeekPage(target: any): boolean {
+  try {
+    return target?.type === 'page' && new URL(String(target.url)).origin === DS_BASE
+  } catch {
+    return false
+  }
+}
+
 /** 等 CDP 的 HTTP 端点可用，返回调试端口。 */
-async function waitForDebugPort(profileDir: string, child: ChildProcess, timeoutMs: number): Promise<number | undefined> {
+async function waitForDebugPort(
+  profileDir: string,
+  child: ChildProcess,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<number | undefined> {
   const portFile = join(profileDir, 'DevToolsActivePort')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    if (signal?.aborted) return undefined
     if (child.exitCode !== null) return undefined
     try {
       const port = parseDevToolsActivePort(readFileSync(portFile, 'utf8'))
       if (port) {
-        // 端口文件出现不代表 HTTP 已就绪，探一下
+        // 端口文件出现不代表 HTTP 已就绪，探一下（自身带 2s 超时）
         try {
-          const res = await fetch(`http://127.0.0.1:${port}/json/version`)
-          if (res.ok) return port
+          await cdpJson(port, '/json/version', signal)
+          return port
         } catch {}
       }
     } catch {}
@@ -246,12 +338,13 @@ async function waitForDebugPort(profileDir: string, child: ChildProcess, timeout
 }
 
 /** 找到 chat.deepseek.com 的页面 target（等 SPA 起来）。 */
-async function findPageTarget(port: number, timeoutMs: number): Promise<any | null> {
+async function findPageTarget(port: number, timeoutMs: number, signal?: AbortSignal): Promise<any | null> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    if (signal?.aborted) return null
     try {
-      const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as any[]
-      const page = targets.find((t) => t?.type === 'page' && String(t.url ?? '').includes('deepseek.com'))
+      const targets = (await cdpJson(port, '/json/list', signal)) as any[]
+      const page = Array.isArray(targets) ? targets.find((t) => isDeepSeekPage(t)) : undefined
       if (page?.webSocketDebuggerUrl) return page
     } catch {}
     await sleep(400)
@@ -323,7 +416,7 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
     } catch {}
   }
 
-  const port = await waitForDebugPort(profileDir, child, 25_000)
+  const port = await waitForDebugPort(profileDir, child, 25_000, options.signal)
   if (!port) {
     cleanupBrowser()
     return {
@@ -333,7 +426,7 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
     }
   }
 
-  const page = await findPageTarget(port, 20_000)
+  const page = await findPageTarget(port, 20_000, options.signal)
   if (!page) {
     cleanupBrowser()
     return { ok: false, reason: 'no-page', message: `${browser.name} 里没找到 chat.deepseek.com 页面。` }

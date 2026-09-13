@@ -103,17 +103,29 @@ export async function saveWithPicker(
   w: Win = win(),
 ): Promise<SaveOutcome> {
   if (!canSaveWithPicker(w)) return { kind: 'unsupported' }
+  // ⚠️ 要留住 writable 的引用（审计 F22）：`write`/`close` 失败时如果不 `abort`，
+  // Chromium 会留下一个**未提交的临时文件与句柄**（模拟磁盘写满时实测 abort 从未被调用）。
+  // 成功路径走完就把引用清掉，免得 catch 里对已关闭的 writable 再动手。
+  let writable:
+    | { write(data: Blob | string): Promise<void>; close(): Promise<void>; abort(reason?: unknown): Promise<void> }
+    | undefined
   try {
     const handle = await w.showSaveFilePicker!({
       suggestedName,
       types: [{ description: 'JSON 备份', accept: { 'application/json': ['.json'] } }],
     })
     const text = await produce()
-    const writable = await handle.createWritable()
+    writable = await handle.createWritable()
     await writable.write(new Blob([text], { type: 'application/json' }))
     await writable.close()
+    writable = undefined
     return { kind: 'saved', name: typeof handle?.name === 'string' && handle.name ? handle.name : suggestedName }
   } catch (error: any) {
+    if (writable) {
+      try {
+        await writable.abort(error)
+      } catch {}
+    }
     if (isPickerCancel(error)) return { kind: 'cancelled' }
     return { kind: 'failed', reason: `${error?.name ?? ''} ${error?.message ?? error}`.trim() }
   }
@@ -147,6 +159,10 @@ export function pickJsonFile(doc: Document = document): Promise<File | undefined
   })
 }
 
+/** 导入文件的大小上限：与宿主侧一致（实测单账号 ~1.7 KB、账号数上限 500 → ~850 KB，
+ *  取 2 MiB 留 2 倍余量）。两边都要有 —— 前端挡是为了不白传，宿主挡才是真边界。 */
+export const IMPORT_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+
 export type ImportSource =
   /** 拿到了真实路径：宿主自己读文件，内容不进 HTTP。 */
   | { kind: 'path'; path: string; name: string }
@@ -162,6 +178,14 @@ export type ImportSource =
  */
 export async function readImportSource(file: File, w: Win = win()): Promise<ImportSource> {
   const name = file.name || '备份文件'
+  // 前端先按大小挡一道（审计 F16）：与宿主侧的上限保持一致，避免白传一次才发现太大。
+  if (typeof file.size === 'number' && file.size > IMPORT_FILE_LIMIT_BYTES) {
+    return {
+      kind: 'unreadable',
+      name,
+      reason: `文件 ${Math.ceil(file.size / 1024)} KiB，超过上限 ${Math.floor(IMPORT_FILE_LIMIT_BYTES / 1024 / 1024)} MiB`,
+    }
+  }
   const path = resolvePickedPath(file, w)
   if (path) return { kind: 'path', path, name }
   try {
