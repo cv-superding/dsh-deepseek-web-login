@@ -653,7 +653,20 @@ export function apply(ctx: any, config: Config = {}): void {
                   // ⚠️ 这里刻意不走 commitCapturedAuth：它不是"新捕获"，而是对当前账号的
                   // 元数据刷新。若让它消费掉添加模式，用户点了「登录新账号」后一刷新面板，
                   // 添加模式就没了 —— 那会是个很难查的 bug。
-                  writeAuth({ ...auth, user: check.user })
+                  //
+                  // ⚠️ 也不能走 writeAuth（审计 N02）：它的语义是「写入并**设为当前账号**」。
+                  // `/status` 的校验请求是异步的，等待期间用户可能已经切到别的账号、甚至把
+                  // 这个账号删掉了 —— 迟到的结果一旦走 writeAuth，就会把账号**切回去**、
+                  // 或者把已删除的凭证**复活**。刷新元信息不该有这两个副作用。
+                  // 所以只更新「仍存在、且 token 匹配」的那条记录。
+                  const target = listAccounts().find((item) => item.token === auth.token)
+                  if (target) {
+                    updateAccount(target.id, {
+                      user: { ...target.user, ...check.user },
+                      unverified: undefined,
+                      lastVerifiedAt: new Date().toISOString(),
+                    })
+                  }
                 }
               }
               let registeredProviders: string[] = []

@@ -171,6 +171,13 @@ const checks = {
   // 否则会一直对着坏地址打，"保留 discovery 能力"等于没用
   'host WASM 失效时连地址缓存一起清':
     host.includes('resolvedWasmUrl?.url === url') && host.includes('resolvedWasmUrl = null'),
+  // 审计 N02：迟到的 /status 校验只能刷元信息，不能切号/复活已删账号。
+  // 断言调用点特征 —— 注意 `item.token === auth.token` 这类比较在产物里有 3 处
+  // （upsertAccount 内部也有），只拿它做断言会被库内部代码骗过；
+  // `unverified: void 0` 只出现在这一处（探活模块用的是 lastVerifyError）。
+  'host 迟到的 /status 校验只刷元信息、不切号':
+    host.includes('listAccounts().find((item) => item.token === auth.token)') &&
+    host.includes('unverified: void 0'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),

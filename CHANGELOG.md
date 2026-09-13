@@ -2,6 +2,52 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.49 — 2026-09-13
+
+### 第二轮审计第五批：N02（迟到的 /status 校验把当前账号切回去）
+
+`GET /status` 会顺带做一次登录态校验，返回后用 `writeAuth({ ...auth, user: check.user })`
+补全账号的展示信息。问题在于 **`writeAuth` 的语义是「写入并设为当前账号」**，
+而这个校验请求是异步的（超时 15s），等待期间用户完全可能：
+
+- **切到另一个账号** → 迟到的结果把当前账号**切回去**（"我明明切了 B，面板又跳回 A"）；
+- **把该账号删掉** → `writeAuth` 内部 upsert，把已删除的凭证**复活**。
+
+刷新元信息不该有这两个副作用。现在只在「仍存在、且 token 匹配」的记录上更新元数据：
+
+```ts
+const target = listAccounts().find((item) => item.token === auth.token)
+if (target) {
+  updateAccount(target.id, {
+    user: { ...target.user, ...check.user },
+    unverified: undefined,
+    lastVerifiedAt: new Date().toISOString(),
+  })
+}
+```
+
+顺带记录 `lastVerifiedAt`、并清掉 `unverified` 标记（`normalizeRecord` 只在
+`unverified === true` 时才保留该字段，所以传 `undefined` 等于清除）。
+探活模块 `probe.ts` 早就是「按 target 更新、不切号」的写法 —— 这次是让 `/status` 这条路径与它一致。
+
+**关于「整块替换」**：审计给的是完整的 `apply()`（786 行）。我先把它与当前实现**逐行 diff**，
+发现**只有这一处差异（+3/−1）**，于是只改这一处 —— 等价，但把引入意外变化的风险降到最低。
+
+### 测试
+
+- `check-round2.mjs` 20 → **22 项**：两条 N02 用例，都通过真实 `apply()` 注册 `/status` handler，
+  再用注入的 fetch 把校验请求**悬挂住**，然后分别「切到 B」「删掉 A」，最后释放响应。
+  含三处自证：拿到了 handler、校验请求确实发出并挂起、元信息确实被刷新（证明这条路径真的走到了）。
+- `check-bundle.mjs` 新增一条产物断言。注意断言的写法：`item.token === auth.token` 这类比较
+  在产物里有 **3 处**（`upsertAccount` 内部也有），只拿它做断言会被库内部代码骗过；
+  `unverified: void 0` 只出现在**这一个调用点**（探活模块用的是 `lastVerifyError`）。
+- 反向验证：恢复成 `writeAuth({ ...auth, user: check.user })`（命中数强制 = 1）→ 两条断言变红，复原后绿。
+- 33 个测试文件全绿。
+
+### 未处理
+
+F04（`serverId` 的生产身份链是断的），以及旧项 F06 / F08 / F10 / F15 / F16 / F19 / F20 / F21 / F22 / F23。
+
 ## 0.1.48 — 2026-09-13
 
 ### 第二轮审计第四批：N05（失效 WASM 地址阻断 discovery 恢复）

@@ -15,6 +15,7 @@ process.env.DSH_HOME = HOME
 
 const {
   accountsDir,
+  removeAccount,
   activeAccountId,
   importAccounts,
   listAccounts,
@@ -26,6 +27,8 @@ const {
 const { setFetchImpl, resetSessionReuse, streamWebCompletion } = await import('../src/webapi.ts')
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
+// N02：造当前账号要走 writeAuth（它的语义是「写入并设为当前」）
+const { writeAuth } = await import('../src/auth.ts')
 
 // N04 用的两个账号（token 不同 → 复用键不同）
 const authA = { token: 'token-A', cookie: 'c=A' }
@@ -472,6 +475,137 @@ await test('N05：WASM 下载 404 后必须重新走 discovery（不能卡在坏
 await test('N05：WASM 编译失败后同样要清地址缓存', async () => {
   // HTTP 200 但字节不是合法 wasm → WebAssembly.compile reject（走的是同一条清理回调）
   assertN05(await n05Run(() => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })), '编译失败')
+})
+
+// ── 第二轮审计 N02（高）：迟到的 /status 校验仍会把当前账号切回去 ────────────────
+// 根因：`const check = await validateAuth(auth)` 之后走的是 `writeAuth({ ...auth, user: check.user })`，
+// 而 writeAuth 的语义包含 upsert + **切换当前账号** —— 刷新元信息不该有这种副作用：
+// 校验是异步的，等待期间用户可能已经切到别的账号、甚至把那个账号删掉，
+// 迟到的结果就会把账号切回去 / 把已删除的凭证复活。
+const API_STATUS = '/deepseek-web-login/api/status'
+
+/** 起一次 apply，捕获 /status 的 HTTP handler（probeIntervalMs=0 → 零定时器）。 */
+async function bootStatusHandler() {
+  const { apply } = await import('../src/index.ts')
+  let handler
+  const ctx = {
+    effect: (fn) => fn(),
+    llm: { registerAdapter() {}, listProviders: () => [] },
+    webServer: { register: (opts) => { handler = opts.handler } },
+    get: () => undefined,
+  }
+  apply(ctx, { probeIntervalMs: 0 })
+  assert.equal(typeof handler, 'function', '自证：拿到了 /status 的 HTTP handler')
+  return handler
+}
+
+function fakeRes() {
+  const res = {
+    statusCode: 0,
+    body: '',
+    writeHead(status) { res.statusCode = status },
+    end(text) { res.body = text ?? '' },
+  }
+  return res
+}
+
+/** 触发一次 GET /status，返回「等校验发出去了」的句柄 + 释放函数。 */
+async function statusRequestWhileValidating(handler, userPayload) {
+  let release
+  const held = new Promise((resolve) => { release = resolve })
+  let validatorHits = 0
+  setFetchImpl(async (input) => {
+    const url = String(input)
+    if (url.includes('/api/v0/users/current')) {
+      validatorHits += 1
+      await held
+      return new Response(
+        JSON.stringify({ code: 0, data: { biz_data: { id: 'u-A', email: userPayload } } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response('', { status: 404 })
+  })
+  const res = fakeRes()
+  const pending = handler({ method: 'GET', url: API_STATUS }, res)
+  for (let i = 0; i < 400 && validatorHits === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  assert.equal(validatorHits, 1, '自证：校验请求确实发出并挂起了（否则下面断言的是没开始的状态）')
+  return { release, pending, res }
+}
+
+await test('N02：等待校验期间切到别的账号 → 迟到的结果不得把账号切回去', async () => {
+  writeAuth({
+    token: 'tok-N02-A',
+    cookie: 'c=A',
+    hifDliq: '',
+    hifLeim: '',
+    wasmUrl: '',
+    userAgent: 'ua',
+    capturedAt: '2026-09-13T00:00:00.000Z',
+    user: { display: 'A 旧名' },
+  })
+  const a = listAccounts().find((item) => item.token === 'tok-N02-A')
+  assert.ok(a, '自证：A 已经写进账号库')
+  assert.equal(activeAccountId(), a.id, '前提：A 是当前账号')
+
+  const b = upsertAccount({
+    token: 'tok-N02-B',
+    cookie: 'c=B',
+    userAgent: 'ua',
+    capturedAt: '2026-09-13T00:00:00.000Z',
+  })
+  assert.notEqual(b.id, a.id)
+
+  const handler = await bootStatusHandler()
+  const { release, pending } = await statusRequestWhileValidating(handler, 'a-new@example.com')
+
+  // 用户在这期间切到 B
+  setActiveAccount(b.id)
+  assert.equal(activeAccountId(), b.id, '前提：已切到 B')
+
+  release()
+  await pending
+
+  assert.equal(activeAccountId(), b.id, '迟到的校验结果不得把当前账号切回 A')
+  const aAfter = listAccounts().find((item) => item.token === 'tok-N02-A')
+  assert.ok(aAfter, 'A 的记录仍应在库里')
+  assert.equal(aAfter.user?.display, 'a-new@example.com', '元信息仍要被刷新（自证这条路径真的走到了）')
+  assert.ok(typeof aAfter.lastVerifiedAt === 'string', '应记录校验时间')
+  assert.equal(aAfter.unverified, undefined, '校验成功后未验证标记要被清掉')
+  setFetchImpl(undefined)
+})
+
+await test('N02：等待校验期间删掉该账号 → 迟到的结果不得复活它', async () => {
+  writeAuth({
+    token: 'tok-N02-C',
+    cookie: 'c=C',
+    hifDliq: '',
+    hifLeim: '',
+    wasmUrl: '',
+    userAgent: 'ua',
+    capturedAt: '2026-09-13T00:00:00.000Z',
+    user: { display: 'C 旧名' },
+  })
+  const c = listAccounts().find((item) => item.token === 'tok-N02-C')
+  assert.ok(c, '自证：C 已经写进账号库')
+
+  const handler = await bootStatusHandler()
+  const { release, pending } = await statusRequestWhileValidating(handler, 'c-new@example.com')
+
+  // 用户在这期间把这个账号删了
+  assert.equal(removeAccount(c.id), true, '前提：删除成功')
+  assert.ok(!listAccounts().some((item) => item.token === 'tok-N02-C'), '前提：C 已不在库里')
+
+  release()
+  await pending
+
+  assert.ok(
+    !listAccounts().some((item) => item.token === 'tok-N02-C'),
+    '迟到的校验结果不得把已删除的账号复活（旧实现走 writeAuth 会 upsert 回来）',
+  )
+  setFetchImpl(undefined)
 })
 
 console.log()
