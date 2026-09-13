@@ -1319,6 +1319,93 @@ const CLOSED_MARKER_RE = new RegExp(
 /** 未闭合形态：流在标记中间被截断 —— 半截标记同样是垃圾。 */
 const OPEN_MARKER_RE = new RegExp(`<(${IMITATED_MARKER_TAGS.join('|')})\\b[^>]*>[\\s\\S]*$`, 'g')
 
+export class SystemMarkerStreamFilter {
+  private pending = ''
+  private captured = ''
+  private tag = ''
+  private fence = ''
+  private fenceSize = 0
+  private readonly limit = 1024 * 1024
+  push(text: string): { text: string; stripped: boolean } {
+    this.pending += text
+    return this.drain(false)
+  }
+  flush(): { text: string; stripped: boolean } { return this.drain(true) }
+  private drain(final: boolean): { text: string; stripped: boolean } {
+    let out = '', stripped = false
+    const names = [...IMITATED_MARKER_TAGS, ...LONG_MARKER_TAGS.map(x => x.tag)]
+    const opener = new RegExp('<(' + names.join('|') + ')\\b[^>]*>')
+    while (this.pending.length) {
+      const nl = this.pending.indexOf('\n')
+      if (nl < 0 && !final) {
+        // ⚠️ 逐行模式在没有换行时会一直缓冲到轮末。安全前缀：所有被识别的标记都以 `<`
+        // 开头、围栏也必须在行首，所以「不在围栏内 + 不在捕获中 + 剩余部分既无 `<`
+        // 也不是围栏候选开头」时直接吐出去，不可能漏掉标记、也不影响围栏状态判定。
+        //
+        // 效果边界（2026-09-13 实测，别高估它）：真正决定"上屏节奏"的是上游的
+        // `TranscriptEchoGuard` —— 它同样逐行分类，无换行的回答会被它先扣到轮末，
+        // 所以**整段没有换行**时这里再快也收不到东西（adapter 只会在轮末拿到一段）。
+        // 这条优化保证的是：本层不再比上游更早地扣住文本（有换行的段落照旧逐行走，
+        // 最后一个不完整行的前段也不必等到换行）。
+        if (
+          this.fence === '' &&
+          !this.tag &&
+          !this.pending.includes('<') &&
+          !/^[ \t]{0,3}[`~]/.test(this.pending)
+        ) {
+          out += this.pending
+          this.pending = ''
+        }
+        break
+      }
+      let line = nl < 0 ? this.pending : this.pending.slice(0, nl + 1)
+      this.pending = nl < 0 ? '' : this.pending.slice(nl + 1)
+      if (!this.tag) {
+        const mark = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line)
+        if (this.fence) {
+          out += line
+          if (mark && mark[1][0] === this.fence && mark[1].length >= this.fenceSize &&
+              !line.slice(mark[0].length).trim()) this.fence = ''
+          continue
+        }
+        if (mark) { this.fence = mark[1][0]; this.fenceSize = mark[1].length; out += line; continue }
+      }
+      while (line) {
+        if (!this.tag) {
+          const match = opener.exec(line)
+          if (!match) { out += line; break }
+          out += line.slice(0, match.index)
+          this.tag = match[1]
+          this.captured = match[0]
+          line = line.slice(match.index + match[0].length)
+        }
+        const close = '</' + this.tag + '>'
+        const at = line.indexOf(close)
+        if (at < 0) { this.captured += line; line = ''; break }
+        this.captured += line.slice(0, at + close.length)
+        line = line.slice(at + close.length)
+        const openEnd = this.captured.indexOf('>') + 1
+        const bodySize = this.captured.length - openEnd - close.length
+        const long = LONG_MARKER_TAGS.find(x => x.tag === this.tag)
+        if (!long || bodySize >= long.minBody) stripped = true
+        else out += this.captured
+        this.captured = ''; this.tag = ''
+      }
+    }
+    if (this.pending.length + this.captured.length > this.limit) {
+      throw new Error('系统标记缓冲超过 1 MiB，拒绝静默截断正文')
+    }
+    if (final && this.tag) {
+      const long = LONG_MARKER_TAGS.find(x => x.tag === this.tag)
+      const bodySize = this.captured.length - this.captured.indexOf('>') - 1
+      if (!long || bodySize >= long.minBody) stripped = true
+      else out += this.captured
+      this.captured = ''; this.tag = ''
+    }
+    return { text: out, stripped }
+  }
+}
+
 export function stripSystemMarkers(text: string): { text: string; stripped: boolean } {
   if (!hasImitatedMarker(text)) return { text, stripped: false }
 
@@ -1405,11 +1492,17 @@ export function stripWebDisclaimer(text: string): { text: string; stripped: bool
  *   - 浅层（过滤器）扣住的字符**从没经过**「剥声明」这一层，而声明就爱待在最后几个字符里；
  *   - 同理，伪系统标记也可能整段藏在尾巴里。
  * 轮末没有后续输入了，所以这里可以直接做一次性替换，不需要流式扣留。
+ *
+ * `cleanMarkers`（2026-09-13，审计 N03）：是否在**这里**用无状态的 `stripSystemMarkers`
+ * 补剥伪系统标记。streamImpl 现在传 `false` —— 因为它已经用有状态的
+ * `SystemMarkerStreamFilter` 处理残余了，两遍都跑只会重复劳动；
+ * 默认 `true` 保留原语义，供单测与其它调用方使用。
  */
 export function drainTextPipeline(
   filter: ToolCallStreamFilter,
   boilerplate: BoilerplateFilter,
   guard: TranscriptEchoGuard,
+  cleanMarkers = true,
 ): {
   text: string
   echoed: boolean
@@ -1422,7 +1515,7 @@ export function drainTextPipeline(
   const tail = filter.flush()
   const raw = tailGuarded.text + tailBoiled.text + tail.text
   const dedisclaimered = stripWebDisclaimer(raw)
-  const cleaned = stripSystemMarkers(dedisclaimered.text)
+  const cleaned = cleanMarkers ? stripSystemMarkers(dedisclaimered.text) : {text: dedisclaimered.text, stripped:false}
   return {
     text: cleaned.text,
     echoed: tailGuarded.echoed,

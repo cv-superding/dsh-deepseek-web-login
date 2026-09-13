@@ -19,7 +19,7 @@ import {
   uploadImageFile,
   type SessionCleaner,
 } from './webapi.ts'
-import { collectImageRefs, serializePrompt, stripSystemMarkers, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, serializePrompt, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -533,6 +533,7 @@ export function createAdapter(deps: AdapterDeps) {
     // 第二道网：模型会模仿 prompt 里的转写格式（`[Tool Result for …]` / `User:` / `Assistant:`…），
     // 把「对话转写」当回答吐出来。这与工具调用标记泄漏是两个独立来源，必须分开防。
     let echoGuard = new TranscriptEchoGuard()
+    let systemMarkerFilter = new SystemMarkerStreamFilter()
     // 第四道网：网页端每轮末尾的免责声明（`本回答由 AI 生成…`）不是回答内容，必须剥掉。
     let boilerplate = new BoilerplateFilter()
 
@@ -544,7 +545,7 @@ export function createAdapter(deps: AdapterDeps) {
     let toolCallCount = 0
     let finishReason: string | undefined
   // 服务端上报的 token 总量（跨续写轮次累加）。>0 时才信它。
-  let reportedTokens = 0
+  const usageRounds: {prompt:string; outputChars:number; total?:number}[] = []
     let rejectedProtocol = ''
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
     let echoedTranscript = false
@@ -588,6 +589,8 @@ export function createAdapter(deps: AdapterDeps) {
       let roundStartedAt = Date.now()
       for (;;) {
         let roundError: AdapterLlmError | undefined
+        const roundUsage: {prompt:string; outputChars:number; total?:number} = {prompt:currentPrompt,outputChars:0}
+        usageRounds.push(roundUsage)
         // 每轮重置：finish 标记只反映**本轮**流，累积值会把上一轮的 FINISHED 带进来。
         finishReason = undefined
         textLenAtRoundStart = textBlock?.text?.length ?? 0
@@ -611,6 +614,7 @@ export function createAdapter(deps: AdapterDeps) {
                 else scheduleDeleteSession(auth as WebAuth, sessionId)
               },
       })) {
+        if (event.kind === 'thinking' || event.kind === 'text') roundUsage.outputChars += event.text.length
         if (event.kind === 'thinking') {
           const block = openReasoning()
           if (!reasoningStarted) {
@@ -631,7 +635,7 @@ export function createAdapter(deps: AdapterDeps) {
           if (guarded.echoed) echoedTranscript = true
           // 第三道网：模型偶尔吐出成串的伪系统标记（<ds_system>…</ds_system> / <system>…</system>），
           // 实测一条消息里出现过 13 个编造调用 ID 的 <ds_system>Tool result…，全是垃圾，必须剥掉
-          const cleaned = stripSystemMarkers(guarded.text)
+          const cleaned = systemMarkerFilter.push(guarded.text)
           if (cleaned.stripped) {
             systemMarkersStripped = true
             logger?.debug?.('deepseek-web: 已剥离伪系统标记（<ds_system>/<system>）')
@@ -676,8 +680,8 @@ export function createAdapter(deps: AdapterDeps) {
         }
         if (event.kind === 'finish') {
           finishReason = event.reason
-          if (typeof event.totalTokens === 'number' && Number.isFinite(event.totalTokens)) {
-            reportedTokens += event.totalTokens
+          if (typeof event.totalTokens === 'number' && Number.isSafeInteger(event.totalTokens) && event.totalTokens >= 0) {
+            roundUsage.total = event.totalTokens
           }
         }
       }
@@ -700,10 +704,13 @@ export function createAdapter(deps: AdapterDeps) {
         // 那一层，而免责声明恰好 23 字 —— 实测整段从尾巴漏出去（会话 6c0dbc47：它是一个只有单个
         // delta 的独立 text 块，跟在工具调用后面）。所以轮末统一走 drainTextPipeline：
         // 反序吐净 + 对残余做一次性剥声明 / 剥伪系统标记。
-        const drained = drainTextPipeline(filter, boilerplate, echoGuard)
+        const drained = drainTextPipeline(filter, boilerplate, echoGuard, false)
         if (drained.echoed) echoedTranscript = true
         if (drained.disclaimers > 0) disclaimerStripped = true
-        const tailText = drained.text
+        const markerPending = systemMarkerFilter.push(drained.text)
+        const markerEnd = systemMarkerFilter.flush()
+        const tailText = markerPending.text + markerEnd.text
+        if (markerPending.stripped || markerEnd.stripped) systemMarkersStripped = true
         if (tailText) {
           const block = openText()
           if (!textStarted) {
@@ -772,6 +779,7 @@ export function createAdapter(deps: AdapterDeps) {
         // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例
         filter = new ToolCallStreamFilter(knownNames)
         echoGuard = new TranscriptEchoGuard()
+        systemMarkerFilter = new SystemMarkerStreamFilter()
         boilerplate = new BoilerplateFilter()
       }
     } catch (error: any) {
@@ -789,20 +797,20 @@ export function createAdapter(deps: AdapterDeps) {
     }
 
     const outputChars = (textBlock?.text?.length ?? 0) + (reasoningBlock?.text?.length ?? 0)
-    const outputTokens = Math.ceil(outputChars / 3.2)
-    yield {
-      type: 'usage',
-      usage: {
-        // 优先用服务端上报的总量（真实值），减掉我们对输出的估算 → 总量恰好等于服务端的数，
-        // 底部的 token 统计不再是纯估算。拿不到（协议变了/老请求）才退回按字符估算。
-        inputTokens:
-          reportedTokens > 0
-            ? Math.max(0, reportedTokens - outputTokens)
-            : estimateTokens(prompt),
-        outputTokens,
-        ...(reasoningBlock ? { reasoningTokens: estimateTokens(reasoningBlock.text) } : {}),
-      },
+    let inputTokens = 0, outputTokens = 0
+    for (const round of usageRounds) {
+      const estimateOutput = Math.ceil(round.outputChars / 3.2)
+      if (round.total !== undefined) {
+        const output = Math.min(round.total, estimateOutput)
+        outputTokens += output
+        inputTokens += round.total - output
+      } else {
+        outputTokens += estimateOutput
+        inputTokens += estimateTokens(round.prompt)
+      }
     }
+    yield { type: 'usage', usage: { inputTokens, outputTokens,
+      ...(reasoningBlock ? { reasoningTokens: Math.min(outputTokens, estimateTokens(reasoningBlock.text)) } : {}) } }
 
     if (toolCallCount > 0) {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
