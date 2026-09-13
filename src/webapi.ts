@@ -995,7 +995,17 @@ export type WebStreamEvent =
   | { kind: 'thinking'; text: string }
   | { kind: 'text'; text: string }
   | { kind: 'status'; value: string }
-  | { kind: 'finish'; reason?: string }
+  | {
+      kind: 'finish'
+      reason?: string
+      /**
+       * 服务端上报的**本消息**总 token 数（含 prompt + 回复 + 服务端自身开销）。
+       * 实测 2026-09-13：9 字符 prompt → 38；12,424 字符 prompt → 6446；
+       * 且同一会话第二轮仍只报自己的 38 → 是「本消息」而不是「会话累计」。
+       * 拿不到时缺省（此时调用方退回按字符估算）。
+       */
+      totalTokens?: number
+    }
   | {
       kind: 'error'
       message: string
@@ -1082,6 +1092,8 @@ export function createSseState() {
   let sink: 'fragments' | 'thinking' | 'content' | null = null
   let pendingFinish: string | undefined
   let sawData = false
+  /** 服务端上报的本消息 token 总量（见 WebStreamEvent 的 totalTokens 说明）。 */
+  let totalTokens: number | undefined
 
   const emit = (out: WebStreamEvent[], kind: 'text' | 'thinking', delta: string): void => {
     if (!delta) return
@@ -1272,6 +1284,12 @@ export function createSseState() {
           case 'response/finish_reason':
             if (typeof value === 'string') pendingFinish = value
             return out
+          case 'accumulated_token_usage':
+            // 兼容：万一服务端直接以顶层路径下发（真实样本是裹在 response/BATCH 里的，见上）。
+            // ⚠️ 快照里的那个字段初始恒为 0（status 还是 WIP），**不要**拿它当结果 ——
+            // 判定脚本第一版就是取了末尾快照的 0，结论整个反过来。
+            if (typeof value === 'number' && Number.isFinite(value)) totalTokens = value
+            return out
           case 'response/status':
             if (typeof value === 'string') {
               out.push({ kind: 'status', value })
@@ -1283,6 +1301,12 @@ export function createSseState() {
               for (const op of value) {
                 if (op && typeof op === 'object' && op.p === 'fragments' && op.o === 'APPEND' && op.v !== undefined) {
                   appendFragments(op.v, out)
+                }
+                // 真实形态（2026-09-13 抓包）：
+                //   {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":38}, …]}
+                // 它在**内层 op** 里，不是顶层 case —— 第一版补丁插错层级，测试直接抓到。
+                if (op && typeof op === 'object' && op.p === 'accumulated_token_usage') {
+                  if (typeof op.v === 'number' && Number.isFinite(op.v)) totalTokens = op.v
                 }
               }
             }
@@ -1302,11 +1326,13 @@ export function createSseState() {
     },
     /** 流结束：产出 finish（若确实收到过数据）。 */
     finish(): WebStreamEvent[] {
-      return sawData ? [{ kind: 'finish', reason: pendingFinish }] : []
+      return sawData
+        ? [{ kind: 'finish', reason: pendingFinish, ...(totalTokens !== undefined ? { totalTokens } : {}) }]
+        : []
     },
     /** 诊断：已发射正文/思考长度与快照分歧次数（单测与排查用）。 */
-    stats(): { text: string; thinking: string; divergences: number } {
-      return { text: outText, thinking: outThinking, divergences }
+    stats(): { text: string; thinking: string; divergences: number; totalTokens?: number } {
+      return { text: outText, thinking: outThinking, divergences, ...(totalTokens !== undefined ? { totalTokens } : {}) }
     },
   }
 }

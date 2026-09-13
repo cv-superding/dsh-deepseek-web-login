@@ -543,6 +543,8 @@ export function createAdapter(deps: AdapterDeps) {
     let reasoningStarted = false
     let toolCallCount = 0
     let finishReason: string | undefined
+  // 服务端上报的 token 总量（跨续写轮次累加）。>0 时才信它。
+  let reportedTokens = 0
     let rejectedProtocol = ''
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
     let echoedTranscript = false
@@ -674,6 +676,9 @@ export function createAdapter(deps: AdapterDeps) {
         }
         if (event.kind === 'finish') {
           finishReason = event.reason
+          if (typeof event.totalTokens === 'number' && Number.isFinite(event.totalTokens)) {
+            reportedTokens += event.totalTokens
+          }
         }
       }
         } catch (error: any) {
@@ -784,11 +789,17 @@ export function createAdapter(deps: AdapterDeps) {
     }
 
     const outputChars = (textBlock?.text?.length ?? 0) + (reasoningBlock?.text?.length ?? 0)
+    const outputTokens = Math.ceil(outputChars / 3.2)
     yield {
       type: 'usage',
       usage: {
-        inputTokens: estimateTokens(prompt),
-        outputTokens: Math.ceil(outputChars / 3.2),
+        // 优先用服务端上报的总量（真实值），减掉我们对输出的估算 → 总量恰好等于服务端的数，
+        // 底部的 token 统计不再是纯估算。拿不到（协议变了/老请求）才退回按字符估算。
+        inputTokens:
+          reportedTokens > 0
+            ? Math.max(0, reportedTokens - outputTokens)
+            : estimateTokens(prompt),
+        outputTokens,
         ...(reasoningBlock ? { reasoningTokens: estimateTokens(reasoningBlock.text) } : {}),
       },
     }

@@ -128,6 +128,94 @@ for (const [label, url] of denied) {
 }
 
 console.log()
+console.log('服务端真实 token 用量（accumulated_token_usage）')
+
+// ⚠️ 夹具是 2026-09-13 抓到的**真实响应**，逐字照抄（含那个初始为 0 的快照字段）。
+//    判定脚本的第一版就是因为取了末尾快照的 0，把「本消息」误判成「会话累计」——
+//    这两条用例专门守住那个坑。
+const NL = String.fromCharCode(10)
+const REAL_TINY = [
+  'event: ready',
+  'data: {"request_message_id":3,"response_message_id":4,"model_type":"default"}',
+  '',
+  'event: update_session',
+  'data: {"updated_at":1789262855.854146}',
+  '',
+  'data: {"v":{"response":{"message_id":4,"parent_id":3,"model":"","role":"ASSISTANT","thinking_enabled":false,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":0,"feedback":null,"inserted_at":1789262855.8448339,"search_enabled":false,"fragments":[{"id":2,"type":"RESPONSE","content":"收到","references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false}}}',
+  '',
+  'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":38},{"p":"quasi_status","v":"FINISHED"}]}',
+  '',
+  'data: {"p":"response/status","o":"SET","v":"FINISHED"}',
+  '',
+  'event: update_session',
+  'data: {"updated_at":1789262855.909791}',
+  '',
+  'event: close',
+  'data: {"click_behavior":"none","auto_resume":false}',
+  '',
+].join(NL)
+
+/** 跑一遍流，返回全部事件。 */
+async function collectEvents(sse) {
+  const out = []
+  const encoder = new TextEncoder()
+  const body = (async function* () {
+    yield encoder.encode(sse)
+  })()
+  for await (const event of parseWebSse(body)) out.push(event)
+  return out
+}
+
+await test('真实样本：finish 事件带出服务端上报的 totalTokens(=38)', async () => {
+  const events = await collectEvents(REAL_TINY)
+  const finish = events.find((e) => e.kind === 'finish')
+  assert.ok(finish, '应当有 finish 事件（自证：流真的跑完了）')
+  assert.equal(finish.totalTokens, 38, `应取 patch 里的 38，实际 ${finish.totalTokens}`)
+})
+
+await test('快照里的 0 不能当成结果：只有快照、没有 patch 时应报「拿不到」', async () => {
+  // 「判定脚本第一版」就是翻在这个坑上：快照字段 accumulated_token_usage 初始恒为 0
+  // （status 还是 WIP），真正的值在后面的 patch 里。取错位置 → 得到 0，结论整个反过来。
+  //
+  // ⚠️ 这条必须能区分：如果实现去哪读快照，就会得到 0 而不是 undefined → 变红。
+  //    （早先写的「断言 notEqual 0」是假的守护——patch 在快照之后到达、照样覆盖成 38，
+  //     把实现改坏也测不出来。反向验证第 D 条没红就是因为这个。）
+  const snapshotOnly = [
+    'data: {"v":{"response":{"message_id":4,"status":"WIP","accumulated_token_usage":0,"fragments":[{"id":2,"type":"RESPONSE","content":"收到"}]}}}',
+    '',
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}',
+    '',
+  ].join(NL)
+  const finish = (await collectEvents(snapshotOnly)).find((e) => e.kind === 'finish')
+  assert.ok(finish, '应当有 finish（自证）')
+  assert.equal(finish.totalTokens, undefined, '只有快照的 0 时应报「拿不到」，而不是 0')
+})
+
+await test('长 prompt 的真实样本：totalTokens(=6446)', async () => {
+  const longSse =
+    'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":6446},{"p":"quasi_status","v":"FINISHED"}]}' +
+    NL + NL +
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}' + NL + NL
+  const finish = (await collectEvents(longSse)).find((e) => e.kind === 'finish')
+  assert.equal(finish.totalTokens, 6446)
+})
+
+await test('没有该字段时就不带 totalTokens（调用方退回估算）', async () => {
+  const plain = 'data: {"v":{"response":{"content":"hi"}}}' + NL + NL + 'data: [DONE]' + NL + NL
+  const finish = (await collectEvents(plain)).find((e) => e.kind === 'finish')
+  assert.ok(finish, '应当有 finish（自证）')
+  assert.equal(finish.totalTokens, undefined, '拿不到就别编一个数')
+})
+
+await test('非数字的脏值不采信', async () => {
+  const dirty =
+    'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":"??"}]}' + NL + NL +
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}' + NL + NL
+  const finish = (await collectEvents(dirty)).find((e) => e.kind === 'finish')
+  assert.equal(finish.totalTokens, undefined)
+})
+
+console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
 if (failures.length) process.exitCode = 1

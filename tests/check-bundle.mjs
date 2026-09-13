@@ -149,6 +149,8 @@ const checks = {
   'host 提示词不再写出私有标记字面量': !host.includes('DSML|>') && host.includes('the private delimiter-prefixed variants'),
   // prompt 上限既可调、也真的被 adapter 读取（别只做了界面）
   'host 的 prompt 上限可调且落到 adapter': host.includes('maxPromptCharsBounds') && host.includes('clampMaxPromptChars'),
+  // 真实用量的调用点：拿不到时不编数、拿到时减掉输出估算（断言调用点，别只断言字段名）
+  'host 上报服务端真实 token（拿不到才退回估算）': host.includes('reportedTokens > 0') && host.includes('Math.max(0, reportedTokens - outputTokens)'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),
