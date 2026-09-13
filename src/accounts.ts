@@ -305,6 +305,9 @@ export function upsertAccount(auth: WebAuth, patch: Partial<AccountRecord> = {})
   const all = listAccounts()
   const existing =
     (serverId ? all.find((item) => item.serverId && item.serverId === serverId) : undefined) ??
+    // 兼容旧记录（审计 F04）：`serverId` 是后加的字段，老库里可能只存了 `user.id`。
+    // 只认**没有 serverId** 的记录，免得跟上面那条抢匹配（那条才是权威身份键）。
+    (serverId ? all.find((item) => !item.serverId && item.user?.id === serverId) : undefined) ??
     all.find((item) => item.token === auth.token)
   const id = patch.id ?? existing?.id ?? newAccountId()
 

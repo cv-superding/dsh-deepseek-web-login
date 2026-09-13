@@ -9,7 +9,7 @@
  * 设计约束：宿主自包含打包（除 node: 与 electron 外全部 bundle），
  * 不依赖 DSH 内部包的可解析性 —— 任何装配路径（注入 / bundle / patch）都能加载。
  */
-import { maskIdentifier, readAuth, writeAuth, type WebAuth } from './auth.ts'
+import { maskIdentifier, readAuth, refreshVerifiedIdentity, writeAuth, type WebAuth } from './auth.ts'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
@@ -660,13 +660,7 @@ export function apply(ctx: any, config: Config = {}): void {
                   // 或者把已删除的凭证**复活**。刷新元信息不该有这两个副作用。
                   // 所以只更新「仍存在、且 token 匹配」的那条记录。
                   const target = listAccounts().find((item) => item.token === auth.token)
-                  if (target) {
-                    updateAccount(target.id, {
-                      user: { ...target.user, ...check.user },
-                      unverified: undefined,
-                      lastVerifiedAt: new Date().toISOString(),
-                    })
-                  }
+                  if (target) refreshVerifiedIdentity(target.id, target.token, check.user)
                 }
               }
               let registeredProviders: string[] = []

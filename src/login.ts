@@ -15,7 +15,7 @@
  */
 import { pickCookieMeta, type CookieMeta } from './cookies.ts'
 import { createRequire } from 'node:module'
-import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, type WebAuth } from './auth.ts'
+import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, withVerifiedIdentity, type WebAuth } from './auth.ts'
 import { commitCapturedAuth } from './account-add.ts'
 import { clearBrowserLoginProfile } from './browser-login.ts'
 import { DS_BASE, DEFAULT_WASM_URL, FALLBACK_UA, validateAuth } from './webapi.ts'
@@ -610,7 +610,7 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
         const auth = buildAuth(buffer, token, false)
         const check = await validateAuth(auth)
         if (check.ok) {
-          await finish({ ...auth, ...(check.user ? { user: { ...auth.user, ...check.user } } : {}) }, true)
+          await finish(withVerifiedIdentity(auth, check.user), true)
           return
         }
         lastError = check.error ?? 'validation failed'
@@ -667,7 +667,7 @@ export async function captureFromPartition(logger?: { info?: (m: string) => void
     const auth = buildAuth(buffer, token, false)
     const check = await validateAuth(auth)
     if (check.ok) {
-      const commit = commitCapturedAuth({ ...auth, ...(check.user ? { user: { ...auth.user, ...check.user } } : {}) })
+      const commit = commitCapturedAuth(withVerifiedIdentity(auth, check.user))
       const tail = commit.mode === 'add' ? '（已加入账号库，当前账号未改动）' : ''
       lastResult = { ok: true, message: '已从已登录窗口恢复凭证（校验通过）' + tail, at: new Date().toISOString() }
       logger?.info?.(`deepseek-web login: recovered credentials from partition (verified, mode=${commit.mode})`)
@@ -707,7 +707,7 @@ export async function loginWithToken(
     logger?.info?.('deepseek-web login: token saved (unverified)')
     return { ok: true, error: `已保存（未通过校验：${check.error ?? 'unknown'}）` }
   }
-  commitCapturedAuth({ ...auth, ...(check.user ? { user: check.user } : {}) })
+  commitCapturedAuth(withVerifiedIdentity(auth, check.user))
   lastResult = {
     ok: true,
     message: `token 校验通过，凭证已保存${check.user?.display ? `（${maskIdentifier(check.user.display)}）` : ''}`,

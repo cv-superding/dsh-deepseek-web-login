@@ -28,7 +28,8 @@ const { setFetchImpl, resetSessionReuse, streamWebCompletion } = await import('.
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
 // N02：造当前账号要走 writeAuth（它的语义是「写入并设为当前」）
-const { writeAuth } = await import('../src/auth.ts')
+// F04：可信校验后的身份归一（user.id → serverId）
+const { writeAuth, withVerifiedIdentity, refreshVerifiedIdentity } = await import('../src/auth.ts')
 
 // N04 用的两个账号（token 不同 → 复用键不同）
 const authA = { token: 'token-A', cookie: 'c=A' }
@@ -605,6 +606,73 @@ await test('N02：等待校验期间删掉该账号 → 迟到的结果不得复
     !listAccounts().some((item) => item.token === 'tok-N02-C'),
     '迟到的校验结果不得把已删除的账号复活（旧实现走 writeAuth 会 upsert 回来）',
   )
+  setFetchImpl(undefined)
+})
+
+// ── 第一轮审计 F04（中）／第二轮复核：user.id 未进入去重键，重登产生重复账号 ──────
+// 现象：库里按 serverId 去重，但真实登录路径把服务端返回的 user.id 只塞进 `user` 字段、
+// **从没写进 serverId** → token 一刷新（同账号重登）去重键就失效，同一个号在库里堆好几条。
+// 既有测试是**手工传 serverId** 才通过的 —— 那条链在生产上根本没接通（本轮补的就是它）。
+const F04_BASE = {
+  cookie: 'c',
+  hifDliq: '',
+  hifLeim: '',
+  wasmUrl: '',
+  userAgent: 'ua',
+  capturedAt: '2026-09-13T00:00:00.000Z',
+}
+
+await test('F04：同一账号 token 刷新后重登，库里仍只有一条（且 token 已更新）', async () => {
+  // 第一次登录：可信校验返回服务端 id = srv-f04-1
+  const first = upsertAccount(
+    withVerifiedIdentity({ ...F04_BASE, token: 'tok-f04-first' }, { id: 'srv-f04-1', display: '甲' }),
+  )
+  assert.equal(first.serverId, 'srv-f04-1', '可信校验拿到的 user.id 必须落成 serverId')
+  assert.equal(listAccounts().filter((x) => x.serverId === 'srv-f04-1').length, 1, '自证：第一条已入库')
+
+  // 同账号重登：token 刷新成另一个值，服务端 id 不变
+  const second = upsertAccount(
+    withVerifiedIdentity({ ...F04_BASE, token: 'tok-f04-second' }, { id: 'srv-f04-1', display: '甲' }),
+  )
+
+  const same = listAccounts().filter((x) => x.serverId === 'srv-f04-1')
+  assert.equal(same.length, 1, `同一账号重登不得新增（实际 ${same.length} 条）`)
+  assert.equal(second.id, first.id, '应该是同一条记录被更新')
+  assert.equal(second.token, 'tok-f04-second', 'token 要更新成最新那次')
+})
+
+await test('F04：旧记录（只有 user.id、没有 serverId）也必须能被认出来', async () => {
+  // 造一条「老库」记录：serverId 是后加的字段，老记录里没有，只有 user.id
+  upsertAccount({ ...F04_BASE, token: 'tok-f04-legacy', user: { id: 'srv-f04-legacy', display: '乙' } })
+  const legacy = listAccounts().find((x) => x.token === 'tok-f04-legacy')
+  assert.ok(legacy, '自证：旧记录已入库')
+  assert.equal(legacy.serverId, undefined, '自证：这条旧记录确实没有 serverId')
+
+  // 该账号重新登录（token 变了），服务端仍返回同一个 id
+  upsertAccount(
+    withVerifiedIdentity({ ...F04_BASE, token: 'tok-f04-legacy-new' }, { id: 'srv-f04-legacy', display: '乙' }),
+  )
+
+  const hits = listAccounts().filter((x) => x.token === 'tok-f04-legacy' || x.token === 'tok-f04-legacy-new')
+  assert.equal(hits.length, 1, `旧记录应被认出来并更新，而不是新增（实际 ${hits.length} 条）`)
+  assert.equal(hits[0].serverId, 'srv-f04-legacy', '更新后应补上 serverId')
+})
+
+await test('F04：/status 的迟到校验也要把 user.id 落成 serverId', async () => {
+  writeAuth({ ...F04_BASE, token: 'tok-f04-status', user: { display: '丙' }, hifDliq: '', hifLeim: '' })
+  const before = listAccounts().find((x) => x.token === 'tok-f04-status')
+  assert.ok(before, '自证：当前账号已入库')
+  assert.equal(before.serverId, undefined, '自证：入库时还没有 serverId（这正是重登会重复的原因）')
+
+  const handler = await bootStatusHandler()
+  const { release, pending } = await statusRequestWhileValidating(handler, 'bing@example.com')
+  release()
+  await pending
+
+  const after = listAccounts().find((x) => x.token === 'tok-f04-status')
+  assert.equal(after.serverId, 'u-A', '校验成功后要把服务端 user.id 落成 serverId（与 N02 同一处代码）')
+  assert.equal(after.user?.display, 'bing@example.com', '展示名也要刷新（自证这条路径走到了）')
+  assert.equal(refreshVerifiedIdentity('acc_不存在', 'x', { id: 'y' }), false, '记录不存在时不得凭空新建')
   setFetchImpl(undefined)
 })
 

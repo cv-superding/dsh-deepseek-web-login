@@ -178,6 +178,13 @@ const checks = {
   'host 迟到的 /status 校验只刷元信息、不切号':
     host.includes('listAccounts().find((item) => item.token === auth.token)') &&
     host.includes('unverified: void 0'),
+  // 审计 F04：可信校验拿到的 user.id 必须落成去重键，否则同账号重登会堆重复。
+  // 三个调用点：凭证落库前（withVerifiedIdentity）、记录已在库里（refreshVerifiedIdentity）、
+  // 去重时兼容旧记录（只有 user.id 没有 serverId）。
+  'host 可信校验后的身份归一（user.id → serverId）':
+    host.includes('withVerifiedIdentity(auth, check.user)') &&
+    host.includes('refreshVerifiedIdentity(target.id, target.token, check.user)') &&
+    host.includes('!item.serverId && item.user?.id === serverId'),
   'client 有 prompt 上限旋钮': client.includes('prompt 上限') && client.includes('maxPromptChars'),
   // 断言「调用点」而不是字段名（改完要重启才生效 = 白做；只断言字段名会被库内部代码骗过）
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),

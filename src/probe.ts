@@ -66,7 +66,13 @@ export async function probeOnce(auth: WebAuth | undefined, logger?: ProbeLogger)
       // 用「旧值打底 + 新值覆盖」合并：新一次只有 id、没有 display 时，
       // 不要把原来已经拿到的好名字冲掉（pickUserDisplay 保证空值不会写进 key）。
       const patch: Record<string, unknown> = { lastVerifiedAt: at, lastVerifyError: undefined }
-      if (outcome.user) patch.user = { ...(target.user ?? {}), ...outcome.user }
+      if (outcome.user) {
+        patch.user = { ...(target.user ?? {}), ...outcome.user }
+        // 审计 F04：探活走的也是**可信校验**（只读 users/current），
+        // 拿到的 user.id 要落成去重键，否则同一账号重登时又会新增一条。
+        const verifiedId = (outcome.user as { id?: unknown }).id
+        if (typeof verifiedId === 'string' && verifiedId) patch.serverId = verifiedId
+      }
       updateAccount(target.id, patch as any)
     } else {
       updateAccount(target.id, { lastVerifyError: { at, message: String(outcome.error ?? '') } })

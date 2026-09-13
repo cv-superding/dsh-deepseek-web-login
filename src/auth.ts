@@ -16,8 +16,10 @@ import type { CookieMeta } from './cookies.ts'
 import {
   activeAccount,
   clearActiveAccount,
+  readAccount,
   removeAccount,
   setActiveAccount,
+  updateAccount,
   upsertAccount,
 } from './accounts.ts'
 import { resolveDshHome } from './paths.ts'
@@ -78,6 +80,62 @@ export function readAuth(): WebAuth | undefined {
 export function writeAuth(auth: WebAuth): void {
   const record = upsertAccount(auth)
   setActiveAccount(record.id)
+}
+
+
+/**
+ * 把「**可信校验**得到的身份」归一进凭证：`user.id` → `serverId`（去重键）。
+ *
+ * ⚠️ 为什么必须有这一步（审计 F04）：库里按 `serverId` 去重（同账号重新登录 → 更新而不是新增），
+ * 但 `user.id` 原本只在登录时被塞进 `user` 字段、**从没写进 `serverId`** ——
+ * 于是 token 一刷新，去重键就失效，同一个号在库里堆成好几条：
+ * 真实登录路径上「两级去重」等于没接上（既有测试是手工传 `serverId` 才通过的）。
+ *
+ * 只在**服务端校验返回了身份**之后调用（浏览器捕获、分区恢复、手动 token、/status、探活）。
+ * 备份文件自报的 id 不在这里采信 —— 那条路径由 `importAccounts` 单独把关。
+ */
+export function withVerifiedIdentity(
+  auth: WebAuth,
+  user: { id?: string; display?: string } | undefined,
+): WebAuth & { serverId?: string } {
+  const display = typeof user?.display === 'string' && user.display ? user.display : undefined
+  const serverId = typeof user?.id === 'string' && user.id ? user.id : undefined
+  return {
+    ...auth,
+    unverified: undefined,
+    ...(display || serverId ? { user: { ...auth.user, ...(display ? { display } : {}), ...(serverId ? { id: serverId } : {}) } } : {}),
+    ...(serverId ? { serverId } : {}),
+  }
+}
+
+/**
+ * 已经在库里的记录：用**可信校验**的结果刷新它的元信息与身份键。
+ *
+ * 与 `withVerifiedIdentity` 的分工：那个用于「凭证还没落库/正在落库」，
+ * 这个用于「记录已经在库里」（例如 `/status` 的迟到校验、探活）。
+ * 两者都**不切换当前账号**、**不会新建记录** —— 审计 F05/N02 与 F04 是同一条纪律。
+ *
+ * 返回是否真的更新了（记录不存在、或 token 已变 → 什么都不做）。
+ */
+export function refreshVerifiedIdentity(
+  id: string,
+  token: string,
+  user: { id?: string; display?: string } | undefined,
+): boolean {
+  const record = readAccount(id)
+  if (!record || record.token !== token) return false
+  const display = typeof user?.display === 'string' && user.display ? user.display : undefined
+  const serverId = typeof user?.id === 'string' && user.id ? user.id : undefined
+  updateAccount(id, {
+    ...(display || serverId
+      ? { user: { ...record.user, ...(display ? { display } : {}), ...(serverId ? { id: serverId } : {}) } }
+      : {}),
+    ...(serverId ? { serverId } : {}),
+    unverified: undefined,
+    lastVerifiedAt: new Date().toISOString(),
+    lastVerifyError: undefined,
+  })
+  return true
 }
 
 /**

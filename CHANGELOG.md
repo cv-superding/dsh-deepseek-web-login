@@ -2,6 +2,42 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.50 — 2026-09-13
+
+### 第一轮审计 F04（第二轮复核：**声称修了但生产身份链未接通**）：user.id 没进去重键
+
+库里是**两级去重**：先按 `serverId` 匹配同一个账号，再按 `token` 匹配。但真实登录路径
+（浏览器捕获 / 分区恢复 / 手动 token）拿到的 `user.id` **只被塞进 `user` 字段**、
+**从来没写进 `serverId`** —— 于是 token 一刷新，第一级去重就失效，同一个号在库里堆成好几条。
+既有测试是**手工传 `serverId`** 才通过的：那条链在生产上根本没接上，测试把它绕过去了。
+
+**身份归一**（`auth.ts` 新增两个 helper）：
+
+- `withVerifiedIdentity(auth, user)` —— 凭证**落库前**用：带上 `serverId: user.id`、清 `unverified`；
+- `refreshVerifiedIdentity(id, token, user)` —— 记录**已在库里**时用（`/status` 迟到校验、探活）：
+  记录不存在或 token 已变 → 什么都不做，**绝不新建、绝不切号**（与 F05/N02 同一条纪律）。
+
+接入点共五处：浏览器窗口登录、分区恢复、手动粘贴 token、`/status`（与 N02 同一处代码，顺带补 serverId）、
+探活成功分支。
+
+**兼容旧记录**：`serverId` 是后加的字段，老库里可能只有 `user.id`。去重时加一层
+「只认**没有 serverId**、且 `user.id` 相同」的匹配 —— 否则老用户重登一次就会多出一条。
+（备份文件自报的 id 仍然不参与授权，那条路径由 N01 的 `importAccounts` 单独把关。）
+
+### 测试
+
+- `check-round2.mjs` 22 → **25 项**：三条 F04 用例 —— 同账号 token 刷新后重登库里仍只有一条
+  （且 token 已更新）、旧记录（只有 `user.id`）能被认出来、`/status` 的迟到校验也要落 `serverId`。
+  输入用的是**真实登录形状**（而不是手工塞 `serverId`），正是原来被绕过的那条链。
+- `check-bundle.mjs` 新增一条产物断言（三个调用点特征）。
+- 反向验证 **3 处全红**：`withVerifiedIdentity` 不写 serverId / 去重不兼容旧记录 /
+  `refreshVerifiedIdentity` 不写 serverId；复原后全绿。
+- 33 个测试文件全绿。
+
+### 未处理
+
+旧项 F06 / F08 / F10 / F15 / F16 / F19 / F20 / F21 / F22 / F23。
+
 ## 0.1.49 — 2026-09-13
 
 ### 第二轮审计第五批：N02（迟到的 /status 校验把当前账号切回去）
