@@ -1529,6 +1529,12 @@ export interface CompletionParams {
   refFileIds?: readonly string[]
   signal?: AbortSignal
   idleTimeoutMs?: number
+  /**
+   * 建连阶段（建会话 + PoW + 等到响应头）的整体期限，默认 45 秒。
+   * 抽成可注入是为了能离线验证「建连挂住必须被中断」——这段原本没有统一限时，
+   * 是审计 F10 指出的"可无限等待"（idle watchdog 要到响应头之后才启动）。
+   */
+  connectTimeoutMs?: number
   /** 同一会话复用的轮次上限（0 = 每请求一个会话，用完即删）。 */
   sessionReuseTurns?: number
   onDeleteSession?: (sessionId: string) => void
@@ -1743,6 +1749,31 @@ export async function* streamWebCompletion(
     ;(timer as any).unref?.()
   }
 
+  /**
+   * F10：外层拥有本次调用创建过的**全部**会话。
+   *
+   * 建连阶段没有统一限时时，`createSession` 之后、响应头之前的任何失败都会让
+   * 「已建出来但还没人认领」的会话漏在服务端；`openCompletion` 内部的失败分支只覆盖
+   * 它自己 catch 得到的错误。超时/取消会**放弃**进行中的 `openCompletion`（不再等它），
+   * 所以必须在这里兜住它后续才返回的那些会话。
+   */
+  const owned = new Set<string>()
+  let finalized = false
+  const tracked: CompletionTransport = {
+    ...transport,
+    createSession: async (value, sig) => {
+      const id = await transport.createSession(value, sig)
+      if (finalized) {
+        // 已经收尾了才建出来（超时之后仍在跑的建连）→ 立刻归还，别留给下一次请求
+        retireSession(id)
+        cleanup(id)
+      } else {
+        owned.add(id)
+      }
+      return id
+    },
+  }
+
   try {
     signal.throwIfAborted()
     // N04：复用开启时全程串行（含跨账号）—— 共享槽位要一致的并发状态；
@@ -1758,12 +1789,21 @@ export async function* streamWebCompletion(
       )
       await wait(previous)
     }
-    arm(45_000, 'DeepSeek 建立流超时')
-    const opened = await openCompletion(
-      auth,
-      { ...params, sessionReuseTurns: limit, onDeleteSession: cleanup },
-      signal,
-      transport,
+    const connectMs =
+      Number.isFinite(params.connectTimeoutMs) && (params.connectTimeoutMs as number) > 0
+        ? Math.min(params.connectTimeoutMs as number, 600_000)
+        : 45_000
+    arm(connectMs, `DeepSeek 建立流超时（${connectMs}ms）`)
+    // F10：**用 wait() 包住** —— 建连期限靠 controller.abort 生效，而 abort 只对
+    // 「肯配合 signal 的传输」立即生效。包一层之后，即使底层 promise 永远不结算，
+    // 等待也会在 abort 的瞬间结束（否则「限时」形同虚设，会一直挂在 await 上）。
+    const opened = await wait(
+      openCompletion(
+        auth,
+        { ...params, sessionReuseTurns: limit, onDeleteSession: cleanup },
+        signal,
+        tracked,
+      ),
     )
     sessionId = opened.sessionId
     body = opened.resp.body
@@ -1804,9 +1844,12 @@ export async function* streamWebCompletion(
     // N04：**提前结束（调用方 return / 取消）也必须退役会话**。
     // 旧实现只在 HTTP 失败分支退役，stream generator 被提前 return 时不退役 ——
     // 于是下一次请求会接着用一个"上一条流还没消费完"的会话。
-    if (sessionId && (!complete || poisoned || limit === 0)) {
-      retireSession(sessionId)
-      cleanup(sessionId)
+    // F10：改成遍历本次创建过的**全部**会话；唯一放过的只有「正常跑完且仍在复用」的那个。
+    finalized = true
+    for (const id of owned) {
+      if (id === sessionId && complete && !poisoned && limit > 0) continue
+      retireSession(id)
+      cleanup(id)
     }
     release?.()
   }

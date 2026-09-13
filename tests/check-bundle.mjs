@@ -190,6 +190,22 @@ const checks = {
     host.includes('uploadCache.useScope(auth.token)') &&
     host.includes('uploadCache.prune()') &&
     host.includes('uploadCache.set(key, uploaded.fileId, Date.now(), scope)'),
+  // 审计 F10：建连阶段必须有整体期限，而且**等待本身要可取消** ——
+  // abort 只对"肯配合 signal 的传输"立即生效，所以 openCompletion 也被包进了 wait()。
+  // 断言调用点：`params.connectTimeoutMs`（3 处读取）+ `await wait(openCompletion(`
+  // （拿掉 wait 包装这条立刻红 —— 那正是"限时形同虚设"的形态）。
+  'host 建连期限可注入且等待可取消（wait 包住 openCompletion）':
+    host.includes('params.connectTimeoutMs') && host.includes('await wait(openCompletion('),
+  // 审计 F10：收尾要归还**本次创建过的全部会话** —— 超时/取消会放弃进行中的建连，
+  // 它之后才返回的会话必须有人认领（旧实现只管最后那一个 sessionId）。
+  'host 收尾归还本次创建的全部会话':
+    host.includes('finalized = true') && host.includes('for (const id of owned)'),
+  // 审计 F08：登录轮询必须是 startCapturePoll（串行 + 至多提交一次）。
+  // `committed = true;` 在产物里有 2 处（成功路径 + fail-open 路径），正是"先占位再提交"。
+  'host 登录轮询串行且至多提交一次':
+    host.includes('function startCapturePoll(') &&
+    host.includes('stopPolling = startCapturePoll(') &&
+    host.includes('committed = true;'),
   // 审计 F23：诊断只落元信息（长度 + sha256），且写在 DSH_HOME 下
   'host 丢弃载荷只记元信息（不落原文）':
     host.includes('rejected-meta.jsonl') && host.includes('sha256: createHash'),

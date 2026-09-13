@@ -953,6 +953,406 @@ await test('F15：页面筛选按 origin 严格比较（不能 includes 命中�
   assert.equal(isDeepSeekPage(null), false)
 })
 
+// ── 第一轮审计 F10（高）：建连阶段无限等待 + 创建会话后失败无人回收 ──
+// 触发现场：createSession 成功之后、拿到响应头之前（PoW / 网络 / 建连挂住）出错。
+// 旧实现的 idle watchdog 要等响应头之后才启动，所以这一段完全没有限时；
+// 而失败分支又只有 openCompletion 自己 catch 得到的那部分会回收会话。
+// 现状核对（2026-09-13）：N04 重写时已经落了「建立阶段限时 / 只等 next 时计 idle /
+// 失败即退役 / 放行 AdapterLlmError」，但**这两条路径一条断言都没有**，所以补在这里。
+
+await test('F10：PoW 抛错时必须回收刚建出来的会话（不能漏在服务端）', async () => {
+  // ⚠️ 这条断言由**两层**保证，互为兜底：
+  //    ① openCompletion 的 fetch catch（失败即退役 + 通知）；
+  //    ② streamWebCompletion 收尾时遍历「本次创建过的全部会话」（F10 新增的兜底）。
+  //    反向验证必须**两层一起改掉**才会红 —— 只改 ① 时 ② 会兜住，只改 ② 时 ① 会兜住。
+  resetSessionReuse()
+  const { AdapterLlmError } = await import('../src/auth.ts')
+  const deleted = []
+  const transport = {
+    createSession: async () => 'sess-f10-pow',
+    powHeader: async () => {
+      throw new AdapterLlmError('PoW 失败', 'PROVIDER_ERROR')
+    },
+  }
+  setFetchImpl(async () => new Response('', { status: 200 }))
+  let thrown
+  try {
+    for await (const _ of streamWebCompletion(
+      authA,
+      {
+        prompt: 'P',
+        thinkingEnabled: false,
+        modelType: 'default',
+        idleTimeoutMs: 5_000,
+        onDeleteSession: (id) => deleted.push(id),
+      },
+      transport,
+    )) {
+      void _
+    }
+  } catch (error) {
+    thrown = error
+  }
+  assert.ok(thrown, '自证：PoW 抛错必须向上抛（否则这条用例没走到被测路径）')
+  assert.deepEqual(deleted, ['sess-f10-pow'], `建出来又失败的会话必须归还，实际 ${JSON.stringify(deleted)}`)
+})
+
+await test('F10：建连阶段挂住时必须被中断（不能无限 await）', async () => {
+  // ⚠️ 反向验证：去掉 `wait(openCompletion(...))` 的包装（直接 await openCompletion）
+  //    → 这条变红：下面这个 createSession 永不结算，等待永远不会结束（测试会超时）。
+  //    注：abort 只对"肯配合 signal 的传输"立即生效，包一层 wait() 才能保证限时真的有效。
+  resetSessionReuse()
+  let sessionResolve
+  // ⚠️ 这里必须留一个 **ref 的** 句柄占住事件循环：
+  // arm() 里的超时定时器是 `unref()` 的（刻意不为了超时把进程吊住），
+  // 而建连挂住时事件循环里没有别的 ref 句柄 → Node 会直接退出，
+  // 表现为 "unsettled top-level await"，看起来像实现挂了。
+  // 真实运行环境里 DSH 自己就有活的事件循环，所以 unref 是对的，问题只在测试夹具。
+  const hold = setTimeout(() => sessionResolve?.("sess-f10-hang"), 8_000)
+  const transport = {
+    // 永不主动结算：模拟对端不接受连接 / 不响应
+    createSession: () =>
+      new Promise((resolve) => {
+        sessionResolve = (value) => {
+          clearTimeout(hold)
+          resolve(value)
+        }
+      }),
+    powHeader: async () => 'pow',
+  }
+  setFetchImpl(async () => new Response('', { status: 200 }))
+  const started = Date.now()
+  let thrown
+  try {
+    for await (const _ of streamWebCompletion(
+      authA,
+      {
+        prompt: 'P',
+        thinkingEnabled: false,
+        modelType: 'default',
+        idleTimeoutMs: 5_000,
+        connectTimeoutMs: 250, // 注入缝：把 45 秒压到 250ms 才能离线验证
+        onDeleteSession: () => {},
+      },
+      transport,
+    )) {
+      void _
+    }
+  } catch (error) {
+    thrown = error
+  }
+  const elapsed = Date.now() - started
+  assert.ok(thrown, '自证：挂住的建连必须抛错，而不是一直等')
+  assert.equal(thrown.code, 'TIMEOUT', `必须是建连超时，实际 ${thrown.code}`)
+  assert.ok(elapsed < 5_000, `必须在注入的限期附近结束，实际耗时 ${elapsed}ms`)
+  // 收尾：把那次永不结算的建连放掉，免得留下挂起的 promise
+  sessionResolve?.('sess-f10-hang')
+})
+
+await test('F10：超时之后才建出来的会话也要归还（放弃建连不等于放弃会话）', async () => {
+  // ⚠️ 这条断言同样由**两层**保证：
+  //    ① tracked.createSession 里「已收尾 → 就地归还」的分支（F10 新增）；
+  //    ② leaseSession 里「建会话期间被取消 → 就地回收」的分支（N04 原有）。
+  //    反向验证要两层一起改才会红。两者都指向同一件事：没人认领的会话不许留在服务端。
+  resetSessionReuse()
+  const deleted = []
+  const transport = {
+    // 比建连期限（200ms）晚 300ms 才返回 —— 那时外层已经收尾了
+    createSession: () =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve('sess-f10-late'), 300)
+      }),
+    powHeader: async () => 'pow',
+  }
+  setFetchImpl(async () => new Response('', { status: 200 }))
+  let thrown
+  try {
+    for await (const _ of streamWebCompletion(
+      authA,
+      {
+        prompt: 'P',
+        thinkingEnabled: false,
+        modelType: 'default',
+        idleTimeoutMs: 5_000,
+        connectTimeoutMs: 200,
+        onDeleteSession: (id) => deleted.push(id),
+      },
+      transport,
+    )) {
+      void _
+    }
+  } catch (error) {
+    thrown = error
+  }
+  assert.equal(thrown?.code, 'TIMEOUT', '自证：这次超时确实发生了（否则没走到收尾后的路径）')
+  for (let i = 0; i < 40 && !deleted.includes('sess-f10-late'); i++) {
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  assert.ok(
+    deleted.includes('sess-f10-late'),
+    `超时后迟到的会话必须被归还，实际归还了 ${JSON.stringify(deleted)}`,
+  )
+})
+
+// ── 第一轮审计 F08（高）：登录轮询重叠 / 重复提交 / 关闭后迟到写回 ──
+// 触发现场：用户点「登录新账号」→ 窗口里登录 → 校验耗时超过轮询周期 / 中途关窗。
+// 旧写法是 `setInterval(() => void (async () => {...})())`：多轮可同时在跑、
+// 没有"完成"守卫、也没有 catch；而且 `finish` 的落库动作没有串行保护，
+// 于是"添加模式"会被消费两次（第二次退化成普通切换）。
+// 修法：轮询抽成 startCapturePoll（串行 + 至多提交一次 + 停止后丢弃迟到结果），
+// 并让 commitCapturedAuth 的 add 分支 try/finally 消费添加模式。
+
+const { startCapturePoll } = await import('../src/login.ts')
+const { beginAddAccount, addModeActive, commitCapturedAuth } = await import('../src/account-add.ts')
+
+await test('F08：轮询必须串行（一轮没跑完不许开始下一轮）', async () => {
+  // ⚠️ 反向验证：把轮询改回 `setInterval(() => void round(), intervalMs)`
+  //    → 这条变红（并发轮次 > 1）。
+  let live = 0
+  let maxLive = 0
+  let rounds = 0
+  const commits = []
+  const stop = startCapturePoll({
+    intervalMs: 20,
+    capture: async () => {
+      live += 1
+      maxLive = Math.max(maxLive, live)
+      rounds += 1
+      await new Promise((r) => setTimeout(r, 60)) // 一轮比周期长 3 倍
+      live -= 1
+      return []
+    },
+    verify: async () => ({ ok: false }),
+    commit: async (token) => {
+      commits.push(token)
+    },
+  })
+  await new Promise((r) => setTimeout(r, 260))
+  stop()
+  assert.equal(maxLive, 1, `同一时刻只允许一轮在跑，实际 ${maxLive} 轮并发`)
+  assert.ok(rounds >= 2, `自证：确实跑了多轮（否则这条测不到重叠），实际 ${rounds} 轮`)
+  assert.deepEqual(commits, [], '没有候选时不该提交')
+})
+
+await test('F08：校验通过时"提交"至多一次，且提交后停止轮询', async () => {
+  // ⚠️ 反向验证：去掉 committed 占位（只靠 stop()）→ 这条变红（会提交多次）。
+  let captures = 0
+  const commits = []
+  const stop = startCapturePoll({
+    intervalMs: 10,
+    capture: async () => {
+      captures += 1
+      return ['tok-1']
+    },
+    verify: async () => {
+      await new Promise((r) => setTimeout(r, 50)) // 比周期长：旧写法这里会重叠
+      return { ok: true }
+    },
+    commit: async (token, verified) => {
+      commits.push([token, verified])
+      await new Promise((r) => setTimeout(r, 30))
+    },
+  })
+  await new Promise((r) => setTimeout(r, 300))
+  stop()
+  assert.deepEqual(commits, [['tok-1', true]], `提交必须恰好一次，实际 ${JSON.stringify(commits)}`)
+  assert.ok(captures >= 1, '自证：采集确实发生过')
+})
+
+await test('F08：连续校验失败时按 fail-open 落盘，也只提交一次', async () => {
+  let attempts = 0
+  const commits = []
+  const errors = []
+  const stop = startCapturePoll({
+    intervalMs: 10,
+    maxAttempts: 3,
+    capture: async () => {
+      attempts += 1
+      return ['tok-fail']
+    },
+    verify: async () => ({ ok: false, error: '校验没过' }),
+    commit: async (token, verified) => {
+      commits.push([token, verified])
+    },
+    onError: (m) => errors.push(m),
+  })
+  await new Promise((r) => setTimeout(r, 400))
+  stop()
+  assert.ok(attempts >= 3, `自证：确实跑满 3 轮，实际 ${attempts}`)
+  assert.deepEqual(commits, [['tok-fail', false]], `fail-open 落盘必须恰好一次，实际 ${JSON.stringify(commits)}`)
+  assert.ok(errors.length >= 1, '失败文案要报给 UI')
+})
+
+await test('F08：stop() 之后迟到的校验结果必须丢弃（关窗后不许写回）', async () => {
+  // ⚠️ 反向验证：去掉两处 `if (stopped || committed) return` → 这条变红
+  //    （关掉窗口之后，还在 await 里的那次校验会把凭证写回来）。
+  const commits = []
+  let verifyStarted = false
+  const stop = startCapturePoll({
+    intervalMs: 10,
+    capture: async () => ['tok-late'],
+    verify: async () => {
+      verifyStarted = true
+      await new Promise((r) => setTimeout(r, 120))
+      return { ok: true } // 校验"通过"了，但此时窗口已经关了
+    },
+    commit: async (token, verified) => {
+      commits.push([token, verified])
+    },
+  })
+  for (let i = 0; i < 40 && !verifyStarted; i++) await new Promise((r) => setTimeout(r, 10))
+  assert.ok(verifyStarted, '自证：校验确实已经开始（否则没走到"迟到"这条路径）')
+  stop() // = 关窗
+  await new Promise((r) => setTimeout(r, 250))
+  assert.deepEqual(commits, [], `关闭之后不许写回，实际写了 ${JSON.stringify(commits)}`)
+})
+
+await test('F08：提交本身抛错时不重试（至多一次），但要报出来', async () => {
+  const commits = []
+  const errors = []
+  const warns = []
+  const stop = startCapturePoll({
+    intervalMs: 10,
+    capture: async () => ['tok-boom'],
+    verify: async () => ({ ok: true }),
+    commit: async (token) => {
+      commits.push(token)
+      throw new Error('disk full')
+    },
+    onError: (m) => errors.push(m),
+    logger: { warn: (m) => warns.push(m) },
+  })
+  await new Promise((r) => setTimeout(r, 250))
+  stop()
+  assert.equal(commits.length, 1, `提交只尝试一次，实际 ${commits.length} 次`)
+  assert.ok(errors.some((m) => m.includes('重新发起登录')), '必须告诉用户可以重新发起登录')
+  assert.ok(warns.some((m) => m.includes('disk full')), '失败原因要落日志（旧写法这里是未处理拒绝）')
+})
+
+await test('F08：落库抛错时也必须消费「添加模式」（否则下一次提交会退化成切换）', async () => {
+  // ⚠️ 反向验证：去掉 commitCapturedAuth add 分支的 try/finally（把 endAddAccount()
+  //    放回 return 之前）→ 这条变红：模式一直挂着。
+  const fsDefault = (await import('node:fs')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+  const originalRename = fsDefault.renameSync
+  beginAddAccount()
+  assert.equal(addModeActive(), true, '自证：确实进入了添加模式')
+  fsDefault.renameSync = () => {
+    throw Object.assign(new Error('AUDIT_F08_WRITE_FAILURE'), { code: 'EACCES' })
+  }
+  syncBuiltinESMExports()
+  try {
+    assert.throws(
+      () => commitCapturedAuth({ token: 'tok-f08', cookie: 'c' }),
+      /AUDIT_F08_WRITE_FAILURE/,
+      '自证：落库确实失败了（否则测的是成功路径）',
+    )
+    assert.equal(addModeActive(), false, '落库失败也必须消费添加模式')
+  } finally {
+    fsDefault.renameSync = originalRename
+    syncBuiltinESMExports()
+  }
+})
+
+// ── 第一轮审计 F20（中）：构建/依赖与平台契约不完整 ──
+// 触发点：Windows 上只有 Node/npm、没有 Bash 时 `npm run build` 直接失败；
+// 缺依赖时 `npx --yes tsdown@^0.22.14` 会联网下载，断了网就构建不了，
+// 而且 `^` 是范围，同一份源码在不同时间可能解析到不同的依赖树；
+// CI 只列了 7 个测试文件名（会漏跑），也没有构建。
+// 这几条都是**契约**（文件里写了什么），所以直接断言文件内容 —— 改坏了立刻红。
+
+const { readFileSync: readText } = await import('node:fs')
+const { pickOfflineTests, isManualProbe } = await import('../scripts/test-files.mjs')
+
+const PKG_ROOT = process.cwd()
+const readRepoFile = (rel) => readText(join(PKG_ROOT, ...rel.split('/')), 'utf-8')
+
+await test('F20：npm run build 必须是 Node 入口（Windows 无 Bash 也能构建）', async () => {
+  // ⚠️ 反向验证：把 scripts.build 改回 `bash scripts/build.sh` → 这条变红。
+  const pkg = JSON.parse(readRepoFile('package.json'))
+  assert.ok(pkg.scripts.build.startsWith('node '), `build 必须是 node 入口，实际：${pkg.scripts.build}`)
+  assert.ok(!/\bbash\b/.test(pkg.scripts.build), 'build 不得依赖 Bash')
+  assert.ok(existsSync(join(PKG_ROOT, 'scripts', 'build.mjs')), 'scripts/build.mjs 必须存在')
+  // 自证：真去读一下这个文件（否则"存在"可能只是个空壳）
+  const buildScript = readRepoFile('scripts/build.mjs')
+  assert.ok(buildScript.includes("from 'node:child_process'"), '自证：构建脚本应当真的起子进程')
+  assert.ok(buildScript.includes('spawnSync'), '自证：用 spawnSync 调本地 tsdown')
+  // 正向契约：用「当前 Node + 本地 tsdown 的 bin」，而不是让 shell 去找命令
+  assert.ok(buildScript.includes('process.execPath'), 'build.mjs 必须用当前 Node 进程执行本地 tsdown')
+  assert.ok(buildScript.includes("require.resolve('tsdown/package.json')"), 'build.mjs 必须解析本地 tsdown 的位置')
+})
+
+await test('F20：构建链路不得联网下载工具（去掉 npx 兜底）', async () => {
+  // ⚠️ 反向验证：在 build.mjs / build.sh / prepare.mjs 里加回 `spawnSync('npx', ...)` → 变红。
+  for (const rel of ['scripts/build.mjs', 'scripts/build.sh', 'scripts/prepare.mjs']) {
+    const text = readRepoFile(rel)
+    // 只认「把 npx 当命令调用」的形态 —— 注释里解释"为什么不用 npx"是允许的
+    assert.ok(!/['"`]npx['"`]/.test(text), `${rel} 不得把 npx 当命令调用（断网就构建不了）`)
+    assert.ok(!/npx\s+--yes/.test(text), `${rel} 不得出现"联网下载工具"的调用形式`)
+  }
+  // build.sh 只能是薄包装，实现在 build.mjs（两份实现会漂移）
+  assert.ok(readRepoFile('scripts/build.sh').includes('node scripts/build.mjs'), 'build.sh 必须转调 build.mjs')
+  assert.ok(readRepoFile('scripts/prepare.mjs').includes('build.mjs'), 'prepare 也必须转调 build.mjs')
+})
+
+await test('F20：开发依赖固定精确版本 + 声明 engines（有锁文件则校验同源）', async () => {
+  // ⚠️ 反向验证：把 devDependencies 的版本改回 `^0.22.14` / 删掉 engines → 变红。
+  const pkg = JSON.parse(readRepoFile('package.json'))
+  for (const [name, range] of Object.entries(pkg.devDependencies)) {
+    assert.ok(/^\d+\.\d+\.\d+$/.test(range), `${name} 必须固定精确版本，实际 ${range}`)
+  }
+  assert.ok(
+    pkg.engines && /22\.18|24\.11/.test(pkg.engines.node),
+    `必须声明 engines.node（跑 .ts 源码与 tsdown 的下限），实际 ${JSON.stringify(pkg.engines)}`,
+  )
+  // 锁文件与"用 npm ci 还是 npm install"必须**同时**成立，不允许自相矛盾：
+  // 有锁文件 → CI 走 npm ci（可复现）；没有锁文件 → CI 必须走 npm install（npm ci 会直接失败）。
+  if (existsSync(join(PKG_ROOT, 'package-lock.json'))) {
+    const lock = JSON.parse(readRepoFile('package-lock.json'))
+    assert.equal(lock.name, pkg.name, 'lockfile 必须与 package.json 同源')
+    assert.equal(lock.version, pkg.version, 'lockfile 版本必须跟上 package.json')
+  } else {
+    const install = readRepoFile('scripts/install-deps.mjs')
+    assert.ok(install.includes('npm install'), '没有锁文件时安装脚本必须回退到 npm install')
+    assert.ok(install.includes('npm ci'), '有锁文件时必须用 npm ci（这条断言保证回退不是永久的）')
+  }
+})
+
+await test('F20：离线用例清单排除 probe-*（会打真实账号），且覆盖全部 check-*', async () => {
+  // ⚠️ 反向验证：把 pickOfflineTests 的正则放宽成 /.*\.mjs$/ → 这条变红。
+  const testsDir = join(PKG_ROOT, 'tests')
+  const picked = pickOfflineTests(testsDir)
+  const all = readdirSync(testsDir)
+  assert.ok(picked.includes('logic-test.mjs'), '纯逻辑断言必须在清单里')
+  assert.ok(picked.includes('check-round2.mjs'), '本轮用例必须在清单里')
+  for (const name of picked) {
+    assert.ok(!isManualProbe(name), `人工诊断脚本不许进自动化：${name}`)
+  }
+  // 自证：目录里**确实**有 probe-*，所以"排除"不是因为不存在
+  assert.ok(all.some((n) => n.startsWith('probe-')), '自证：目录里应当有 probe-*.mjs')
+  assert.equal(picked.length, all.filter((n) => /^check-.*\.mjs$/.test(n)).length + 1, 'check-* 一个都不能漏')
+})
+
+await test('F20：CI 三平台都装依赖、构建、跑全量用例，并固定 Node 小版本', async () => {
+  // ⚠️ 反向验证：把 ci.yml 的 node-version 改回 `24`（范围）或删掉构建步骤 → 变红。
+  const ci = readRepoFile('.github/workflows/ci.yml')
+  assert.ok(ci.includes('node scripts/install-deps.mjs'), 'CI 必须装依赖（脚本内部按有无锁文件选 npm ci / npm install）')
+  assert.ok(ci.includes('node scripts/build.mjs'), 'CI 必须构建（否则产物可能过期）')
+  assert.ok(ci.includes('node scripts/test-offline.mjs'), 'CI 必须跑全量离线用例')
+  assert.ok(
+    /node-version:\s*'?\d+\.\d+\.\d+'?/.test(ci),
+    'Node 版本必须固定到小版本（tsdown 要求 ^22.18.0 || >=24.11.0）',
+  )
+  assert.ok(ci.includes('windows-latest'), '必须覆盖 Windows（这正是「依赖 Bash」那类问题的现场）')
+})
+
+await test('F20：release.yml 也用同一套工具链（发布产物与 CI 同源）', async () => {
+  const rel = readRepoFile('.github/workflows/release.yml')
+  assert.ok(rel.includes('node scripts/install-deps.mjs'), '发布也必须走同一个安装入口')
+  assert.ok(rel.includes('node scripts/build.mjs'), '发布必须显式构建')
+  assert.ok(rel.includes('node scripts/test-offline.mjs'), '发布前必须跑全量离线用例')
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)

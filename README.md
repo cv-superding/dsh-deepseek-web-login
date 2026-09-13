@@ -435,10 +435,15 @@ echo '{"mode":"probe"}' > "$HOME/.dsh/web-login/probe-request.json"
 ## 开发
 
 ```bash
-npx tsdown --config tsdown.config.ts   # 构建 host(lib/index.js) + client(lib/client.js)
-bash scripts/build.sh                  # 同上（含 npx 兜底）
+npm ci                                 # 安装开发依赖（首次 / 换版本后）
+node scripts/build.mjs                 # 构建 host(lib/index.js) + client(lib/client.js)
+node scripts/test-offline.mjs          # 全量离线用例
+node tests/check-bundle.mjs            # 产物核对
 node scripts/make-dev-copy.mjs <后缀>   # 生成开发副本（见下）
 ```
+
+构建走**本地已安装的** tsdown（不再 npx 联网下载、不再要求 Bash，Windows 直接可用）；
+缺依赖时会明确报错并提示执行 `npm ci`。
 
 **迭代注意（实测坑）**：当前 DSH 版本移除了热重载所依赖的 loader API，而 Node ESM 模块缓存以
 「解析后的文件路径」为键 —— 同一路径重新注入仍会命中旧模块实例。改代码后需**换包名/换路径**注入：

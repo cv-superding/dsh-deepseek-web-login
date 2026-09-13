@@ -8,35 +8,36 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 三平台都跑：审计 F20 指出的正是"构建入口依赖 Unix shell"这类平台契约问题，
+    # 只跑 ubuntu 是发现不了的。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
+      # 固定小版本：`node-version: 24` 会装到当时的 24.x，而 tsdown 0.22.14 要求
+      # `^22.18.0 || >=24.11.0` —— 早期 24.x（如 24.0~24.10）装上了也构建不了。
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.21.0'
+          cache: npm
 
-      # 纯逻辑断言：序列化 / 工具调用过滤（JSON+XML）/ JSON 宽容修复 / SSE 状态机 /
-      # 会话生命周期（删除时机 + 失效透明重试）/ token 解包 / 掩码。
-      # 直接跑源码（Node 24 原生剥离 TS 类型），不需要构建。
-      - name: 纯逻辑断言
-        run: node tests/logic-test.mjs
+      # 装依赖：有锁文件走 npm ci，没有就回退 npm install（并打印警告）。
+      # --ignore-scripts 跳过 prepare，构建在下面显式做。
+      - name: 安装依赖
+        run: node scripts/install-deps.mjs
 
-      - name: 坏 JSON 恢复回归
-        run: node tests/check-badjson-recovery.mjs
+      - name: 构建（host + client，不依赖 Bash）
+        run: node scripts/build.mjs
 
-      - name: DSML 前缀回归
-        run: node tests/check-dsml-doubled-bars.mjs
+      # 全量离线用例：扫 tests/check-*.mjs + logic-test.mjs（新增用例自动纳入）。
+      # 之前这里只列了 7 个文件名，会漏跑；probe-*.mjs 需要真实账号，不在其中。
+      - name: 全量离线用例
+        run: node scripts/test-offline.mjs
 
-      - name: 转写回声守卫回归
-        run: node tests/check-transcript-echo.mjs
-
-      - name: 会话生命周期回归
-        run: node tests/check-session-lifecycle.mjs
-
-
-      - name: 退出账号回归
-        run: node tests/check-logout.mjs
       # 产物核对：确认 lib/ 里确实带着关键修复（防止「改了源码没重新构建就提交」）
       - name: 产物核对
         run: node tests/check-bundle.mjs

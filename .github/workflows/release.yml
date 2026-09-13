@@ -20,14 +20,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 与 CI 同一套固定版本：发布产物必须由**确定的工具链**构建出来。
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.21.0'
+          cache: npm
 
-      - name: 发布前先跑断言与产物核对
-        run: |
-          node tests/logic-test.mjs
-          node tests/check-bundle.mjs
+      # 审计 F20：以前这里直接用环境里的全局工具，且只跑 2 个测试；
+      # 现在走同一套安装入口 + 显式构建 + 全量离线用例（发出去的包必须与 CI 同源）。
+      - name: 安装依赖
+        run: node scripts/install-deps.mjs
+
+      - name: 构建（host + client）
+        run: node scripts/build.mjs
+
+      - name: 发布前跑全量离线用例
+        run: node scripts/test-offline.mjs
 
       - name: 打包
         run: npm pack

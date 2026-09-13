@@ -68,10 +68,14 @@ const activeFetch = (i, init) => (injected ?? fetch)(i, init)   // ✓ 每次现
 ## 3. 开发流程
 
 ```bash
-bash scripts/build.sh          # 构建 host(lib/index.js) + client(lib/client.js)
+npm ci                         # 或 npm install（首次）
+node scripts/build.mjs         # 构建 host(lib/index.js) + client(lib/client.js)
+node scripts/test-offline.mjs  # 全量离线用例（tests/check-*.mjs + logic-test.mjs）
 node tests/check-bundle.mjs    # 产物核对：关键改动有没有真的进 lib
-for f in tests/check-*.mjs tests/logic-test.mjs; do case "$f" in *probe*) continue;; esac; node "$f" || echo "FAIL $f"; done
 ```
+
+`bash scripts/build.sh` 仍可用（它只是转调 `node scripts/build.mjs`）。
+构建**不再**通过 npx 联网下载 tsdown：缺依赖时会直接报错并提示 `npm ci`。
 
 **提交前必须做到**：全部测试文件退出码 0（`tests/probe-*.mjs` 会真的打网络，默认跳过）。
 

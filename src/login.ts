@@ -148,7 +148,12 @@ function observePageFingerprint(win: any, report: { pageUa?: string; pageBrands?
 }
 
 let loginWindow: any = null
-let pollTimer: ReturnType<typeof setInterval> | null = null
+/**
+ * 停止当前登录轮询：清定时器 **并且**取消进行中的校验。
+ * F08 之前存的是定时器句柄，`clearInterval` 只能阻止"下一轮"，
+ * 拦不住已经在 await 里的那一轮 —— 窗口关闭后它照样会把凭证写回来。
+ */
+let stopPolling: (() => void) | null = null
 
 export interface LoginProgress {
   open: boolean
@@ -305,12 +310,124 @@ export function hasStoredAuth(): boolean {
 }
 
 function cleanup(): void {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+  if (stopPolling) {
+    try {
+      stopPolling()
+    } catch {}
+    stopPolling = null
   }
   loginWindow = null
   progress = { ...progress, open: false }
+}
+
+export interface CapturePollOptions {
+  /** 一轮采集：读页面 / cookie，返回可用的 token 候选（空数组 = 还没登录上）。 */
+  capture: () => Promise<string[]>
+  /** 校验单个候选（调用方负责加超时与取消信号）。 */
+  verify: (token: string) => Promise<{ ok: boolean; error?: string }>
+  /** 校验通过（或 fail-open）时提交。**至多被调用一次**。 */
+  commit: (token: string, verified: boolean) => Promise<void>
+  /** 采集到中间态（用于 UI 提示）。 */
+  onCaptured?: () => void
+  /** 一轮里所有候选都没通过 / 出错时的提示文案。 */
+  onError?: (message: string) => void
+  intervalMs?: number
+  maxAttempts?: number
+  logger?: { warn?: (message: string) => void }
+}
+
+/**
+ * 登录轮询（F08）。三条不变量都在这里守住，抽成独立函数是为了**能离线验证**——
+ * 原来它写在 Electron 的 `setInterval` 回调里，一条都测不了。
+ *
+ *  ① **串行**：一轮跑完才排下一轮（旧写法是 `setInterval` + 异步体，
+ *     校验耗时超过 2 秒时会有多轮同时在跑）；
+ *  ② **至多提交一次**：`committed` 先占位再提交，成功与 fail-open 两条路都走它
+ *     （旧写法下第二轮会把"添加新账号"再提交一次，而添加模式已被消费 → 变成普通切换）；
+ *  ③ **停止后不写回**：`stop()` 之后，已经在 `await` 里的那一轮结果一律丢弃。
+ *
+ * 返回的 `stop()` 可重复调用。
+ */
+export function startCapturePoll(options: CapturePollOptions): () => void {
+  const intervalMs =
+    Number.isFinite(options.intervalMs) && (options.intervalMs as number) > 0 ? (options.intervalMs as number) : 2000
+  const maxAttempts =
+    Number.isFinite(options.maxAttempts) && (options.maxAttempts as number) > 0 ? (options.maxAttempts as number) : 3
+  const abort = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let stopped = false
+  let committed = false
+  let running = false
+  let attempts = 0
+
+  const stop = (): void => {
+    stopped = true
+    abort.abort()
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  const schedule = (): void => {
+    if (stopped || committed) return
+    timer = setTimeout(() => {
+      void round()
+    }, intervalMs)
+    ;(timer as any).unref?.()
+  }
+
+  const round = async (): Promise<void> => {
+    timer = null
+    // 串行：上一轮还在跑就什么也不做（定时器只在上一轮的 finally 里排，所以这是兜底）
+    if (stopped || committed || running) return
+    running = true
+    try {
+      const candidates = await options.capture()
+      // 采集期间被关闭 / 已经提交过 → 丢弃这一轮
+      if (stopped || committed) return
+      options.onCaptured?.()
+      if (!candidates.length) return
+      attempts += 1
+
+      let lastError = ''
+      for (const token of candidates) {
+        const check = await options.verify(token)
+        // ⚠️ 关键：校验期间窗口可能已经关了（或已提交过）。
+        // 迟到的结果必须丢掉 —— 否则就是"关了窗口还会把凭证写回来"。
+        if (stopped || committed) return
+        if (check.ok) {
+          committed = true // 先占位：保证至多一次（即便 commit 自己抛错也不重试）
+          stop()
+          await options.commit(token, true)
+          return
+        }
+        lastError = check.error ?? 'validation failed'
+      }
+      options.onError?.(lastError)
+      if (attempts >= maxAttempts) {
+        committed = true
+        stop()
+        await options.commit(candidates[0], false)
+      }
+    } catch (error: any) {
+      // 旧写法这里是裸 async IIFE，没有 catch —— 写盘失败会形成未处理拒绝。
+      // 已提交过的失败也要报出来：提交只尝试一次，用户需要知道并重新发起登录。
+      if (!stopped || committed) {
+        options.onError?.('登录捕获或保存失败，请重新发起登录')
+        options.logger?.warn?.(`deepseek-web: 登录捕获或保存失败: ${error?.message ?? error}`)
+      }
+    } finally {
+      running = false
+      schedule()
+    }
+  }
+
+  timer = setTimeout(() => {
+    void round()
+  }, intervalMs)
+  ;(timer as any).unref?.()
+  return stop
 }
 
 /** 页面内取值脚本：处理 AppKit 包装（{"value":...}）与裸值两种形态。 */
@@ -542,6 +659,9 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
     logger?.warn?.(`deepseek-web login: header capture unavailable: ${error?.message ?? error}`)
   }
 
+  // F08：窗口关闭时用来取消"已经在 await 里"的校验（stopPolling 里会 abort 它）
+  const captureAbort = new AbortController()
+
   const win = new BrowserWindow({
     width: 1180,
     height: 840,
@@ -565,6 +685,8 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
   const finish = async (auth: WebAuth, verified: boolean): Promise<void> => {
     // 走统一的落库动作：添加模式（点了「登录新账号」）下只入库、不切换当前账号，
     // 否则每加一个号就把正在用的号顶掉了。见 account-add.ts。
+    // F08：提交动作的"至多一次"由 startCapturePoll 的 committed 占位保证，
+    // 这里只负责落库与 UI（不再需要额外的完成标记）。
     const commit = commitCapturedAuth(auth)
     const tail = commit.mode === 'add' ? '（已加入账号库，当前账号未改动）' : ''
     lastResult = {
@@ -593,35 +715,35 @@ export async function openLoginWindow(logger?: { info?: (m: string) => void; war
     }, 3500)
   }
 
-  let attempts = 0
-  pollTimer = setInterval(() => {
-    void (async () => {
-      if (!loginWindow) return
+  // F08：串行轮询 + 至多提交一次 + 停止后不写回（详见 startCapturePoll 的注释）。
+  // 校验用的 signal 同时受「窗口关闭」和「15 秒单次超时」约束：
+  // 旧写法没有超时，一次挂住的校验会一直占着这一轮。
+  let verifiedAuth: WebAuth | undefined
+  stopPolling = startCapturePoll({
+    capture: async () => {
       await readPage(win, buffer)
       await readCookies(ses, buffer)
+      return tokenCandidates(buffer)
+    },
+    verify: async (token) => {
+      const auth = buildAuth(buffer, token, false)
+      const signal = AbortSignal.any([captureAbort.signal, AbortSignal.timeout(15_000)])
+      const check = await validateAuth(auth, signal)
+      if (check.ok) verifiedAuth = withVerifiedIdentity(auth, check.user)
+      return { ok: !!check.ok, ...(check.error ? { error: check.error } : {}) }
+    },
+    commit: async (token, verified) => {
+      const auth = verified && verifiedAuth ? verifiedAuth : buildAuth(buffer, token, true)
+      await finish(auth, verified)
+    },
+    onCaptured: () => {
       progress.captured = progressFrom(buffer)
-
-      const candidates = tokenCandidates(buffer)
-      if (candidates.length === 0) return
-      attempts += 1
-
-      let lastError = ''
-      for (const token of candidates) {
-        const auth = buildAuth(buffer, token, false)
-        const check = await validateAuth(auth)
-        if (check.ok) {
-          await finish(withVerifiedIdentity(auth, check.user), true)
-          return
-        }
-        lastError = check.error ?? 'validation failed'
-      }
-      progress = { ...progress, lastError }
-
-      // fail-open：连续 3 轮校验不通过也落盘，避免凭证彻底丢失
-      if (attempts >= 3) await finish(buildAuth(buffer, candidates[0], true), false)
-    })()
-  }, 2000)
-  ;(pollTimer as any).unref?.()
+    },
+    onError: (message) => {
+      progress = { ...progress, lastError: message }
+    },
+    logger,
+  })
 
   return { started: true }
 }

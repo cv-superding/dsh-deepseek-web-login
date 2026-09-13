@@ -72,11 +72,17 @@ export function commitCapturedAuth(auth: WebAuth, now: number = Date.now()): Com
   }
   const before = new Set(listAccounts().map((item) => item.id))
   const hadActive = activeAccountId() !== undefined
-  const record = upsertAccount(auth)
-  // 边界：库里本来一个当前账号都没有（比如刚才退出过又直接点「登录新账号」）——
-  // 这时没人会被"打扰"，不设当前反而会留下"库里有账号却没选中"的状态。
-  // 这不违反"添加不自动切换"：那条规则针对的是**别顶掉正在用的号**。
-  if (!hadActive) setActiveAccount(record.id)
-  endAddAccount()
-  return { mode: 'add', created: !before.has(record.id), recordId: record.id }
+  // F08：添加模式必须**总是**被消费掉。旧写法把 endAddAccount() 放在 upsertAccount 之后，
+  // 一旦落库/切号抛错，模式就一直挂着 —— 于是下一次提交（哪怕是登录另一个号）
+  // 会被当成"添加"处理，与模块注释承诺的"只消费一次"相反。
+  try {
+    const record = upsertAccount(auth)
+    // 边界：库里本来一个当前账号都没有（比如刚才退出过又直接点「登录新账号」）——
+    // 这时没人会被"打扰"，不设当前反而会留下"库里有账号却没选中"的状态。
+    // 这不违反"添加不自动切换"：那条规则针对的是**别顶掉正在用的号**。
+    if (!hadActive) setActiveAccount(record.id)
+    return { mode: 'add', created: !before.has(record.id), recordId: record.id }
+  } finally {
+    endAddAccount()
+  }
 }
