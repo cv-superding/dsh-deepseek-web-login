@@ -147,6 +147,19 @@ test('upsertAccount 不继承旧凭证字段：unverified 不会粘住', () => {
   assert.equal(readAuth().label, '保留我', '备注名属于元信息，重复写入应保留')
 })
 
+test('updateAccount 能清 unverified（0.1.61 探活成功路径）', () => {
+  // 0.1.61：probeOnce 成功时显式写 `unverified: false` —— 之前只写 lastVerifiedAt，
+  // 于是"捕获时未校验"的标记永久粘住（实测账号库 5/5 全挂「未校验」，
+  // 连刚校验过 6 分钟的那个也挂着，标与数据自相矛盾）。
+  writeAuth(makeAuth('e'.repeat(64), { serverId: 'user-999', unverified: true }))
+  assert.equal(readAuth().unverified, true, '前提：先落一个 unverified')
+  const id = activeAccountId()
+  updateAccount(id, { unverified: false, lastVerifiedAt: new Date().toISOString() })
+  assert.equal(readAuth().unverified, undefined, 'unverified:false 必须真的把标记清掉')
+  assert.equal(readAuth().token, 'e'.repeat(64), '凭证本体不受影响')
+  assert.ok(readAuth().lastVerifiedAt, '校验时间应写回')
+})
+
 test('移除一个非当前账号 → 其它账号不受影响', () => {
   const all = listAccounts()
   const target = all.find((item) => item.id !== activeAccountId())

@@ -65,7 +65,15 @@ export async function probeOnce(auth: WebAuth | undefined, logger?: ProbeLogger)
       // 这样库里闲置的账号也会自己"长出名字"，不用等用户手动刷新。
       // 用「旧值打底 + 新值覆盖」合并：新一次只有 id、没有 display 时，
       // 不要把原来已经拿到的好名字冲掉（pickUserDisplay 保证空值不会写进 key）。
-      const patch: Record<string, unknown> = { lastVerifiedAt: at, lastVerifyError: undefined }
+      // 0.1.61：`unverified: false` 必须显式清 —— 否则这个"捕获时未校验"的标记会永久粘住
+      // （normalizeRecord 只保留 `=== true` 的，传 false 就自然消失）。
+      // 粘住的后果实测（2026-09-14）：账号库 5/5 全挂「未校验」，连"最近校验 6 分钟前"
+      // 的那个也挂着 —— 标与数据自相矛盾、信息量归零，真出问题时反而看不出来。
+      const patch: Record<string, unknown> = {
+        lastVerifiedAt: at,
+        lastVerifyError: undefined,
+        unverified: false,
+      }
       if (outcome.user) {
         patch.user = { ...(target.user ?? {}), ...outcome.user }
         // 审计 F04：探活走的也是**可信校验**（只读 users/current），

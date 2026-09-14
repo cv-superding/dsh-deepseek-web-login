@@ -49,7 +49,7 @@ import {
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
 import { noteCall as writeLedgerEntry, pruneLedger, summarizeLedger, ledgerDir, LEDGER_KEEP_DAYS } from './ledger.ts'
-import { startProbeLoop } from './probe.ts'
+import { probeOnce, startProbeLoop } from './probe.ts'
 import { checkForUpdate, RELEASE_REPO } from './update-check.ts'
 import { pluginVersion } from './version.ts'
 import { webLoginDir } from './paths.ts'
@@ -429,6 +429,21 @@ export function apply(ctx: any, config: Config = {}): void {
           `deepseek-web: 账号被临时限制，已记录解除时间 ${new Date(Number(info.mutedUntilMs)).toLocaleString()}`,
         )
       }
+      // 0.1.61：AUTH 失败（服务端判 token 无效 / HTTP 401·403）立刻回写账号状态 ——
+      // 之前 `lastVerifyError` 只由 30 分钟一次的探活写入，刚切到死号时界面完全静默：
+      // 用户只看到一条报错，不知道是哪个账号的登录态死了（实测 2026-09-14 切号后的空窗）。
+      // 回写之后账号库会立刻出现红标「需要重新登录」。
+      if (!info.ok && info.code === 'AUTH' && accountId) {
+        updateAccount(accountId, {
+          lastVerifyError: {
+            at: new Date().toISOString(),
+            message: String(info.message ?? '登录态无效，请重新登录'),
+          },
+        })
+        logger.warn?.(
+          `deepseek-web: 账号 ${accountId} 登录态无效（${info.message ?? 'AUTH'}），已标记为「需要重新登录」`,
+        )
+      }
       if (info.ok && accountId) {
         const record = listAccounts().find((item) => item.id === accountId)
         // 限制时间已过 + 这次生成成功 → 确实解除了，清掉标记（不靠猜）
@@ -648,6 +663,26 @@ export function apply(ctx: any, config: Config = {}): void {
               const body = await readJsonBody(req)
               const id = String(body?.id ?? '')
               endAddAccount()
+              // 0.1.61：切号前先对目标账号做一次零额度探活（只读 users/current）。
+              // 死号当场拦下 —— 否则用户切过去、发消息、看到 AUTH 才知道，白折腾一轮
+              // （实测 2026-09-14：切到一个一天多没用过的号，凭证早已过期）。
+              const target = id ? readAccount(id) : undefined
+              if (!target) {
+                sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除）' })
+                return
+              }
+              const probed = await probeOnce(target, {
+                info: (message) => logger.info?.(message),
+                warn: (message) => logger.warn?.(message),
+              })
+              if (probed && !probed.ok) {
+                sendJson(res, 200, {
+                  ok: false,
+                  needsRelogin: true,
+                  error: `该账号登录态校验未通过（${probed.error ?? '未知原因'}），请重新登录后再切换`,
+                })
+                return
+              }
               if (!setActiveAccount(id)) {
                 sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除）' })
                 return

@@ -294,6 +294,16 @@ const checks = {
     /trimmed\.length < 40\) return false/.test(host) &&
     /purpose=\$\{String\(options\?\.purpose\)\}/.test(host) &&
     /被丢弃，该调用未执行/.test(host),
+
+  // 0.1.61（2026-09-14）：账号「能不能用」的可见性 —— 三处都按**调用点**断言。
+  // ① 探活成功显式清 unverified（否则"未校验"标永久粘住：实测 5/5 全挂、
+  //    连刚校验过的那个也挂着，信息量归零）；② AUTH 失败立刻回写 lastVerifyError
+  //    （否则切到死号时界面完全静默，用户只看到一条报错）；
+  // ③ 切号前先探活，失败带 needsRelogin 拦下（别让用户白切一轮）。
+  'host 账号登录态可见性三处接线（0.1.61）':
+    /lastVerifiedAt:\s*at[\s\S]{0,80}?unverified:\s*false/.test(host) &&
+    /info\.code\s*===\s*["']AUTH["'][\s\S]{0,240}?lastVerifyError:\s*\{/.test(host) &&
+    /probeOnce\(target[\s\S]{0,700}?needsRelogin/.test(host),
 }
 
 let failed = 0
