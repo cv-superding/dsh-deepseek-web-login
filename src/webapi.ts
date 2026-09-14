@@ -1449,6 +1449,13 @@ export function createSseState(options: SseStateOptions = {}) {
             }
             return out
           }
+          case 'response/fragments/-1/elapsed_secs': {
+            // F27：这是「刚结束的是一段**思考**」的直接证据 —— 真实帧里它紧跟 THINK fragment
+            // 出现、值就是该段思考的耗时（正文 fragment 上的这个字段是 null）。
+            // 快照丢失时，它能告诉我们暂存的那段文本到底属于哪个通道。
+            if (typeof value === 'number' && value > 0) settleOrphans(out, 'THINK')
+            return out
+          }
           case 'response/thinking_content':
             if (typeof value === 'string') {
               directThinking += value
@@ -1509,18 +1516,20 @@ export function createSseState(options: SseStateOptions = {}) {
     /** 流结束：产出 finish（若确实收到过数据）。 */
     finish(): WebStreamEvent[] {
       const out: WebStreamEvent[] = []
-      // F25：整轮都没等到 fragment（流被掐断、或被中止）—— 攒下的文本该有归宿，
-      // 否则它会静默丢掉。开了思考就按思考收尾，避免以"正文"的名义补发。
+      // F27（2026-09-14，修订 F25 的兜底）：整轮都没等到任何 fragment 时**按正文收尾**。
+      //
+      // F25 当初按"开了思考就归思考"收尾，理由是"避免以正文的名义补发思考"。但那个方向
+      // 有一个更糟的失败模式：**万一暂存里其实是正文，回答就从界面上消失了** ——
+      // 用户只看到一段思考、正文空白，会以为模型没回答（实测反馈："正文的内容卡在思考里"）。
+      // 两种错法的代价不对等：
+      //   · 思考被显示到正文 → 内容都在，用户读得懂这是思考；
+      //   · 正文被吞进思考 → 用户看不到回答，是明确的功能故障。
+      // 所以无线索时一律归正文。有 fragment 的正常/异常路径不受影响（由 settleOrphans 结算）。
       if (sawData && orphanBuffer) {
         const text = orphanBuffer
         orphanBuffer = ''
-        if (thinkingEnabled) {
-          directThinking += text
-          emitThinking(out, text)
-        } else {
-          directText += text
-          emitText(out, text)
-        }
+        directText += text
+        emitText(out, text)
       }
       if (!sawData) return out
       out.push({ kind: 'finish', reason: pendingFinish, ...(totalTokens !== undefined ? { totalTokens } : {}) })

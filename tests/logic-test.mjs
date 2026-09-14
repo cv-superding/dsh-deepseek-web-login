@@ -289,14 +289,48 @@ test('sse: 首帧快照丢失时思考仍须归位（F25）', () => {
   assert.deepEqual(order, ['thinking', 'text', 'text'], '思考段必须在正文之前结算并发射')
 })
 
-test('sse: 整轮没有 fragment 时暂存文本按思考收尾（F25）', () => {
+test('sse: 整轮没有 fragment 时暂存文本按**正文**收尾（F27 修订 F25 的兜底）', () => {
+  // F25 当初的兜底是"开了思考就归思考"，理由是"避免以正文名义补发思考"。
+  // 2026-09-14 的实测反例推翻了它：DSH 里问"在吗？"，回答"在的，YG。有什么需要我做的？"
+  // 整段出现在**思考**里、正文 0 字（用户原话："不是思考的内容，应该是正文的内容，
+  // 结果卡在思考里了"）。用户看不到回答 = 明确的功能故障。
+  // 两种错法的代价不对等 ⇒ 无线索时一律归正文：最坏只是把一段思考显示到正文（内容都在）。
   const state = createSseState({ thinkingEnabled: true })
   const events = drain(state, [
     [{ p: 'response/fragments/-1/content', v: '思考甲' }],
     [{ v: '思考乙' }],
     [{ p: 'response/status', v: 'FINISHED' }],
   ])
-  assert.equal(textOf(events, 'thinking'), '思考甲思考乙', '结束前必须把暂存交出去，不能静默丢字')
+  assert.equal(textOf(events, 'text'), '思考甲思考乙', '无线索时必须把暂存交出去（不能静默丢字），且归正文')
+  assert.equal(textOf(events, 'thinking'), '')
+})
+
+test('sse: 思考耗时（elapsed_secs）是"这段属于思考"的证据（F27）', () => {
+  // 真实帧：思考结束时服务端会发 `response/fragments/-1/elapsed_secs`（值=思考耗时），
+  // 它紧跟 THINK fragment、在正文 fragment 之前。快照丢失时它是唯一的通道线索。
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '思考甲' }], // 快照丢失，思考续段先进暂存
+    [{ p: 'response/fragments/-1/elapsed_secs', o: 'SET', v: 0.36 }], // 思考结束的证据
+    [{ p: 'response/fragments/-1/content', v: '思考乙' }], // 又来一段无 fragment 可续的
+    [{ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '正文' } }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  // 有证据（思考耗时）的那段归思考；随后的"思考乙"仍是"第一个 RESPONSE fragment 之前的内容"，
+  // 同属思考（F25 的实测依据）；只有正文 fragment 自带的内容才算正文。
+  assert.equal(textOf(events, 'thinking'), '思考甲思考乙')
+  assert.equal(textOf(events, 'text'), '正文')
+})
+
+test('sse: 无 fragment 但有 elapsed_secs 时，暂存归思考而不是正文（F27 不回归）', () => {
+  // 与上一条相对：有证据（思考耗时）就必须归思考 —— 别因为"兜底改成正文"就把思考也放出去。
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '这是一段思考' }],
+    [{ p: 'response/fragments/-1/elapsed_secs', o: 'SET', v: 1.2 }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '这是一段思考')
   assert.equal(textOf(events, 'text'), '')
 })
 

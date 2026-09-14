@@ -274,6 +274,11 @@ const checks = {
   'host 内部用途不得触发自动续写（F26）':
     /allowsAutoContinue\(options\?\.purpose\)\s*&&/.test(host) &&
     /allowsAutoContinue\(purpose\)[\s\S]{0,140}?chat/.test(host),
+
+  // F27（2026-09-14）：收尾兜底归正文（避免把回答吞进思考）+ 思考耗时作为通道证据。
+  'host 收尾兜底归正文 + 思考耗时作证据（F27）':
+    /settleOrphans\(out, ["']THINK["']\)/.test(host) &&
+    /sawData && orphanBuffer[\s\S]{0,140}?directText \+= text/.test(host),
 }
 
 let failed = 0

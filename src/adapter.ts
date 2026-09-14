@@ -889,7 +889,10 @@ export function createAdapter(deps: AdapterDeps) {
         logger?.info?.(
           `deepseek-web: 第 ${rounds + 1} 轮流结束：[本轮 ${roundChars} 字 / 累计 ${partial.length} 字 / ` +
             `耗时 ${Date.now() - roundStartedAt}ms] finish=${finishReason ?? '(无 FINISHED → 服务端截断)'}` +
-            `${midSentence ? '，尾部是句中' : ''}`,
+            `${midSentence ? '，尾部是句中' : ''}` +
+            // F27 诊断：正文 0 字而本轮确实有输出时，多半是内容全走了思考通道
+            // （模型把回答写进思考 / 通道错位）。留一行显式提示，下次一眼可判。
+            `${roundChars === 0 && rounds === 0 ? '（⚠️ 本轮正文 0 字 —— 内容可能全在思考通道）' : ''}`,
         )
         const eligible =
           // F26：只对用户可见的回答续写（见 allowsAutoContinue 的说明）。
