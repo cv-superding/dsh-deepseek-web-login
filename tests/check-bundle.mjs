@@ -262,7 +262,9 @@ const checks = {
   'host 思考续段的暂存与结算（F25）':
     // ⚠️ 这处是整条修复的开关：测试里是自己传的，覆盖不到生产调用点，
     //    所以必须由产物断言守住 —— 漏传了，F25 在生产里等于没修。
-    /parseWebSse\(body, \{\s*thinkingEnabled:\s*params\.thinkingEnabled\s*\}\)/.test(host) &&
+    //    0.1.62 起这里还多传了 onResponseMessageId（链式投喂要首帧的 message_id），
+    //    所以锁「调用点前缀 + thinkingEnabled 仍在」，不再要求整对象只有这一个键。
+    /parseWebSse\(body, \{[\s\S]{0,160}?thinkingEnabled:\s*params\.thinkingEnabled/.test(host) &&
     // 两处结算点：快照（迟到快照）+ APPEND（第一个 fragment 出现）
     /settleOrphans\(out, fragments\[0\]\.type\)/.test(host) &&
     /settleOrphans\(out, fragment\.type\)/.test(host) &&
@@ -304,6 +306,30 @@ const checks = {
     /lastVerifiedAt:\s*at[\s\S]{0,80}?unverified:\s*false/.test(host) &&
     /info\.code\s*===\s*["']AUTH["'][\s\S]{0,240}?lastVerifyError:\s*\{/.test(host) &&
     /probeOnce\(target[\s\S]{0,700}?needsRelogin/.test(host),
+
+  // 0.1.62（2026-09-14）：链式投喂 —— 这四条都是**接线**，纯函数测试守不住。
+  // ① 请求体的 parent 与 prompt 必须来自决策结果（写死 null 就退化成永远全量）；
+  // ② 决策必须带上当前模式与结构化 prompt（promptParts 漏传 = 静默退化成全量）；
+  // ③ 首帧 ready 里的 response_message_id 要真的被交出去（拿不到就没有 parent 可指）；
+  // ④ 只有「跑完 + 未污染 + 拿到 id」才把链接上（否则下一轮会续到不存在的父消息上）。
+  'host 链式投喂的四处接线（0.1.62）':
+    /parent_message_id:\s*feed\.parentMessageId/.test(host) &&
+    /prompt:\s*feed\.prompt/.test(host) &&
+    /mode:\s*currentContextMode\(\)/.test(host) &&
+    /promptParts:\s*\{[\s\S]{0,160}?entries:\s*promptParts\.entries/.test(host) &&
+    /typeof d\.response_message_id === ["']number["'][\s\S]{0,80}?onResponseMessageId/.test(host) &&
+    /sentFeed\?\.next && complete && !poisoned[\s\S]{0,160}?contextChain = \{[\s\S]{0,80}?parentId: responseMessageId/.test(host) &&
+    host.includes('context-feed.json'),
+
+  // 0.1.62：设置开关要真的接上（宿主路由 + 客户端按钮都在），否则用户点不到。
+  'client/host 上下文投喂设置可切换（0.1.62）':
+    /route === ["']\/context-mode["']/.test(host) &&
+    /writeContextModeSetting\(wanted\)/.test(host) &&
+    /applyContextMode\(/.test(host) &&
+    client.includes('链式投喂（只发增量）') &&
+    // 打包器把字符串字面量统一成双引号，别写死引号形式（老坑）
+    /api\(["']\/context-mode["']/.test(client) &&
+    /renderContextStatus = \(/.test(client),
 }
 
 let failed = 0

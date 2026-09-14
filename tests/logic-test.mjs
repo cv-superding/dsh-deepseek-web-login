@@ -162,6 +162,41 @@ test('sse: fragments 格式（思考 + 正文）', () => {
   assert.equal(events.at(-1).kind, 'finish')
 })
 
+test('sse: 首帧 ready 的 response_message_id 交给调用方（链式投喂的 parent 来源）', () => {
+  // 真实帧（`.workbuddy/tmp/shortq-r1-2026-09-14T04-17-41.sse` 首两帧）：
+  //   event: ready
+  //   data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+  // 下一轮就把它当 parent_message_id 发上去 —— 拿不到它，链式投喂就没有父消息可指。
+  const ids = []
+  const state = createSseState({ thinkingEnabled: true, onResponseMessageId: (id) => ids.push(id) })
+  drain(state, [
+    [{ request_message_id: 1, response_message_id: 2, model_type: 'default' }, 'ready'],
+    [{ v: { response: { message_id: 2, fragments: [{ type: 'RESPONSE', content: '嗨' }] } } }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.deepEqual(ids, [2])
+})
+
+test('sse: 没有 ready 帧时不误报 message_id（也不抛）', () => {
+  const ids = []
+  const state = createSseState({ onResponseMessageId: (id) => ids.push(id) })
+  drain(state, [
+    [{ p: 'response/content', v: '正文' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.deepEqual(ids, [])
+})
+
+test('sse: 不传 onResponseMessageId 时照常工作（老调用点不受影响）', () => {
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ request_message_id: 1, response_message_id: 2, model_type: 'default' }, 'ready'],
+    [{ v: { response: { fragments: [{ type: 'RESPONSE', content: '正常' }] } } }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'text'), '正常')
+})
+
 test('sse: 直连 thinking_content / content（含 APPEND 续段）', () => {
   const state = createSseState()
   const events = drain(state, [

@@ -20,7 +20,7 @@ import {
   uploadImageFile,
   type SessionCleaner,
 } from './webapi.ts'
-import { collectImageRefs, serializePrompt, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -660,12 +660,15 @@ export function createAdapter(deps: AdapterDeps) {
     // 图片：读取附件 → 上传到网页端 → 用 file_id 随请求引用（网页端看图的实际机制）
     const refFileIds = await uploadRequestImages(auth, options?.messages, options?.signal)
 
-    const prompt = serializePrompt({
+    // 链式投喂需要 prompt 的**结构**（固定头 + 未截断的历史条目）才能算增量，
+    // 所以这里取 parts、下面的 params 一起把 entries 传下去（见 context-feed.ts）。
+    let promptParts = serializePromptParts({
       system: options?.system,
       messages: options?.messages ?? [],
       tools: (options?.tools ?? []) as ToolSchemaLike[],
       maxChars: deps.config.maxPromptChars ?? 1_500_000,
     })
+    const prompt = promptParts.full
 
     const knownNames = new Set<string>((options?.tools ?? []).map((tool: any) => String(tool?.name ?? '')))
     // 自动续写的每一轮用全新的过滤器/守卫实例（上一轮的状态在轮次收尾时已吐净），
@@ -739,6 +742,13 @@ export function createAdapter(deps: AdapterDeps) {
         try {
       for await (const event of runStream(auth as WebAuth, {
         prompt: currentPrompt,
+        // 链式投喂用：把结构与 prompt 一起传下去，webapi 才能算出"这一轮新增了哪几条"。
+        // 漏传 = 链式模式静默退化成全量（有产物断言守着）。
+        promptParts: {
+          head: promptParts.head,
+          entries: promptParts.entries,
+          maxChars: deps.config.maxPromptChars ?? 1_500_000,
+        },
         thinkingEnabled,
         modelType: spec.modelType,
         refFileIds: rounds === 0 ? refFileIds : [],
@@ -928,7 +938,7 @@ export function createAdapter(deps: AdapterDeps) {
         rounds += 1
         logger?.info?.(`deepseek-web: 回答疑似在句中被截，自动续写（第 ${rounds}/${maxRounds} 轮）……`)
         // 续写 prompt = 原对话 + 已输出的半截回答（作为 assistant 消息）+ 继续指令
-        currentPrompt = serializePrompt({
+        promptParts = serializePromptParts({
           system: options?.system,
           messages: [
             ...(options?.messages ?? []),
@@ -938,6 +948,7 @@ export function createAdapter(deps: AdapterDeps) {
           tools: (options?.tools ?? []) as ToolSchemaLike[],
           maxChars: deps.config.maxPromptChars ?? 1_500_000,
         })
+        currentPrompt = promptParts.full
         // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例
         filter = new ToolCallStreamFilter(knownNames)
         echoGuard = new TranscriptEchoGuard()

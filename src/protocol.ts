@@ -232,7 +232,27 @@ export interface SerializeOptions {
  * 序列化为网页端单段 prompt。
  * 结构：system → 工具协议与目录 → 对话转写（User:/Assistant:/[Tool Result]）。
  */
+export interface PromptParts {
+  /** 固定头：system + 协议指令 + 工具目录（可能为空串）。 */
+  head: string
+  /** 历史条目（**未截断**）。链式投喂按它算增量，所以不能受截断影响。 */
+  entries: string[]
+  /** 真正发出去的那份字符串（超预算时是截断后的）—— 与 serializePrompt 的返回值一致。 */
+  full: string
+}
+
 export function serializePrompt(options: SerializeOptions): string {
+  return serializePromptParts(options).full
+}
+
+/**
+ * 与 serializePrompt 同源，但额外交出 `head` 与未截断的 `entries`。
+ *
+ * 为什么需要（2026-09-14，链式投喂）：增量 = 本轮条目减去上一轮条目，必须拿
+ * **结构化**的条目数组去比前缀；而最终字符串可能被 truncateMiddle 从中间截过，
+ * 用字符串切前缀会把截断位置算错（截断点之后的"新增"其实是被挖掉的中段）。
+ */
+export function serializePromptParts(options: SerializeOptions): PromptParts {
   const maxChars = options.maxChars ?? 120_000
   // N07：小数/NaN/极小值直接拒绝，别让它们一路漂到后面的算术里（`new Array(小数)` 这类坑在旁边就有）
   if (!Number.isSafeInteger(maxChars) || maxChars < 128) {
@@ -289,7 +309,7 @@ export function serializePrompt(options: SerializeOptions): string {
   const head = system ? `${system}${protocol}` : protocol.trim()
   const merged = transcript ? `${head}\n\n---\n\n${transcript}` : head
 
-  if (merged.length <= maxChars) return merged
+  if (merged.length <= maxChars) return { head, entries: lines, full: merged }
 
   // ⚠️ N07（2026-09-13 第二轮审计）：**固定头（system + 协议 + 工具目录）必须完整**，
   // 不能再按 `maxChars * HEAD_RATIO` 去截它。
@@ -306,7 +326,7 @@ export function serializePrompt(options: SerializeOptions): string {
       'CONTEXT_WINDOW_EXCEEDED',
     )
   }
-  return head + separator + truncateMiddle(transcript, budget, 0.7)
+  return { head, entries: lines, full: head + separator + truncateMiddle(transcript, budget, 0.7) }
 
 }
 

@@ -31,6 +31,8 @@ import {
   DEFAULT_CLEANUP_GAP_MS,
   type CleanupRange,
 } from './gate.ts'
+// 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
+import { currentContextMode, decideFeed, type ChainState, type FeedDecision } from './context-feed.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
 
@@ -1191,6 +1193,17 @@ export interface SseStateOptions {
    * 未开思考时不缓冲（没有歧义），保持旧行为。
    */
   thinkingEnabled?: boolean
+  /**
+   * 本轮 assistant 的 message_id（链式投喂用）。
+   *
+   * 来源是流的**首帧** `event: ready`：`{"request_message_id":1,"response_message_id":2,...}`
+   * （真实样本 `.workbuddy/tmp/shortq-r1-*.sse`）。下一轮就把它当 `parent_message_id` 发上去，
+   * 服务端据此把新消息挂到上一条回答下面，于是历史由服务端维护、我们只发增量。
+   *
+   * 用回调而不是往 WebStreamEvent 里加一种 kind：新 kind 会流到 adapter 的事件消费处，
+   * 那里对未知 kind 的处理没人守（多一种事件就多一处可能被当成"未知"丢掉）。
+   */
+  onResponseMessageId?: (id: number) => void
 }
 
 /** F28：思考的标准包装标签。孤儿兜底用（见 finish 里的判据）。 */
@@ -1390,6 +1403,12 @@ export function createSseState(options: SseStateOptions = {}) {
     handlePayload(d: any, eventName?: string): WebStreamEvent[] {
       const out: WebStreamEvent[] = []
       sawData = true
+      // 0) 首帧 `event: ready`：把本轮 assistant 的 message_id 交给调用方（链式投喂要用）。
+      //    不 return：这里的判据只看字段本身，`ready` 的负载不会命中下面的任何分支，
+      //    这样即使服务端某天不带 `event: ready` 那行，只要字段还在就照样能拿到。
+      if (d && typeof d === 'object' && typeof (d as any).response_message_id === 'number') {
+        options.onResponseMessageId?.((d as any).response_message_id)
+      }
       // 1) 完整 response 快照
       if (d && typeof d === 'object' && d.v && typeof d.v === 'object' && d.v.response && typeof d.v.response === 'object') {
         const response = d.v.response
@@ -1675,6 +1694,28 @@ export const DEFAULT_SESSION_REUSE_TURNS = 20
  */
 let reuseSlot: { key: string; sessionId: string; turns: number; cleanup?: (id: string) => void } | undefined
 
+/**
+ * 链式投喂的链状态（2026-09-14）。只跟随**正在复用的那个会话**：
+ * 会话轮换、切号、请求失败/取消、流被污染，都会让它作废 —— 下一轮自动退回全量重发。
+ * 判定逻辑在 context-feed.ts（纯函数），这里只负责"喂进去 + 按结果记下来"。
+ */
+let contextChain: ChainState | undefined
+
+/** 丢弃当前的链（会话退役/测试隔离用）。 */
+export function resetContextChain(): void {
+  contextChain = undefined
+}
+
+/** 给状态页看：当前链式投喂是否真的在跑（没用链式就返回 undefined）。 */
+export function contextChainInfo(): { sessionId: string; turns: number; parentId: number } | undefined {
+  if (!contextChain) return undefined
+  return {
+    sessionId: contextChain.sessionId,
+    turns: contextChain.entries.length,
+    parentId: contextChain.parentId,
+  }
+}
+
 /** 凭证摘要：只用来判断「是不是同一个账号」。不做安全用途、不落日志。 */
 function accountKey(auth: WebAuth): string {
   const raw = `${auth?.token ?? ''}|${auth?.cookie ?? ''}`
@@ -1734,6 +1775,8 @@ async function leaseSession(
 /** 把某个会话从复用槽里摘掉（会话失效 / 请求失败时调用，下次会新建）。 */
 export function retireSession(sessionId?: string): void {
   if (!sessionId || (reuseSlot && reuseSlot.sessionId === sessionId)) reuseSlot = undefined
+  // 会话被退役 ⇒ 它的链也失效（留着会让下一轮"续"到一个已经不存在的父消息上）。
+  if (!sessionId || contextChain?.sessionId === sessionId) contextChain = undefined
 }
 
 /**
@@ -1749,6 +1792,7 @@ export function retireSession(sessionId?: string): void {
  */
 export function disposeSessionReuse(): string | undefined {
   const slot = reuseSlot
+  contextChain = undefined
   if (!slot) return undefined
   reuseSlot = undefined
   try {
@@ -1762,10 +1806,17 @@ export function disposeSessionReuse(): string | undefined {
 /** 只给测试用：清空复用槽。 */
 export function resetSessionReuse(): void {
   reuseSlot = undefined
+  contextChain = undefined
 }
 
 export interface CompletionParams {
   prompt: string
+  /**
+   * 链式投喂用：`prompt` 的结构化拆分（`head` = 系统+协议+工具目录，`entries` = **未截断**的历史条目）。
+   * 不传 = 算不出"新增了哪几条"，只能走全量 —— 适配器两条序列化路径都要传，
+   * 漏传会让链式模式静默退化成全量（靠 tests/check-bundle.mjs 的产物断言守）。
+   */
+  promptParts?: { head: string; entries: readonly string[]; maxChars?: number }
   thinkingEnabled: boolean
   searchEnabled?: boolean
   modelType: 'default' | 'expert' | 'vision'
@@ -1808,7 +1859,7 @@ async function openCompletion(
   params: CompletionParams,
   signal: AbortSignal,
   transport: CompletionTransport,
-): Promise<{ sessionId: string; resp: Response }> {
+): Promise<{ sessionId: string; resp: Response; feed: FeedDecision }> {
   let lastFailure: AdapterLlmError | undefined
   for (let attempt = 0; attempt < 2; attempt++) {
     const lease = await leaseSession(
@@ -1819,6 +1870,24 @@ async function openCompletion(
       params.onDeleteSession,
     )
     const sessionId = lease.sessionId
+    // 链式投喂：决定本轮发全量还是增量、parent 指向谁。判据在 context-feed.ts（纯函数）：
+    // 模式=chained 且「复用了同一会话 + 条目严格追加 + 头部/账号都没变」才发增量，
+    // 任何一条不满足都退回全量 + parent=null（= 0.1.61 及以前的行为）。
+    const feed = decideFeed({
+      mode: currentContextMode(),
+      ...(params.promptParts
+        ? {
+            head: params.promptParts.head,
+            entries: params.promptParts.entries,
+            ...(params.promptParts.maxChars !== undefined ? { maxChars: params.promptParts.maxChars } : {}),
+          }
+        : {}),
+      full: params.prompt,
+      sessionId,
+      accountKey: accountKey(auth),
+      reused: lease.reused,
+      ...(contextChain ? { chain: contextChain } : {}),
+    })
     let resp: Response
     try {
       resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {
@@ -1830,8 +1899,9 @@ async function openCompletion(
         },
         body: JSON.stringify({
           chat_session_id: sessionId,
-          parent_message_id: null,
-          prompt: params.prompt,
+          // 链式投喂时是上一条 assistant 的 message_id；全量模式恒为 null（根消息、无父链）。
+          parent_message_id: feed.parentMessageId,
+          prompt: feed.prompt,
           ref_file_ids: params.refFileIds ?? [],
           thinking_enabled: params.thinkingEnabled,
           search_enabled: params.searchEnabled ?? false,
@@ -1878,7 +1948,7 @@ async function openCompletion(
 
     // HTTP 200 也可能是「业务错误信封」或 HTML 挑战页 —— 非 SSE 一律先当错误处理
     const contentType = String(resp.headers.get('content-type') ?? '')
-    if (contentType.includes('text/event-stream')) return { sessionId, resp }
+    if (contentType.includes('text/event-stream')) return { sessionId, resp, feed }
 
     const text = await resp.text().catch(() => '')
     let parsed: any
@@ -1954,6 +2024,10 @@ export async function* streamWebCompletion(
   let complete = false
   let poisoned = false
   let timer: ReturnType<typeof setTimeout> | undefined
+  /** 本轮实际发出去了什么（链式投喂据此记账；见 finally 里的链更新）。 */
+  let sentFeed: FeedDecision | undefined
+  /** 首帧 `event: ready` 给的 assistant message_id —— 就是下一轮的 parent_message_id。 */
+  let responseMessageId: number | undefined
   /** 同一个会话只回收一次（复用/轮换/失败三条路径可能都想回收它）。 */
   const deleted = new Set<string>()
   const cleanup = (id: string): void => {
@@ -2050,9 +2124,15 @@ export async function* streamWebCompletion(
       ),
     )
     sessionId = opened.sessionId
+    sentFeed = opened.feed
     body = opened.resp.body
     if (timer) clearTimeout(timer)
-    iterator = parseWebSse(body, { thinkingEnabled: params.thinkingEnabled })
+    iterator = parseWebSse(body, {
+      thinkingEnabled: params.thinkingEnabled,
+      onResponseMessageId: (id) => {
+        responseMessageId = id
+      },
+    })
     const idle =
       Number.isFinite(params.idleTimeoutMs) && (params.idleTimeoutMs as number) > 0
         ? Math.min(params.idleTimeoutMs as number, 600_000)
@@ -2094,6 +2174,16 @@ export async function* streamWebCompletion(
       if (id === sessionId && complete && !poisoned && limit > 0) continue
       retireSession(id)
       cleanup(id)
+    }
+    // 链式投喂的记账（2026-09-14）：只有「流正常跑完 + 没被污染 + 拿到了本轮的
+    // assistant message_id」才把这链接上；其余（报错/取消/提前 return/没收到 ready）
+    // 一律作废 —— 下一轮 decideFeed 会看到"没有链"，自动退回全量重发。
+    // 注意这里按**每一次请求**记账（一轮里可能有首轮 + 续写轮多次调用），不是按 DSH 回合：
+    // 续写轮的增量与 parent 正是靠这次记账才对得上。
+    if (sentFeed?.next && complete && !poisoned && typeof responseMessageId === 'number') {
+      contextChain = { ...sentFeed.next, parentId: responseMessageId }
+    } else if (contextChain && (!sessionId || contextChain.sessionId === sessionId)) {
+      contextChain = undefined
     }
     release?.()
   }

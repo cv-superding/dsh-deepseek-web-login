@@ -42,9 +42,9 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 
 ## 界面预览
 
-设置页按用途分成 **5 个标签**（一次只显示一页）—— **账号**（登录状态 / 当前账号 / **账号库** / 手动 Token）·
+设置页按用途分成 **6 个标签**（一次只显示一页）—— **账号**（登录状态 / 当前账号 / **账号库** / 手动 Token）·
 **模型**（可用模型 / 连通性测试）· **防风控**（请求节流 / 会话清理及其三个区间 / **调用台账**）·
-**传输层**（指纹 + 一键测试）· **关于**（版本与更新 / 数据位置 / 风险说明）。
+**传输层**（指纹 + 一键测试）· **上下文**（每轮全量 / 链式投喂）· **关于**（版本与更新 / 数据位置 / 风险说明）。
 操作反馈条常驻在标签栏之上，切到哪一页都看得见。
 
 设置页（**真实截图**，拍于拆页之前）：当前账号 / 登录状态（适配器注册、凭证来源、PoW WASM、服务端校验）/ 三种登录方式（Microsoft Edge · 我的默认浏览器 · 从已登录窗口恢复）/ 手动粘贴 token。
@@ -168,7 +168,38 @@ prompt 字符上限默认 1,200,000（可配）。
 | `cleanupDelayMs` | `60000~120000`（随机） | deferred：最长等待的**区间**（毫秒）。每轮清理重抽 |
 | `cleanupGapMs` | `800~2500`（随机） | deferred：**相邻两个删除请求之间**的间隔区间（毫秒）。每删一个重抽 |
 | `transport` | **`chromium`** | 传输层：`chromium`＝Electron 的 `net.fetch`（指纹与真实浏览器一致）/ `node`＝Node 原生 fetch |
+| `contextMode` | **`full`** | 上下文投喂：`full`＝每轮重发全量 prompt / `chained`＝只发增量 + 把上一条回答当父消息（见下节） |
 | `probeIntervalMs` | `1800000` | 登录态主动探活间隔（毫秒），`0`＝关闭。只读 `users/current`，零额度 |
+
+### 上下文投喂：每轮全量 vs 链式增量
+
+一次 completion 请求的 `prompt` 是**整份对话转写**（系统提示 + 工具目录 + 全部历史）。为什么必须这么发？
+因为插件一直把 `parent_message_id` 写成 `null` —— 每条消息都是网页端会话里的**根消息**、
+没有父链，服务端按消息树回溯上下文时回溯到空。这是 2026-09-12 实测判定过的行为
+（同一会话内先发「记住编号 ZC-7391-KX」得 `OK`，再问编号答「不知道」）。
+
+浏览器不是这么干的。参考实现里 `nextParentMessageId = history?.parentMessageId ?? finalAssistantMessageId`、
+`isFirstMessage = parent_message_id === null` —— **只有会话第一条的 parent 是 null**，
+之后每轮都把上一条消息 id 当 parent 发上去，历史由服务端维护。
+
+设置页「上下文」标签可以切到 **链式投喂**：后续轮只发新增内容，`parent_message_id` 指向上一条回答的
+`message_id`（取自 SSE 首帧 `event: ready` 的 `response_message_id`）。收益是请求体小得多、
+更像真人连续对话；代价是**工具协议只存在于链首那条消息里**，一旦服务端把早期上下文丢掉，
+模型可能不按约定格式发工具调用。
+
+所以默认仍是 `full`（与 0.1.61 及以前完全一致），而 `chained` 采用「能省则省、一有不确定就退回全量」
+的策略 —— 出现下面任何一条就重新起链（发全量 + `parent=null`，只是多花点 token，不会错位）：
+
+| 退回全量的情形 | 为什么 |
+| --- | --- |
+| 本轮是新会话 / 会话轮换 / 切号 | 链属于某个具体会话，换了就不能续 |
+| 固定头（系统提示 + 工具目录）变了 | 链首那份已经过期，续上去模型会照旧定义干活 |
+| 历史不是**严格追加**（被压缩、改写、回退） | 增量算不出来 |
+| 本轮新增内容为空 / 增量本身超预算 | 没有值得省的东西，或风险大于收益 |
+| 上一轮流失败、被取消、或没拿到 `message_id` | 父消息可能不存在或已作废 |
+
+判定逻辑是纯函数（`src/context-feed.ts`），测试在 `tests/check-context-feed.mjs`（判据）
+与 `tests/check-context-chain.mjs`（接线与生命周期，假 transport + 假 SSE）。
 
 ### 请求节流：为什么需要，值该给多少
 
@@ -338,6 +369,8 @@ node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
 node tests/check-fetch-injection.mjs  # 传输层注入必须"每次现取"（防单测静默打到线上）
 node tests/check-net-diagnostics.mjs  # net.fetch 诊断通道（标记文件生命周期 + 流式探针正反向）
 node tests/check-transport.mjs       # 传输层选择（降级判定 + 注入层真的跟着变）
+node tests/check-context-feed.mjs    # 上下文投喂判据（增量/回退的五种情形）
+node tests/check-context-chain.mjs   # 链式投喂接线与生命周期（假 transport + 假 SSE）
 node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
 node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
 ```

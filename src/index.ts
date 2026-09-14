@@ -41,6 +41,7 @@ import {
   validateAuth,
   createSessionCleaner,
   currentFetch,
+  contextChainInfo,
   DEFAULT_SESSION_CLEANUP,
   DEFAULT_SESSION_REUSE_TURNS,
   disposeSessionReuse,
@@ -79,6 +80,15 @@ import {
   TRANSPORT_HINT,
   type TransportKind,
 } from './transport.ts'
+import {
+  applyContextMode,
+  contextModeSettingsPath,
+  readContextModeSetting,
+  writeContextModeSetting,
+  CONTEXT_MODE_HINT,
+  DEFAULT_CONTEXT_MODE,
+  type ContextMode,
+} from './context-feed.ts'
 
 export const name = 'dsh-deepseek-web-login'
 export const inject = ['llm', 'webServer']
@@ -96,6 +106,12 @@ export interface Config extends AdapterConfig {
    * 设置页保存的值优先于这里；环境不支持 chromium 时自动降级为 node。详见 transport.ts。
    */
   transport?: TransportKind
+  /**
+   * 上下文投喂方式：`full`（默认）＝每轮重发全量 prompt；`chained`＝只发增量、把上一条回答
+   * 当父消息链接上去，让服务端维护上下文。设置页保存的值优先于这里，改动即时生效。
+   * 取舍与回退条件见 context-feed.ts 的模块注释。
+   */
+  contextMode?: ContextMode
   /**
    * 登录态主动探活的间隔（毫秒），默认 30 分钟；设 0 关闭。
    *
@@ -305,6 +321,16 @@ export function apply(ctx: any, config: Config = {}): void {
       (transportState.degraded
         ? '（配置要求 Chromium，但本环境没有 electron.net.fetch，已降级为 Node）'
         : ''),
+  )
+
+  // 上下文投喂方式（2026-09-14）：设置页保存的值优先于 cordis config，即时生效无需重启。
+  // 默认 full（每轮重发全量）—— 与 0.1.61 及以前的行为完全一致。
+  let contextMode = applyContextMode(
+    readContextModeSetting() ?? (config.contextMode === 'chained' ? 'chained' : DEFAULT_CONTEXT_MODE),
+  )
+  logger.info?.(
+    `deepseek-web: 上下文投喂=${contextMode}` +
+      (contextMode === 'chained' ? '（只发增量 + parent 指向上一条回答）' : '（每轮重发全量 prompt）'),
   )
 
   const adapterConfig: AdapterConfig = {
@@ -818,6 +844,43 @@ export function apply(ctx: any, config: Config = {}): void {
               return
             }
 
+            // 上下文投喂方式：每轮重发全量 prompt，还是只发增量 + parent 链（见 context-feed.ts）。
+            if (req.method === 'GET' && route === '/context-mode') {
+              sendJson(res, 200, {
+                mode: contextMode,
+                hint: CONTEXT_MODE_HINT,
+                settingsPath: contextModeSettingsPath(),
+                chain: contextChainInfo() ?? null,
+              })
+              return
+            }
+            if (req.method === 'POST' && route === '/context-mode') {
+              const body = await readJsonBody(req)
+              const wanted = body?.mode
+              if (wanted !== 'full' && wanted !== 'chained') {
+                sendJson(res, 400, { ok: false, error: "mode 必须是 'full' 或 'chained'" })
+                return
+              }
+              // 同 /transport：先即时生效（无需重启），再落盘；落盘失败如实回报，不假装成功
+              contextMode = applyContextMode(wanted)
+              let persisted = true
+              try {
+                writeContextModeSetting(wanted)
+              } catch {
+                persisted = false
+              }
+              logger.info?.(`deepseek-web: 上下文投喂切换为 ${contextMode}`)
+              sendJson(res, 200, {
+                ok: true,
+                mode: contextMode,
+                persisted,
+                hint: CONTEXT_MODE_HINT,
+                settingsPath: contextModeSettingsPath(),
+                chain: contextChainInfo() ?? null,
+              })
+              return
+            }
+
             // 诊断：用 Electron 的 net.fetch（Chromium 网络栈）对比指纹与连通性。
             // 实现与取舍见 src/net-diagnostics.ts 的模块注释。
             if (req.method === 'POST' && route === '/diagnostics/net-fetch') {
@@ -904,6 +967,8 @@ export function apply(ctx: any, config: Config = {}): void {
                   sessionCleanup: cleanupMode,
                   sessionCleanupPending: sessionCleaner.pendingCount(),
                   transport: transportState.effective,
+                  contextMode,
+                  contextChain: contextChainInfo() ?? null,
                   version: pluginVersion(),
                   probeIntervalMs,
                 },

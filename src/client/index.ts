@@ -326,24 +326,27 @@ function Panel(): any {
     // ── 标签栏 + 四个页 ────────────────────────────────────────
     // 原来 7 张卡堆在一页，「找某一项」要滚很久。分组按"什么时候会用它"：
     //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
-    const TAB_KEYS = ['account', 'model', 'gate', 'transport', 'about'] as const
+    const TAB_KEYS = ['account', 'model', 'gate', 'transport', 'context', 'about'] as const
     const TAB_LABELS: Record<string, string> = {
       account: '账号',
       model: '模型',
       gate: '防风控',
       transport: '传输层',
+      context: '上下文',
       about: '关于',
     }
     const accountPane = el('div', 'dsw-pane')
     const modelPane = el('div', 'dsw-pane')
     const gatePane = el('div', 'dsw-pane')
     const transportPane = el('div', 'dsw-pane')
+    const contextPane = el('div', 'dsw-pane')
     const aboutPane = el('div', 'dsw-pane')
     const panes: Record<string, HTMLElement> = {
       account: accountPane,
       model: modelPane,
       gate: gatePane,
       transport: transportPane,
+      context: contextPane,
       about: aboutPane,
     }
     const tabButtons: Record<string, HTMLButtonElement> = {}
@@ -907,10 +910,20 @@ function Panel(): any {
       }
     }
 
+    /**
+     * 上下文页的状态渲染。卡片在下面才建，这里用"先声明后赋值"的方式接上 ——
+     * 直接引用下面的 const 会在时序上踩 TDZ（applyStatus 早于卡片构造）。
+     */
+    let renderContextStatus: ((mode: string, chain: any) => void) | undefined
+
     const applyStatus = (status: StatusPayload): void => {
       loggedIn = !!status.auth?.loggedIn
       electron = !!status.electron
       windowOpen = !!status.loginWindowOpen
+      // 上下文投喂的实际状态（模式 + 链是否真的在跑）跟着状态轮询刷新
+      if ((status as any).contextMode) {
+        renderContextStatus?.(String((status as any).contextMode), (status as any).contextChain)
+      }
 
       badge.textContent = loggedIn ? (status.auth.unverified ? '已捕获（未校验）' : '已登录') : '未登录'
       badge.className = `dsw-badge ${loggedIn ? (status.auth.unverified ? 'off' : 'on') : 'off'}`
@@ -1453,6 +1466,80 @@ function Panel(): any {
     transportCard.append(transportMsg)
     transportPane.append(transportCard)
 
+    // ── 上下文页：每轮发全量 prompt，还是只发增量 + 父消息链 ────────────
+    // 背景（2026-09-14，读参考实现 + 抓真实帧得出）：插件一直发 parent_message_id:null，
+    // 每条消息都是会话里的根消息、没有父链，服务端回溯上下文到空 —— 所以历史只能每轮重发。
+    // 浏览器不是这么干的（只有会话第一条 parent 是 null），链式投喂就是照它做：
+    // 只发增量、把上一条回答挂成父消息。代价是工具协议只存在于链首那条消息里，
+    // 一旦服务端把早期上下文丢掉，模型可能不按约定格式发工具调用 —— 所以默认仍是全量。
+    const contextCard = el('div', 'dsw-card')
+    contextCard.append(el('div', 'dsw-cardhead', '上下文投喂方式'))
+    const contextRow = el('div', 'dsw-gate-row')
+    contextRow.append(el('span', 'dsw-gate-label', '每轮发什么'))
+    const contextBtns: Record<string, HTMLButtonElement> = {}
+    for (const pair of [
+      ['full', '每轮全量（默认）'],
+      ['chained', '链式投喂（只发增量）'],
+    ] as const) {
+      const key = pair[0]
+      const btn = el('button', 'dsw-btn ghost dsw-preset', pair[1]) as HTMLButtonElement
+      btn.addEventListener('click', () => void saveContextMode(key))
+      contextBtns[key] = btn
+      contextRow.append(btn)
+    }
+    contextCard.append(contextRow)
+    const contextStatus = el('p', 'dsw-hint', '')
+    contextCard.append(contextStatus)
+    const contextHintText = el('p', 'dsw-hint', '')
+    contextCard.append(contextHintText)
+    const contextMsg = el('p', 'dsw-hint dsw-gate-msg', '')
+    contextCard.append(contextMsg)
+    contextPane.append(contextCard)
+
+    renderContextStatus = (rawMode: string, chain: any): void => {
+      const mode = rawMode === 'chained' ? 'chained' : 'full'
+      for (const key of Object.keys(contextBtns)) {
+        contextBtns[key].classList.toggle('active', key === mode)
+      }
+      if (chain) {
+        contextStatus.textContent =
+          `链式投喂正在跑：网页端会话 ${String(chain.sessionId ?? '').slice(0, 8)}，` +
+          `链上已发 ${chain.turns} 段，父消息 ${chain.parentId}`
+      } else {
+        contextStatus.textContent =
+          mode === 'chained'
+            ? '链式投喂：下一条消息会重新起链（当前没有可续的链，或还没开始用）'
+            : '当前：每轮重发全量 prompt（和以前完全一致）'
+      }
+    }
+
+    const applyContextCard = (info: any): void => {
+      renderContextStatus?.(String(info?.mode ?? 'full'), info?.chain)
+      const hint = String(info?.hint ?? '')
+      // 设置文件路径单独一行 —— 想手工改配置的人需要它
+      const path = String(info?.settingsPath ?? '')
+      contextHintText.textContent = path ? `${hint}\n配置文件：${path}` : hint
+    }
+
+    const saveContextMode = async (mode: 'full' | 'chained'): Promise<void> => {
+      contextMsg.textContent = '切换中……'
+      try {
+        const result = await api('/context-mode', { method: 'POST', body: JSON.stringify({ mode }) })
+        if (result?.ok) {
+          applyContextCard(result)
+          contextMsg.textContent =
+            `已切到${result.mode === 'chained' ? '链式投喂' : '每轮全量'}，即时生效` +
+            (result.persisted === false
+              ? '（未能写入配置，重启后会回到上次保存的值）'
+              : '（已写入配置，重启后仍生效）')
+        } else {
+          contextMsg.textContent = `切换失败：${result?.error ?? '未知原因'}`
+        }
+      } catch (error: any) {
+        contextMsg.textContent = `切换失败：${error?.message ?? error}`
+      }
+    }
+
     // ── 关于页：版本与更新 / 数据位置 / 风险提示 ────────────────────
     // 单独一个标签而不是塞进别的页：这三块都是"偶尔看一眼"的信息，
     // 混进日常操作的页里只会稀释注意力。
@@ -1647,6 +1734,11 @@ function Panel(): any {
         applyTransportCard(await api('/transport'))
       } catch {
         transportMsg.textContent = '传输层设置读取失败（宿主未响应）'
+      }
+      try {
+        applyContextCard(await api('/context-mode'))
+      } catch {
+        contextMsg.textContent = '上下文设置读取失败（宿主未响应）'
       }
     })()
 

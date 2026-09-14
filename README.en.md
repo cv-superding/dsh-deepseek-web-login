@@ -56,10 +56,11 @@ The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so i
 
 ## Screenshots
 
-The settings panel is split into **5 tabs** (one page at a time): **Account** (login status /
+The settings panel is split into **6 tabs** (one page at a time): **Account** (login status /
 current account / **account library** / manual token) · **Models** (available models /
 connectivity test) · **Anti-throttle** (request pacing / session cleanup with three ranges / **call ledger**) ·
-**Transport** (fingerprint + one-click test) · **About** (version & updates / data locations / risks).
+**Transport** (fingerprint + one-click test) · **Context** (full resend / chained incremental) ·
+**About** (version & updates / data locations / risks).
 The action-feedback strip sits above the tab bar, so it stays visible from any tab.
 
 Settings panel (real screenshot, taken before the tab split): current account / login status (adapter registration, credential source, PoW WASM, server-side verification) / three login paths (Microsoft Edge · default browser · recover from a logged-in window) / manual token.
@@ -153,7 +154,40 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `cleanupDelayMs` | `60000~120000` (random) | deferred: **range** for the max wait (ms). Re-rolled at each flush |
 | `cleanupGapMs` | `800~2500` (random) | deferred: **range** for the gap between two adjacent delete requests (ms). Re-rolled per delete |
 | `transport` | **`chromium`** | Transport: `chromium` = Electron `net.fetch` (browser-identical fingerprint) / `node` = Node fetch |
+| `contextMode` | **`full`** | Context feeding: `full` = resend the whole prompt every turn / `chained` = send only the delta and hang it off the previous answer (see below) |
 | `probeIntervalMs` | `1800000` | Read-only login-state probe interval (ms); `0` disables. Uses `users/current`, zero quota |
+
+### Context feeding: full resend vs chained incremental
+
+Every completion request carries the **entire transcript** (system prompt + tool catalogue + full history) as
+`prompt`. Why resend it all? Because the plugin has always sent `parent_message_id: null` — meaning every message
+is a **root** of the web conversation with no parent chain, so the server walks the message tree up to nothing.
+That behaviour was measured on 2026-09-12 (send "remember the code ZC-7391-KX" in one session, then ask for the
+code → "don't know").
+
+A browser does it differently: `nextParentMessageId = history?.parentMessageId ?? finalAssistantMessageId` and
+`isFirstMessage = parent_message_id === null` — **only the first message of a session has a null parent**;
+after that each turn sends the previous message id as its parent and the server keeps the history.
+
+The **Context** tab in the settings panel can switch to **chained feeding**: later turns send only the delta and
+set `parent_message_id` to the previous answer's `message_id` (read from the first SSE frame,
+`event: ready` → `response_message_id`). Requests get much smaller and look like a real continuous chat. The cost:
+the tool protocol only exists in the first message of the chain, so if the server ever drops that early context the
+model may stop emitting tool calls in the agreed format.
+
+So `full` stays the default (identical to 0.1.61 and earlier), while `chained` follows a "save when safe, fall back
+on any doubt" policy — any of these restarts the chain (full prompt + `parent=null`; it only costs a few tokens):
+
+| Falls back to full when | Why |
+| --- | --- |
+| New session / session rotated / account switched | a chain belongs to one specific session |
+| The fixed head (system prompt + tool catalogue) changed | the chain head is stale |
+| History is not a **strict append** (compacted, rewritten, rolled back) | the delta cannot be computed |
+| Nothing new this turn / the delta itself exceeds budget | nothing worth saving, or the risk outweighs it |
+| Previous stream failed, was cancelled, or no `message_id` arrived | the parent may not exist any more |
+
+The decision logic is a pure function (`src/context-feed.ts`), covered by `tests/check-context-feed.mjs`
+(the rules) and `tests/check-context-chain.mjs` (wiring and lifecycle, fake transport + fake SSE).
 
 ### Why throttling is on by default, and which values to use
 

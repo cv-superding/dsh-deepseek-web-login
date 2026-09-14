@@ -2,6 +2,39 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.62 — 2026-09-14
+
+### 新：上下文投喂方式可切换（设置页「上下文」标签）
+
+起因是用户的两个问题：网页端每条消息都重发一大段提示词、以及"上下文到底有没有带过去"。
+查代码后事实是这样：插件一直把 `parent_message_id` 写成 `null`（`webapi.ts`），
+**每条消息都是会话里的根消息、没有父链**，服务端按消息树回溯上下文时回溯到空 ——
+所以历史只能由我们每轮重发。浏览器不是这么干的：参考实现里
+`nextParentMessageId = history?.parentMessageId ?? finalAssistantMessageId`、
+`isFirstMessage = parent_message_id === null`，**只有会话第一条的 parent 是 null**。
+
+新增 `contextMode` 设置（设置页「上下文」标签，两个按钮，即时生效 + 落盘）：
+
+- **`full`（默认）**：每轮重发全量 prompt。与 0.1.61 及以前**行为完全一致**，不改变任何既有用户。
+- **`chained`**：后续轮只发**增量**，`parent_message_id` 指向上一条回答的 `message_id`
+  （取自 SSE 首帧 `event: ready` 的 `response_message_id`，真实样本形如
+  `{"request_message_id":1,"response_message_id":2,"model_type":"default"}`）。历史由服务端维护。
+
+代价说清楚：链式投喂下**工具协议只存在于链首那条消息里**，一旦服务端丢掉早期上下文，
+模型可能不按 JSON 约定发工具调用。所以判据是"能省则省、一有不确定就退回全量"，
+以下任一情形都**重新起链**（发全量 + `parent=null`，只是多花点 token，不会上下文错位）：
+新会话 / 会话轮换 / 切号 / 固定头（系统提示+工具目录）变化 / 历史非严格追加（压缩、改写、回退）/
+本轮无新增 / 增量超预算 / 上一轮流失败·取消·没拿到 `message_id`。
+
+实现：新增纯逻辑模块 `src/context-feed.ts`（判据 + 设置读写）；`protocol.ts` 拆出
+`serializePromptParts()`（交出 `head` + **未截断**的 `entries` + `full`，`serializePrompt` 变为它的包装，
+两者逐字节一致）；`webapi.ts` 的 `parent_message_id`/`prompt` 改由决策结果提供，链状态与复用会话同生命周期
+（退役/切号/失败即作废）；`adapter.ts` 把 `promptParts` 随请求传下去。
+
+测试：`tests/check-context-feed.mjs`（判据 28 项）、`tests/check-context-chain.mjs`
+（接线与生命周期 10 项，假 transport + 假 SSE）、`logic-test.mjs` +3（ready 帧取 `response_message_id`）、
+`check-bundle.mjs` +2 组产物断言（四条接线 + 设置可切换）。反向验证 10 发 10 中。
+
 ## 0.1.61 — 2026-09-14
 
 ### 修：切到失效账号后「API 密钥无效」却毫无提示（三处接线）
