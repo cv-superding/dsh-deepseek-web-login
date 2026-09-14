@@ -259,6 +259,83 @@ test('sse: sink=content 时 -1/content 仍归正文（F24 不回归）', () => {
   assert.equal(textOf(events, 'text'), '正文甲正文乙正文丙')
 })
 
+// ── F25：首帧快照丢失时，思考不得上屏（2026-09-14 用真实帧复现）──────────
+// 抓包实测（4 轮同构）的真实形态：
+//   快照(fragments=[{type:"THINK", content:…}]) → -1/content → 380× 裸续段
+//   → fragments+1 [RESPONSE] → -1/content → 110× 裸续段 → BATCH/status
+// 即：思考的归属**完全依赖首帧快照里的 THINK fragment**，之后全走 -1/content 与裸续段；
+// `response/thinking_content` 一次都不出现。所以快照整帧丢失（或服务端先发
+// `fragments: []` 的快照）时，旧实现会在「无 fragment 可续」的分支里无条件当正文发射
+// → **整段思考上屏**。用真实帧删掉快照后回放：thinking=0 / text=818（思考 661 字全在里面）。
+// 现在：开了思考却还没有 fragment 时先把文本暂存，等 fragment 出现再定归属。
+test('sse: 首帧快照丢失时思考仍须归位（F25）', () => {
+  const state = createSseState({ thinkingEnabled: true })
+  // 自证：开了思考又没有 fragment 时，第一段必须进暂存、不得立刻发射
+  assert.deepEqual(state.handle({ p: 'response/fragments/-1/content', v: '我们需要回答' }), [])
+  assert.equal(state.stats().orphanLen, 6, '自证：文本确实进了暂存缓冲')
+  const events = drain(state, [
+    [{ v: '中文，约150字。' }],
+    // 正文开始：服务端 APPEND 一个 RESPONSE fragment（真实帧的顺序就是这样）
+    [{ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '两次不够：' } }],
+    [{ p: 'response/fragments/-1/content', v: '服务器只能确认客户端能发。' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '我们需要回答中文，约150字。')
+  assert.equal(textOf(events, 'text'), '两次不够：服务器只能确认客户端能发。')
+  // 顺序断言：思考必须在**正文 fragment 出现的那一刻**就结算发射，而不是拖到流结束。
+  // 少了这条，把结算点从 appendFragments 挪到 finish() 也能"通过内容断言" ——
+  // 但 UI 上会变成「先出正文、最后才补思考」，方向就错了。
+  const order = events.filter((e) => e.kind === 'thinking' || e.kind === 'text').map((e) => e.kind)
+  assert.deepEqual(order, ['thinking', 'text', 'text'], '思考段必须在正文之前结算并发射')
+})
+
+test('sse: 整轮没有 fragment 时暂存文本按思考收尾（F25）', () => {
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '思考甲' }],
+    [{ v: '思考乙' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '思考甲思考乙', '结束前必须把暂存交出去，不能静默丢字')
+  assert.equal(textOf(events, 'text'), '')
+})
+
+test('sse: 迟到快照也能把暂存文本认回思考（F25）', () => {
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '思考甲' }], // 快照还没到
+    [{ v: { response: { fragments: [{ type: 'THINK', content: '思考甲' }] } } }], // 快照迟到
+    [{ p: 'response/fragments/-1/content', v: '思考乙' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '思考甲思考乙', '暂存段与快照对账不得重复')
+  assert.equal(textOf(events, 'text'), '')
+})
+
+test('sse: 未开思考时不缓冲（F25 不回归）', () => {
+  const state = createSseState({ thinkingEnabled: false })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '正文甲' }],
+    [{ v: '正文乙' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'text'), '正文甲正文乙', '没开思考就没有歧义，必须即时发射')
+  assert.equal(textOf(events, 'thinking'), '')
+})
+
+test('sse: 快照正常时缓冲逻辑不介入（F25 不回归）', () => {
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ v: { response: { fragments: [{ type: 'THINK', content: '思考甲' }] } } }],
+    [{ p: 'response/fragments/-1/content', v: '思考乙' }],
+    [{ p: 'response/fragments', o: 'APPEND', v: { type: 'RESPONSE', content: '正文' } }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(textOf(events, 'thinking'), '思考甲思考乙')
+  assert.equal(textOf(events, 'text'), '正文')
+  assert.equal(state.stats().orphanLen, undefined, '自证：正常路径下从未用过暂存')
+})
+
 // ── 凭证解包（实测踩坑回归）─────────────────────────────
 // 2026-09 网页端把 userToken 存成 AppKit 包装 JSON：{"value":"<token>","__version":...}。
 // 早期实现把包装 JSON 原文当 token 用 → 服务端 40003 Authorization Failed →

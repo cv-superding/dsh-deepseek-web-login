@@ -255,6 +255,18 @@ const checks = {
   'host 把清理设置一起存进闸门（不再被保存冲掉）':
     /sessionCleanup:\s*cleanupMode,\s*cleanupBatch:\s*cleanupBatchRange/.test(host) &&
     /cleanupDelayMs:\s*cleanupDelayRange/.test(host),
+
+  // F25（2026-09-14）：首帧快照丢失时整段思考上屏。
+  // 断言按**调用点**写，不是只匹配字段名 —— 库里出现 `orphanBuffer` 只说明变量在，
+  // 真正要保证的是「生产链路把思考开关传进了状态机」以及「两处结算点都在」。
+  'host 思考续段的暂存与结算（F25）':
+    // ⚠️ 这处是整条修复的开关：测试里是自己传的，覆盖不到生产调用点，
+    //    所以必须由产物断言守住 —— 漏传了，F25 在生产里等于没修。
+    /parseWebSse\(body, \{\s*thinkingEnabled:\s*params\.thinkingEnabled\s*\}\)/.test(host) &&
+    // 两处结算点：快照（迟到快照）+ APPEND（第一个 fragment 出现）
+    /settleOrphans\(out, fragments\[0\]\.type\)/.test(host) &&
+    /settleOrphans\(out, fragment\.type\)/.test(host) &&
+    host.includes('orphanBuffer'),
 }
 
 let failed = 0

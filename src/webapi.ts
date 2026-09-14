@@ -1169,7 +1169,28 @@ async function* iterateLines(body: any): AsyncGenerator<string> {
  *        更短（过期快照）或分歧（服务端重排/回退）一律忽略，绝不重置已发射内容
  *     ③ 快照永远不会让已发射内容变小 → 不会丢字、不会因此触发假 EMPTY_RESPONSE
  */
-export function createSseState() {
+export interface SseStateOptions {
+  /**
+   * 本轮请求是否开启了思考（对应请求体里的 `thinking_enabled`）。
+   *
+   * F25（2026-09-14，用真实帧复现）：正常流的**首帧快照**一定带一个 `type: "THINK"`
+   * 的 fragment（抓包实测 4 轮全如此），之后思考全部通过
+   * `response/fragments/-1/content` 与「无 path 的裸续段」续写 —— 也就是说
+   * **思考的归属完全依赖那份快照**。一旦快照没能进入状态机（整帧丢失，或服务端
+   * 先发了 `fragments: []` 的快照），`fragments` 就一直是空的，而旧实现在
+   * 「无 fragment 可续」时**无条件当正文发射** ⇒ 整段思考上屏。
+   *
+   * 实测后果：09-14 一轮 2062 字符、09-12 两轮 10526 / 4360 字符的全部进正文，
+   * 且这些正文块开头都缺几个字（"回答中文…" 本该是 "我们需要回答中文…"，
+   * 缺掉的正是被丢弃的那份快照里的片段）—— 一个根因同时解释「整段上屏」与「缺开头」。
+   *
+   * 现在：开了思考却还没 fragment 时先**缓冲**，等 fragment 出现再定归属。
+   * 未开思考时不缓冲（没有歧义），保持旧行为。
+   */
+  thinkingEnabled?: boolean
+}
+
+export function createSseState(options: SseStateOptions = {}) {
   const fragments: Fragment[] = []
   /** fragments 派生文本（仅用于快照对账候选）。 */
   let fragmentsText = ''
@@ -1182,6 +1203,12 @@ export function createSseState() {
   let outThinking = ''
   let divergences = 0
   let sink: 'fragments' | 'thinking' | 'content' | null = null
+  /**
+   * F25：通道未知的暂存文本。只在「请求开了思考、但还没出现任何 fragment」时使用
+   * —— 正常流不会走到这里（首帧快照就带着 THINK fragment）。
+   */
+  let orphanBuffer = ''
+  const thinkingEnabled = options.thinkingEnabled === true
   let pendingFinish: string | undefined
   let sawData = false
   /** 服务端上报的本消息 token 总量（见 WebStreamEvent 的 totalTokens 说明）。 */
@@ -1195,6 +1222,29 @@ export function createSseState() {
   }
   const emitText = (out: WebStreamEvent[], delta: string): void => emit(out, 'text', delta)
   const emitThinking = (out: WebStreamEvent[], delta: string): void => emit(out, 'thinking', delta)
+
+  /**
+   * F25：把暂存文本按**刚出现的 fragment 类型**归属并发射。
+   *
+   * 真实帧（2026-09-14 抓，4 轮同构）显示两条规律：
+   *   1. 思考的 fragment 由**首帧快照**建立；正文的 fragment 由 `response/fragments`
+   *      的 APPEND 建立（`fragments+1 [RESPONSE]`）；
+   *   2. 第一个 RESPONSE fragment 出现之前，流上的内容**全是思考**。
+   *
+   * 所以无论先到的是 THINK 还是 RESPONSE fragment，暂存的那段都应归思考 ——
+   * 正文不会"先于自己的 fragment"出现在流上。这样即使快照整帧丢失，
+   * 思考仍会回到思考通道，而不是被当成正文顶到用户脸上。
+   */
+  const settleOrphans = (out: WebStreamEvent[], firstType: string): void => {
+    if (!orphanBuffer) return
+    const text = orphanBuffer
+    orphanBuffer = ''
+    if (!isReasoningType(firstType)) {
+      // 正文 fragment：它之前的内容只可能是思考（见上面的规律 2），仍归思考。
+    }
+    directThinking += text
+    emitThinking(out, text)
+  }
 
   /** 快照对账：只在候选是严格延伸时补差；过期/分歧忽略（宁可漏一次快照，也不吐乱码或丢字）。 */
   const reconcile = (out: WebStreamEvent[], kind: 'text' | 'thinking', candidate: string): void => {
@@ -1218,7 +1268,7 @@ export function createSseState() {
     }
   }
   /** 快照：整表替换 + 对账（不直接发射）。 */
-  const replaceFragments = (list: any[]): void => {
+  const replaceFragments = (list: any[], out: WebStreamEvent[]): void => {
     fragments.length = 0
     for (const f of list) {
       if (f && typeof f === 'object' && typeof f.content === 'string') {
@@ -1227,13 +1277,21 @@ export function createSseState() {
     }
     rebuildFragmentText()
     sink = fragments.length > 0 ? 'fragments' : null
+    // F25：快照迟到时（正常是流的第一帧），先把之前"无归属"的文本结算掉。
+    if (fragments.length > 0) settleOrphans(out, fragments[0].type)
   }
   /** 增量：追加 fragment（其 content 属于新内容 → 直接发射）。 */
   const appendFragments = (incoming: any, out: WebStreamEvent[]): void => {
     const list = Array.isArray(incoming) ? incoming : incoming !== undefined ? [incoming] : []
+    let settled = false
     for (const f of list) {
       if (!f || typeof f !== 'object' || typeof f.content !== 'string') continue
       const fragment: Fragment = { type: String(f.type ?? 'RESPONSE'), content: f.content, emitted: 0 }
+      // F25：第一个 fragment 出现之前攒下的文本先定归属（必须在发射本 fragment 之前）。
+      if (!settled) {
+        settled = true
+        settleOrphans(out, fragment.type)
+      }
       fragments.push(fragment)
       if (isReasoningType(fragment.type)) {
         fragmentsThinking += fragment.content
@@ -1262,6 +1320,19 @@ export function createSseState() {
       if (sink === 'thinking') {
         directThinking += text
         emitThinking(out, text)
+        return
+      }
+      if (sink === 'content') {
+        directText += text
+        emitText(out, text)
+        return
+      }
+      // F25：请求开了思考、却还没有任何 fragment 可续 —— 正常流里首帧快照一定带 THINK
+      // fragment，走到这里说明那份快照没能进入状态机（丢失 / fragments 为空）。
+      // 这段文字极可能是思考的尾巴，先攒着，等 fragment 出现再定归属（见 settleOrphans）。
+      // 旧实现在这里无条件当正文发射，就是"整段思考上屏"的直接原因。
+      if (thinkingEnabled) {
+        orphanBuffer += text
         return
       }
       directText += text
@@ -1299,7 +1370,7 @@ export function createSseState() {
       if (d && typeof d === 'object' && d.v && typeof d.v === 'object' && d.v.response && typeof d.v.response === 'object') {
         const response = d.v.response
         if (Array.isArray(response.fragments)) {
-          replaceFragments(response.fragments)
+          replaceFragments(response.fragments, out)
           // fragments 存在时以它为准；否则用 content
           if (fragments.length > 0) {
             reconcile(out, 'thinking', fragmentsThinking)
@@ -1437,20 +1508,40 @@ export function createSseState() {
     },
     /** 流结束：产出 finish（若确实收到过数据）。 */
     finish(): WebStreamEvent[] {
-      return sawData
-        ? [{ kind: 'finish', reason: pendingFinish, ...(totalTokens !== undefined ? { totalTokens } : {}) }]
-        : []
+      const out: WebStreamEvent[] = []
+      // F25：整轮都没等到 fragment（流被掐断、或被中止）—— 攒下的文本该有归宿，
+      // 否则它会静默丢掉。开了思考就按思考收尾，避免以"正文"的名义补发。
+      if (sawData && orphanBuffer) {
+        const text = orphanBuffer
+        orphanBuffer = ''
+        if (thinkingEnabled) {
+          directThinking += text
+          emitThinking(out, text)
+        } else {
+          directText += text
+          emitText(out, text)
+        }
+      }
+      if (!sawData) return out
+      out.push({ kind: 'finish', reason: pendingFinish, ...(totalTokens !== undefined ? { totalTokens } : {}) })
+      return out
     },
     /** 诊断：已发射正文/思考长度与快照分歧次数（单测与排查用）。 */
-    stats(): { text: string; thinking: string; divergences: number; totalTokens?: number } {
-      return { text: outText, thinking: outThinking, divergences, ...(totalTokens !== undefined ? { totalTokens } : {}) }
+    stats(): { text: string; thinking: string; divergences: number; orphanLen?: number; totalTokens?: number } {
+      return {
+        text: outText,
+        thinking: outThinking,
+        divergences,
+        ...(orphanBuffer ? { orphanLen: orphanBuffer.length } : {}),
+        ...(totalTokens !== undefined ? { totalTokens } : {}),
+      }
     },
   }
 }
 
 /** 解析 /chat/completion 的 SSE 字节流，产出增量文本/思考事件。 */
-export async function* parseWebSse(body: any): AsyncGenerator<WebStreamEvent> {
-  const state = createSseState()
+export async function* parseWebSse(body: any, options?: SseStateOptions): AsyncGenerator<WebStreamEvent> {
+  const state = createSseState(options)
   let eventName = ''
   /**
    * F13（2026-09-12 审计）：SSE 规范允许一个事件里出现**多个** `data:` 行，
@@ -1908,7 +1999,7 @@ export async function* streamWebCompletion(
     sessionId = opened.sessionId
     body = opened.resp.body
     if (timer) clearTimeout(timer)
-    iterator = parseWebSse(body)
+    iterator = parseWebSse(body, { thinkingEnabled: params.thinkingEnabled })
     const idle =
       Number.isFinite(params.idleTimeoutMs) && (params.idleTimeoutMs as number) > 0
         ? Math.min(params.idleTimeoutMs as number, 600_000)
