@@ -464,6 +464,23 @@ function looksMidSentence(text: string): boolean {
   return /[a-zA-Z0-9\u4e00-\u9fff\u3040-\u30ff]/.test(last)
 }
 
+/**
+ * 自动续写只对**用户可见的回答**（purpose === 'chat'）生效。
+ *
+ * F26（2026-09-14 实测）：标题生成 / 上下文压缩这类内部调用天然**不以标点收尾**
+ * （标题就是"以汉字结尾"），于是 `looksMidSentence` 对它**恒为真** →
+ * 每轮都被判成"句中被截" → 自动发起续写、要求模型"接着写" → 模型把标题重复一遍，
+ * 直到续写额度用尽。结果标题变成重复垃圾：实测 13 个会话里 **11 个**中招 ——
+ * `"在吗在吗在吗"`、`"AI助手的记忆功能"×3`、`"安装 archify skills"×3`、
+ * `"TCP 三次握手原因解析"×3` …（只有走 fallback 的两个标题是正常的）。
+ *
+ * 续写的本意是"帮用户把被截断的回答写完整"，对内部短文本没有意义，所以按用途白名单收口：
+ * 只有 `chat`（或未指定）才续写 —— 将来新增别的内部用途也不会再踩进来。
+ */
+function allowsAutoContinue(purpose: unknown): boolean {
+  return purpose === undefined || purpose === null || purpose === '' || purpose === 'chat'
+}
+
 /** 构造 deepseek-web 适配器（鸭子类型满足 LlmAdapter 契约，无需继承）。 */
 export function createAdapter(deps: AdapterDeps) {
   const logger = deps.config.logger
@@ -875,6 +892,9 @@ export function createAdapter(deps: AdapterDeps) {
             `${midSentence ? '，尾部是句中' : ''}`,
         )
         const eligible =
+          // F26：只对用户可见的回答续写（见 allowsAutoContinue 的说明）。
+          // 少了这一条，标题生成会被无尽续写、标题变成重复垃圾。
+          allowsAutoContinue(options?.purpose) &&
           roundError === undefined &&
           deps.config.autoContinue !== false &&
           rounds < maxRounds &&

@@ -52,7 +52,7 @@ function cutStream(parts) {
 }
 
 /** 跑一次适配器流，收集输出块 */
-async function run(depsOverrides, streams) {
+async function run(depsOverrides, streams, streamOptions = {}) {
   const calls = []
   let callIndex = 0
   const queue = [...streams]
@@ -72,7 +72,10 @@ async function run(depsOverrides, streams) {
   const deltas = []
   let finish = null
   let usage = null
-  for await (const event of adapter.stream({ messages: [{ role: 'user', content: [{ type: 'text', text: '写个长回答' }] }] })) {
+  for await (const event of adapter.stream({
+    messages: [{ role: 'user', content: [{ type: 'text', text: '写个长回答' }] }],
+    ...streamOptions,
+  })) {
     if (event.type === 'block-end' && event.block?.type === 'text') blocks.push(event.block.text)
     if (event.type === 'text-delta') deltas.push(event.text)
     if (event.type === 'finish') finish = event.reason
@@ -151,6 +154,54 @@ await test('续写仍被截 → 额度内继续补，额度用尽报 stop', asyn
   )
   assert.equal(calls.length, 3, '原文 + 2 轮续写')
   assert.equal(finish?.kind, 'stop')
+})
+
+// ── F26：内部短文本调用（标题生成 / 上下文压缩）不得触发自动续写 ──────────
+// 2026-09-14 实测：13 个会话里 **11 个**标题是重复垃圾 ——
+//   "在吗在吗在吗"、"AI助手的记忆功能"×3、"安装 archify skills"×3、
+//   "TCP 三次握手原因解析"×3、"鹈鹕骑自行车 HTML 页面"×2 …
+// 根因：标题天然**以汉字结尾** ⇒ looksMidSentence 恒为真 ⇒ 每轮都被判成"句中被截"
+// ⇒ 自动续写要求模型"接着写" ⇒ 模型把标题重复一遍（每轮一次，直到额度用尽）。
+// 续写本意是"帮用户把被截断的回答写完整"，对内部短文本没有意义。
+await test('purpose=session-title 不得续写（标题天然"句中被截"）—— F26', async () => {
+  const logs = []
+  const { blocks, callCount } = await run(
+    { config: { logger: { info: (m) => logs.push(m), warn: () => {}, debug: () => {}, error: () => {} } } },
+    [fakeStream(['TCP 三次握手原因解析']), fakeStream(['TCP 三次握手原因解析'])],
+    { purpose: 'session-title' },
+  )
+  assert.equal(callCount, 1, '标题生成只能发一次请求')
+  assert.equal(blocks.join(''), 'TCP 三次握手原因解析')
+  // 自证：标题确实被判成"句中被截"—— 否则这条用例可能没走到点子上
+  // （若哪天判据变了、标题不再满足 midSentence，这条自证会先红，提醒我们重审用例）
+  assert.ok(
+    logs.some((l) => l.includes('尾部是句中')),
+    '自证：标题在这一轮里确实满足"句中被截"的条件，才会被误续写',
+  )
+})
+
+await test('purpose=compaction 同样不续写 —— F26', async () => {
+  const { callCount } = await run(
+    {},
+    [fakeStream(['压缩后的摘要']), fakeStream(['压缩后的摘要'])],
+    { purpose: 'compaction' },
+  )
+  assert.equal(callCount, 1, '上下文压缩不是"给用户看的回答"，不该续写')
+})
+
+await test('purpose=chat 仍照旧续写（修复不得扩大到正常路径）—— F26 不回归', async () => {
+  const { blocks, callCount } = await run(
+    {},
+    [fakeStream(['这是半截回答']), fakeStream(['，接着写完。'])],
+    { purpose: 'chat' },
+  )
+  assert.equal(callCount, 2)
+  assert.equal(blocks.join(''), '这是半截回答，接着写完。')
+})
+
+await test('不传 purpose（默认 chat）仍续写 —— F26 不回归', async () => {
+  const { callCount } = await run({}, [fakeStream(['这是半截回答']), fakeStream(['，接着写完。'])])
+  assert.equal(callCount, 2, '没带用途的调用按 chat 处理')
 })
 
 await test('已发起工具调用的轮次不续写（等工具结果）', async () => {

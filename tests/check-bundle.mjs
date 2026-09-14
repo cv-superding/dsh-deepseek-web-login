@@ -267,6 +267,13 @@ const checks = {
     /settleOrphans\(out, fragments\[0\]\.type\)/.test(host) &&
     /settleOrphans\(out, fragment\.type\)/.test(host) &&
     host.includes('orphanBuffer'),
+
+  // F26（2026-09-14）：内部用途（标题生成 / 上下文压缩）不得触发自动续写。
+  // 实测 13 个会话里 11 个标题是重复垃圾（"在吗在吗在吗"、"安装 archify skills"×3 …）。
+  // 同样按**调用点**写：eligible 判定里必须真的带上用途白名单。
+  'host 内部用途不得触发自动续写（F26）':
+    /allowsAutoContinue\(options\?\.purpose\)\s*&&/.test(host) &&
+    /allowsAutoContinue\(purpose\)[\s\S]{0,140}?chat/.test(host),
 }
 
 let failed = 0
