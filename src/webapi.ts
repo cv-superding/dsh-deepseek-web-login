@@ -636,6 +636,38 @@ export const DEFAULT_SESSION_CLEANUP: SessionCleanupPolicy = {
  */
 const MAX_IDS_PER_REQUEST = 20
 
+/**
+ * 会话生命周期事件（2026-09-14）。
+ *
+ * 宿主用它维护一份「**还欠一次删除**」的会话清单并落盘（见 `session-journal.ts`），
+ * 于是进程退出/被强杀之后，下次启动还能把这些会话补删掉 —— 在此之前，
+ * 复用槽和待删队列只活在内存里，进程一走就静默丢失，网页端就会一直堆。
+ *
+ * 三个事件对应三种账：
+ *   - `leased`  会话进了复用槽（此刻**还没删**，所以是欠账）；
+ *   - `queued`  会话进了待删队列（同样是欠账，只是排队了）；
+ *   - `deleted` **确认删掉**（服务端接受了）→ 唯一能销账的信号。
+ */
+export type SessionLifecycleEvent =
+  | { kind: 'leased'; auth: WebAuth; sessionId: string }
+  | { kind: 'queued'; auth: WebAuth; sessionId: string }
+  | { kind: 'deleted'; sessionId: string }
+
+let sessionLifecycleHook: ((event: SessionLifecycleEvent) => void) | undefined
+
+/** 注册生命周期钩子（宿主启动时调一次即可；传 `undefined` 取消）。 */
+export function setSessionLifecycleHook(hook?: (event: SessionLifecycleEvent) => void): void {
+  sessionLifecycleHook = hook
+}
+
+function emitSessionLifecycle(event: SessionLifecycleEvent): void {
+  try {
+    sessionLifecycleHook?.(event)
+  } catch {
+    /* 钩子出错不能影响请求主流程 */
+  }
+}
+
 export interface SessionCleanerOptions {
   policy?: Partial<SessionCleanupPolicy>
   logger?: { info?: (msg: string) => void; debug?: (msg: string) => void }
@@ -747,16 +779,41 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
     ;(timer as any)?.unref?.()
   }
 
-  async function deleteOne(auth: WebAuth, sessionId: string): Promise<void> {
+  /**
+   * 服务端"看起来接受了"：HTTP ok 且响应体里没有业务错误信封。
+   *
+   * 网页端会在 HTTP 200 上裹一层 `{code, msg, data:{biz_code,biz_msg}}` ——
+   * 只看 `resp.ok` 会把"其实没删掉"当成成功（F07 踩过这个坑）。
+   */
+  async function respLooksOk(resp: Response): Promise<boolean> {
+    let ok = resp.ok
+    if (ok) {
+      const text = await resp.text().catch(() => '')
+      try {
+        const json = text ? JSON.parse(text) : undefined
+        if (json && envelopeError(json)) ok = false
+      } catch {
+        ok = false
+      }
+    }
+    return ok
+  }
+
+  /**
+   * 删一个，返回**是否确认删掉** —— 删除回执要用来摘掉"欠删除"日志里的记录
+   * （见 session-journal.ts：只有确认删掉才移记录，否则下次启动还来补删）。
+   */
+  async function deleteOne(auth: WebAuth, sessionId: string): Promise<boolean> {
     try {
-      await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
+      const resp = await doFetch(`${DS_BASE}/api/v0/chat_session/delete`, {
         method: 'POST',
         headers: buildDsHeaders(auth),
         body: JSON.stringify({ chat_session_id: sessionId }),
         signal: AbortSignal.timeout(10_000),
       })
+      return await respLooksOk(resp)
     } catch {
-      /* 清理失败不影响主流程 */
+      return false // 清理失败不影响主流程
     }
   }
 
@@ -782,17 +839,11 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
           body: JSON.stringify({ chat_session_ids: batch.map((b) => b.sessionId) }),
           signal: AbortSignal.timeout(15_000),
         })
-        let ok = resp.ok
+        const ok = await respLooksOk(resp)
         if (ok) {
-          const text = await resp.text().catch(() => '')
-          try {
-            const json = text ? JSON.parse(text) : undefined
-            if (json && envelopeError(json)) ok = false
-          } catch {
-            ok = false
-          }
-        }
-        if (ok) {
+          // 批量删只发一个请求，服务端接受即认为这一批都删掉了（它不逐个回报）。
+          // 所以只对"同账号 + 无业务错误"的批次这样处理 —— 见上面的 F07 说明。
+          for (const item of batch) emitSessionLifecycle({ kind: 'deleted', sessionId: item.sessionId })
           logger?.debug?.(`deepseek-web: 已批量清理 ${batch.length} 个临时会话（只用了 1 个请求）`)
           return
         }
@@ -805,7 +856,9 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
 
     for (let i = 0; i < batch.length; i += 1) {
       if (i > 0) await sleep(rollGap())
-      await deleteOne(batch[i].auth, batch[i].sessionId)
+      if (await deleteOne(batch[i].auth, batch[i].sessionId)) {
+        emitSessionLifecycle({ kind: 'deleted', sessionId: batch[i].sessionId })
+      }
     }
     logger?.debug?.(`deepseek-web: 已清理 ${batch.length} 个临时会话`)
   }
@@ -850,6 +903,8 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
     // 队列由空变非空 = 新的一轮开始 → 重新抽本轮的阈值与最长等待
     if (queue.length === 0) rollCycle()
     queue.push({ auth, sessionId })
+    // 落账：这个会话此刻**还没删**（排着队）。宿主据此落盘，进程被强杀后下次启动补删。
+    emitSessionLifecycle({ kind: 'queued', auth, sessionId })
     // 只有 deferred 才「攒够就立即清理」。immediate 始终走延迟 —— 保持老行为：
     // 调用结束后过一会儿才删，避免「流刚结束就紧跟一个 DELETE」这种过紧的节奏。
     if (policy.mode === 'deferred' && queue.length >= policy.batchSize) {
@@ -1521,6 +1576,9 @@ async function leaseSession(
     signal.throwIfAborted()
   }
   reuseSlot = { key, sessionId, turns: 1, ...(cleanup ? { cleanup } : {}) }
+  // 落账：这个会话进了复用槽，此刻**还没删**。宿主据此落盘 —— 否则进程被强杀时
+  // 槽里的会话（每次退出必留一个）永远没人回收。
+  emitSessionLifecycle({ kind: 'leased', auth, sessionId })
   if (previous) {
     try {
       previous.cleanup?.(previous.sessionId)
@@ -1532,6 +1590,29 @@ async function leaseSession(
 /** 把某个会话从复用槽里摘掉（会话失效 / 请求失败时调用，下次会新建）。 */
 export function retireSession(sessionId?: string): void {
   if (!sessionId || (reuseSlot && reuseSlot.sessionId === sessionId)) reuseSlot = undefined
+}
+
+/**
+ * 卸载/退出时的收尾：把复用槽里的会话**交回它自己的清理回调**，然后清空槽。
+ *
+ * 为什么必须单独有这个函数（2026-09-14）：`retireSession()` 只是把槽清掉，
+ * 排队删除是槽里那个 `cleanup` 干的活 —— 直接清槽等于把待删的会话一起丢了，
+ * 它就会永远留在网页端（每次退出必留一个，实测就是这样堆起来的）。
+ *
+ * 返回被退役的 sessionId（没有则 `undefined`），调用方可以据此记账/打日志。
+ * 注意它**只排队**、不等删除完成；删不掉的部分由 `session-journal.ts` 兜底，
+ * 记录只在"确认删掉"时才被摘掉，所以强杀也能在下次启动补删。
+ */
+export function disposeSessionReuse(): string | undefined {
+  const slot = reuseSlot
+  if (!slot) return undefined
+  reuseSlot = undefined
+  try {
+    slot.cleanup?.(slot.sessionId)
+  } catch {
+    /* 排队失败不影响卸载 */
+  }
+  return slot.sessionId
 }
 
 /** 只给测试用：清空复用槽。 */

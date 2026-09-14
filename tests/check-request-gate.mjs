@@ -429,6 +429,42 @@ await test('设置文件：写入后能读回（路径跟随 DSH_HOME）', () =>
   }
 })
 
+await test('清理设置必须随闸门落盘：改请求间隔不能把它从 gate.json 里抹掉', () => {
+  // 2026-09-14 实测的 bug：清理字段从没被初始化进闸门 → `settings()` 里没有它们 →
+  // 设置页保存（写的是 settings() 的返回值）时被静默抹掉，重启后悄悄回到内置默认。
+  // 用户视角就是"我明明拖过滑块，过两天又变回去了"。
+  const tmp = useTempDshHome()
+  try {
+    const gate = createRequestGate({
+      // 用户实际想要的样子：攒批 + 2~5 分钟后删
+      sessionCleanup: 'deferred',
+      cleanupBatch: { min: 6, max: 10 },
+      cleanupDelayMs: { min: 120_000, max: 300_000 },
+      cleanupGapMs: { min: 800, max: 2_500 },
+      minRequestIntervalMs: 2_000,
+      maxRequestIntervalMs: 4_000,
+    })
+    const initial = gate.settings()
+    assert.equal(initial.sessionCleanup, 'deferred', '创建时就要带上清理模式')
+    assert.deepEqual(initial.cleanupDelayMs, { min: 120_000, max: 300_000 })
+    writeGateSettings(initial)
+
+    // 用户只是调了下请求间隔，整份回写
+    const afterEdit = gate.configure({ minRequestIntervalMs: 3_000, maxRequestIntervalMs: 6_000 })
+    writeGateSettings(afterEdit)
+
+    const back = readGateSettings()
+    assert.equal(back?.cleanupDelayMs?.min, 120_000, '清理延迟必须还在文件里（这正是原先丢掉的）')
+    assert.equal(back?.cleanupDelayMs?.max, 300_000)
+    assert.equal(back?.sessionCleanup, 'deferred')
+    assert.deepEqual(back?.cleanupBatch, { min: 6, max: 10 })
+    assert.deepEqual(back?.cleanupGapMs, { min: 800, max: 2_500 })
+    assert.equal(back?.minRequestIntervalMs, 3_000, '改的那项当然要生效')
+  } finally {
+    tmp.restore()
+  }
+})
+
 await test('设置文件损坏 / 字段非法时不炸，回落默认', () => {
   const tmp = useTempDshHome()
   try {

@@ -240,6 +240,21 @@ const checks = {
   'host 思考续段的通道归属（F24）':
     /if \(!fragment\) \{\s*if \(sink === ["']thinking["']\)/.test(host) &&
     /fragments\.length === 0 && \(sink === ["']thinking["']/.test(host),
+
+  // 2026-09-14：退出时会泄漏「正在复用的那个会话」（每次运行必留一个，实测堆了几十个）。
+  // 三块缺一不可：① 退出时退役复用槽（按**调用点**匹配，不是函数定义）；
+  // ② 欠删会话落盘；③ 启动补删（调用点）。删成功才销账由 deleted 事件承担。
+  'host 退出收尾 + 欠删落盘 + 启动补删（防退出泄漏）':
+    host.includes('disposeSessionReuse();') &&
+    host.includes('sessions-in-use.json') &&
+    /runStartupSweep\(\{/.test(host) &&
+    // 注：打包器会把字符串字面量统一成双引号，所以别写死单引号
+    /kind:\s*["']deleted["']/.test(host),
+
+  // 2026-09-14：清理设置曾被设置页的下一次保存静默抹掉（闸门没初始化这几个字段）。
+  'host 把清理设置一起存进闸门（不再被保存冲掉）':
+    /sessionCleanup:\s*cleanupMode,\s*cleanupBatch:\s*cleanupBatchRange/.test(host) &&
+    /cleanupDelayMs:\s*cleanupDelayRange/.test(host),
 }
 
 let failed = 0

@@ -43,6 +43,8 @@ import {
   currentFetch,
   DEFAULT_SESSION_CLEANUP,
   DEFAULT_SESSION_REUSE_TURNS,
+  disposeSessionReuse,
+  setSessionLifecycleHook,
   type SessionCleanupMode,
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
@@ -51,6 +53,7 @@ import { startProbeLoop } from './probe.ts'
 import { checkForUpdate, RELEASE_REPO } from './update-check.ts'
 import { pluginVersion } from './version.ts'
 import { webLoginDir } from './paths.ts'
+import { removeJournalEntry, runStartupSweep, upsertJournalEntry } from './session-journal.ts'
 import {
   accountsDir,
   accountsFootprint,
@@ -62,6 +65,7 @@ import {
   legacyMigrationError,
   listAccounts,
   migrateLegacyAuthIfNeeded,
+  readAccount,
   removeAccount,
   setActiveAccount,
   updateAccount,
@@ -246,6 +250,18 @@ export function apply(ctx: any, config: Config = {}): void {
   // 节流设置：设置页保存过的值（gate.json）优先于 cordis config —— 设置页是用户的显式操作，
   // 不该被配置文件里的旧值盖回去。闸门在这里创建并共享给适配器，设置页改完即时生效。
   const savedGate = readGateSettings()
+
+  // 临时会话清理策略：默认「攒批 + 延迟」，减少「每轮建一个立刻删一个」的机器特征。
+  // immediate 用老参数（1.5s / 每次一个）；deferred 用可配的延迟与批量阈值。
+  // 在闸门之前算：闸门不执行它，但要**存下来**（否则保存设置页时会把它冲掉，见下面那几行）。
+  const cleanupMode: SessionCleanupMode =
+    savedGate?.sessionCleanup ?? config.sessionCleanup ?? DEFAULT_SESSION_CLEANUP.mode
+  // 三个"区间"参数：设置页保存过就用保存的，否则用内置默认（均值都落在原来的固定值上）。
+  // 只在 deferred 模式生效 —— immediate 是"老行为"，固定 1.5s / 每次一个，不掺随机。
+  const cleanupBatchRange = savedGate?.cleanupBatch ?? DEFAULT_CLEANUP_BATCH
+  const cleanupDelayRange = savedGate?.cleanupDelayMs ?? DEFAULT_CLEANUP_DELAY_MS
+  const cleanupGapRange = savedGate?.cleanupGapMs ?? DEFAULT_CLEANUP_GAP_MS
+
   const gate = createRequestGate({
     allowConcurrent: savedGate?.allowConcurrent ?? config.allowConcurrent === true,
     // ⚠️ min / max 必须**成对**传：createRequestGate 在只收到 `minIntervalMs` 时，
@@ -258,6 +274,13 @@ export function apply(ctx: any, config: Config = {}): void {
     longRunThreshold: savedGate?.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD,
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     longRunBreakMs: savedGate?.longRunBreakMs,
+    // ⚠️ 会话清理这几个字段必须**一起传**（2026-09-14 修）：设置页保存时写的是
+    // `gate.settings()` 的返回值 —— 没存进闸门的字段会被**静默抹掉**，
+    // 于是用户只调了下请求间隔，清理设置（模式 + 三个区间）就在下次重启时回到内置默认。
+    sessionCleanup: cleanupMode,
+    cleanupBatch: cleanupBatchRange,
+    cleanupDelayMs: cleanupDelayRange,
+    cleanupGapMs: cleanupGapRange,
     logger,
   })
   // 旧版（≤0.1.25）只有一份 deepseek-auth.json；首次启动时迁进账号库。
@@ -301,15 +324,7 @@ export function apply(ctx: any, config: Config = {}): void {
     logger,
   }
 
-  // 临时会话清理策略：默认「攒批 + 延迟」，减少「每轮建一个立刻删一个」的机器特征。
-  // immediate 用老参数（1.5s / 每次一个）；deferred 用可配的延迟与批量阈值。
-  const cleanupMode: SessionCleanupMode =
-    savedGate?.sessionCleanup ?? config.sessionCleanup ?? DEFAULT_SESSION_CLEANUP.mode
-  // 三个"区间"参数：设置页保存过就用保存的，否则用内置默认（均值都落在原来的固定值上）。
-  // 只在 deferred 模式生效 —— immediate 是"老行为"，固定 1.5s / 每次一个，不掺随机。
-  const cleanupBatchRange = savedGate?.cleanupBatch ?? DEFAULT_CLEANUP_BATCH
-  const cleanupDelayRange = savedGate?.cleanupDelayMs ?? DEFAULT_CLEANUP_DELAY_MS
-  const cleanupGapRange = savedGate?.cleanupGapMs ?? DEFAULT_CLEANUP_GAP_MS
+  // 清理参数在上面（闸门之前）已经算好并传进闸门了，这里直接用。
   const sessionCleaner = createSessionCleaner({
     policy: {
       mode: cleanupMode,
@@ -321,6 +336,58 @@ export function apply(ctx: any, config: Config = {}): void {
     },
     logger,
   })
+
+  // ── 「欠删除的会话」落盘 + 启动补删（2026-09-14）────────────────────────────
+  //
+  // 复用槽与待删队列都只活在进程内存里，宿主一退出（尤其被强杀）就静默丢失，
+  // 正在复用的那个会话于是**永远留在网页端**。实测：09-12 起启动 58 次 DSH，
+  // 网页端侧栏就堆出同等量级、标题 = DSH 会话主题的对话（与 sessions 里的
+  // session/title 一一对应）。
+  //
+  // 做法：webapi 每发生一次「进槽 / 进队列 / 确认删除」就通知这里，
+  // 这里把"还欠一次删除"的会话按账号落盘；**确认删掉才销账**。
+  // 于是强杀、删失败都能在下次启动补删（见 session-journal.ts）。
+  const journalEnabled = adapterConfig.deleteWebSessions !== false && cleanupMode !== 'keep'
+  /** 会话所属账号 —— 删除必须用它自己的凭证（拿 A 的凭证删 B 的会话会被服务端拒，见 F07）。 */
+  const accountIdOfAuth = (auth?: WebAuth): string | undefined => {
+    const token = auth?.token
+    if (!token) return activeAccountId()
+    return listAccounts().find((account) => account.token === token)?.id
+  }
+  setSessionLifecycleHook((event) => {
+    if (!journalEnabled) return
+    if (event.kind === 'deleted') {
+      removeJournalEntry(event.sessionId)
+      return
+    }
+    const accountId = accountIdOfAuth(event.auth)
+    if (!accountId) return
+    upsertJournalEntry({
+      accountId,
+      sessionId: event.sessionId,
+      state: event.kind === 'queued' ? 'queued' : 'slot',
+    })
+  })
+
+  // 启动补删：上次退出遗留的（含被强杀的）会话，按账号排进清理器。
+  if (journalEnabled) {
+    try {
+      runStartupSweep({
+        ownPid: process.pid,
+        accountExists: (id) => readAccount(id) !== undefined,
+        deleteEnabled: adapterConfig.deleteWebSessions !== false,
+        mode: cleanupMode,
+        onSweep: (entry) => {
+          const account = readAccount(entry.accountId)
+          if (!account) throw new Error('账号已不在账号库里')
+          sessionCleaner.schedule(account, entry.sessionId)
+        },
+        log: (message) => logger.info?.(message),
+      })
+    } catch (error: any) {
+      logger.warn?.(`deepseek-web: 启动补删失败（不影响使用）：${error?.message ?? error}`)
+    }
+  }
 
   const getAuth = (): WebAuth | undefined => readAuth()
 
@@ -1023,10 +1090,24 @@ export function apply(ctx: any, config: Config = {}): void {
     'dsh-deepseek-web-login: api',
   )
 
-  // 3) 卸载即净：只关掉登录窗口与定时器。**不清理凭证** —— 卸载/热重载插件不等于登出。
+  // 3) 卸载即净：关登录窗口与定时器；**退出时把欠删的会话交出去**。不清理凭证 ——
+  //    卸载/热重载插件不等于登出。
   ctx.effect(() => () => {
     try {
       if (isLoginWindowOpen()) closeLoginWindow()
+    } catch {}
+    // 2026-09-14：退出收尾。顺序很重要 ——
+    //   ① `disposeSessionReuse()` 把复用槽里的会话**交回它自己的清理回调**（排队待删）。
+    //      只清槽不排队 = 每次退出白丢一个会话（实测就是这么堆起来的）。
+    //   ② `flush()` 尽力把队列里的删掉（同步返回，不等网络完成 —— 宿主的卸载流程
+    //      不会为一个网络请求停留）。
+    // 于是删不掉的仍会留在 `session-journal` 的记录里（记录只在**确认删掉**时摘除），
+    // 下次启动的补删会接上。被强杀时同理。
+    try {
+      disposeSessionReuse()
+    } catch {}
+    try {
+      void sessionCleaner.flush()
     } catch {}
   }, 'dsh-deepseek-web-login: teardown')
 }

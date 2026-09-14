@@ -237,6 +237,18 @@ export interface RequestGateOptions {
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
   /** prompt 字符上限（本模块不执行，只是存下来以便落盘与回显）。 */
   maxPromptChars?: number
+  /**
+   * 会话清理策略（本模块不执行，同样只是存下来以便落盘与回显）。
+   *
+   * ⚠️ 必须**传进来**（2026-09-14 修）：设置页保存时写的是 `settings()` 的返回值，
+   * 而这些字段若没初始化就永远是 `undefined` → 保存时被静默丢掉。
+   * 后果是实测过的：用户只是调了下请求间隔，清理设置就被从 gate.json 里抹掉，
+   * 重启后悄悄回到内置默认 —— 正是「拖了滑块却像没生效」那一类问题。
+   */
+  sessionCleanup?: GateSettings['sessionCleanup']
+  cleanupBatch?: CleanupRange
+  cleanupDelayMs?: CleanupRange
+  cleanupGapMs?: CleanupRange
   /** 便于单测注入。 */
   now?: () => number
   sleep?: (ms: number) => Promise<void>
@@ -393,12 +405,14 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   /** 会话清理策略不在本模块实现，只借用设置文件存储（由宿主读取后交给 cleaner）。 */
   /** prompt 字符上限（同 cleanupMode：只是存着，执行在 adapter）。 */
   let maxPromptChars = clampMaxPromptChars(options.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS)
-  let cleanupMode: GateSettings['sessionCleanup']
+  let cleanupMode = options.sessionCleanup
   // 会话清理的三个区间（同样不参与节流逻辑）。存在这里是为了**能落盘**：
   // writeGateSettings 写的是 settings() 的返回值，不存就丢。
-  let cleanupBatch: CleanupRange | undefined
-  let cleanupDelayMs: CleanupRange | undefined
-  let cleanupGapMs: CleanupRange | undefined
+  // ⚠️ 因此必须**从 options 初始化**（2026-09-14 修）：否则保存设置页时，
+  // `settings()` 里没有这几个字段 → 用户调个间隔就把清理设置一起冲没了。
+  let cleanupBatch = normalizeCleanupRange(options.cleanupBatch, CLEANUP_BATCH_BOUNDS)
+  let cleanupDelayMs = normalizeCleanupRange(options.cleanupDelayMs, CLEANUP_DELAY_BOUNDS_MS)
+  let cleanupGapMs = normalizeCleanupRange(options.cleanupGapMs, CLEANUP_GAP_BOUNDS_MS)
 
   function settings(): GateSettings {
     return {
