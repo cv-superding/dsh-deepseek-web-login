@@ -96,22 +96,22 @@ await test('截断在句中 → 自动续写并无缝拼接，finish=stop', asyn
   const { calls, blocks, finish } = await run(
     {},
     [
-      fakeStream(['让我先分析这个问题的']),
+      fakeStream(['让我先分析这个问题的来龙去脉，先把已知的约束条件逐条摆出来，再顺着线索往下推导结论的']),
       fakeStream(['完整答案如下。']),
     ],
   )
   assert.equal(calls.length, 2, `应发起 2 次请求（原文 + 续写），实际 ${calls.length}`)
   assert.equal(blocks.length, 1, '续写内容应拼进同一条回答')
-  assert.equal(blocks[0], '让我先分析这个问题的完整答案如下。', `拼接结果: ${JSON.stringify(blocks)}`)
+  assert.equal(blocks[0], '让我先分析这个问题的来龙去脉，先把已知的约束条件逐条摆出来，再顺着线索往下推导结论的完整答案如下。', `拼接结果: ${JSON.stringify(blocks)}`)
   assert.equal(finish?.kind, 'stop', '必须报 stop（不再出现 max-tokens 提示）')
 })
 
 await test('续写请求的 prompt 必须包含半截回答与继续指令', async () => {
   const { calls } = await run(
     {},
-    [fakeStream(['前半句']), fakeStream(['后半句。'])],
+    [fakeStream(['这是被服务端截断在句中的前半段回答文本，写到这里戛然而止，后面还没有给出任何结论的']), fakeStream(['后半句。'])],
   )
-  assert.ok(calls[1].prompt.includes('前半句'), '续写 prompt 应带上已输出的半截回答')
+  assert.ok(calls[1].prompt.includes('前半段回答文本'), '续写 prompt 应带上已输出的半截回答')
   assert.ok(/无缝|接着写|续/.test(calls[1].prompt), '续写 prompt 应带继续指令')
 })
 
@@ -147,7 +147,7 @@ await test('续写仍被截 → 额度内继续补，额度用尽报 stop', asyn
   const { calls, finish } = await run(
     { config: { maxContinuations: 2 } },
     [
-      fakeStream(['第一段，']),
+      fakeStream(['第一段先摆出问题的背景与已知约束条件，然后逐步推进推导，目前只写到这里还没有结论的']),
       fakeStream(['第二段，']),
       fakeStream(['第三段完。']),
     ],
@@ -167,11 +167,11 @@ await test('purpose=session-title 不得续写（标题天然"句中被截"）�
   const logs = []
   const { blocks, callCount } = await run(
     { config: { logger: { info: (m) => logs.push(m), warn: () => {}, debug: () => {}, error: () => {} } } },
-    [fakeStream(['TCP 三次握手原因解析']), fakeStream(['TCP 三次握手原因解析'])],
+    [fakeStream(['TCP 三次握手的原因解析与实际抓包验证完整步骤总结归纳以及常见面试追问要点梳理归纳']), fakeStream(['TCP 三次握手的原因解析与实际抓包验证完整步骤总结归纳以及常见面试追问要点梳理归纳'])],
     { purpose: 'session-title' },
   )
   assert.equal(callCount, 1, '标题生成只能发一次请求')
-  assert.equal(blocks.join(''), 'TCP 三次握手原因解析')
+  assert.equal(blocks.join(''), 'TCP 三次握手的原因解析与实际抓包验证完整步骤总结归纳以及常见面试追问要点梳理归纳')
   // 自证：标题确实被判成"句中被截"—— 否则这条用例可能没走到点子上
   // （若哪天判据变了、标题不再满足 midSentence，这条自证会先红，提醒我们重审用例）
   assert.ok(
@@ -192,16 +192,30 @@ await test('purpose=compaction 同样不续写 —— F26', async () => {
 await test('purpose=chat 仍照旧续写（修复不得扩大到正常路径）—— F26 不回归', async () => {
   const { blocks, callCount } = await run(
     {},
-    [fakeStream(['这是半截回答']), fakeStream(['，接着写完。'])],
+    [fakeStream(['这是被服务端截断在句中的半截回答，后面还有结论和对应的示例代码没有写完，需要接着往下输出的']), fakeStream(['，接着写完。'])],
     { purpose: 'chat' },
   )
   assert.equal(callCount, 2)
-  assert.equal(blocks.join(''), '这是半截回答，接着写完。')
+  assert.equal(blocks.join(''), '这是被服务端截断在句中的半截回答，后面还有结论和对应的示例代码没有写完，需要接着往下输出的，接着写完。')
 })
 
 await test('不传 purpose（默认 chat）仍续写 —— F26 不回归', async () => {
-  const { callCount } = await run({}, [fakeStream(['这是半截回答']), fakeStream(['，接着写完。'])])
+  const { callCount } = await run({}, [fakeStream(['这是被服务端截断在句中的半截回答，后面还有结论和对应的示例代码没有写完，需要接着往下输出的']), fakeStream(['，接着写完。'])])
   assert.equal(callCount, 2, '没带用途的调用按 chat 处理')
+})
+
+// ── F29：短回答不判「句中被截」─────────────────────────────────────────────
+// "我在""在吗"这类完整短答天然以汉字收尾，旧判据（尾部是汉字 ⇒ 被截）对它恒真，
+// 会白打 1~2 次续写请求（host 日志 12:34/14:45 等"额度已用尽"全是这种）。服务端真截断
+// （无 FINISHED）走的是另一条判据（cutByServer），不受此下限影响。
+await test('短回答（<40 字）以汉字收尾 → 不续写 —— F29', async () => {
+  const { calls, blocks, finish } = await run(
+    {},
+    [fakeStream(['我在'])],
+  )
+  assert.equal(calls.length, 1, '短回答不该触发续写')
+  assert.equal(blocks[0], '我在')
+  assert.equal(finish?.kind, 'stop')
 })
 
 await test('已发起工具调用的轮次不续写（等工具结果）', async () => {
@@ -341,7 +355,7 @@ await test('N06：部分轮次上报 totalTokens 时，未上报轮次的成本�
   const { calls, usage } = await run(
     {},
     [
-      fakeStreamUsage(['让我先分析这个问题的'], 1000), // 第一轮：上报 1000
+      fakeStreamUsage(['让我先分析这个问题的来龙去脉，先把已知的约束条件逐条摆出来，再顺着线索往下推导结论的'], 1000), // 第一轮：上报 1000
       fakeStreamUsage(['完整答案如下。'], undefined), // 第二轮：不上报
     ],
   )
@@ -361,7 +375,7 @@ await test('N06：部分轮次上报 totalTokens 时，未上报轮次的成本�
 await test('N06：两轮都上报时，总量等于上报值之和', async () => {
   const { calls, usage } = await run(
     {},
-    [fakeStreamUsage(['半截'], 1000), fakeStreamUsage(['收尾。'], 2000)],
+    [fakeStreamUsage(['这是被服务端截断在句中的半截回答，后面还有结论和对应的示例代码没有写完，需要接着往下输出的'], 1000), fakeStreamUsage(['收尾。'], 2000)],
   )
   assert.equal(calls.length, 2, `必须发生两次真实请求，实际 ${calls.length}`)
   assert.equal(usage.inputTokens + usage.outputTokens, 3000, '两轮都上报时应精确相加')

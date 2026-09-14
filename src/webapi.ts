@@ -19,6 +19,9 @@
  *     {"v":"…"} / {"o":"APPEND","v":"…"}        承接上一个 path 的续段
  *     {"p":"response/status","v":"FINISHED"}    状态
  */
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { WebAuth } from './auth.ts'
 import { AdapterLlmError, httpErrorCode, parseRetryAfterMs } from './auth.ts'
 // 默认区间来自 gate.ts —— 设置页的滑块边界与这里的默认值必须是**同一份**，否则界面显示的和实际跑的不是一回事。
@@ -1190,6 +1193,27 @@ export interface SseStateOptions {
   thinkingEnabled?: boolean
 }
 
+/** F28：思考的标准包装标签。孤儿兜底用（见 finish 里的判据）。 */
+const THINKING_WRAPPER_RE = /<\s*\/?\s*(analysis|summary|thinking|scratchpad|thought)\b/i
+
+/**
+ * F28 取证开关：把原始 SSE 逐行落盘，给「孤儿思考归正文」这类通道错位定论用。
+ * 默认关；设环境变量 `DSH_WEB_LOGIN_DUMP_SSE=1` 开启（需重启 DSH 生效）。
+ * 文件写到 `~/.dsh/deepseek-web/frames/<时间戳>-<序号>.sse`，逐行 append ——
+ * 就算进程被强杀，已收到的帧也在盘上（F24 的教训：别用构造帧当证据，要抓真实帧）。
+ */
+function dumpSinkPath(): string | null {
+  if (process.env.DSH_WEB_LOGIN_DUMP_SSE !== '1') return null
+  try {
+    const dir = join(homedir(), '.dsh', 'deepseek-web', 'frames')
+    mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    return join(dir, `${stamp}-${Math.random().toString(36).slice(2, 8)}.sse`)
+  } catch {
+    return null
+  }
+}
+
 export function createSseState(options: SseStateOptions = {}) {
   const fragments: Fragment[] = []
   /** fragments 派生文本（仅用于快照对账候选）。 */
@@ -1528,8 +1552,19 @@ export function createSseState(options: SseStateOptions = {}) {
       if (sawData && orphanBuffer) {
         const text = orphanBuffer
         orphanBuffer = ''
-        directText += text
-        emitText(out, text)
+        // F28（2026-09-14，第二次修订兜底）：兜底方向维持 F27 的"归正文"，但**加一条标签判据** ——
+        // 孤儿文本以 <analysis>/<summary> 这类**思考的标准包装**为主体时归思考。
+        // 依据（实测 [998]/[1091] 两条消息）：text 块 27397 字**整块**都是 analysis+summary 复盘、
+        // 没有一句对用户说的话 —— 模型不会把整条回答写成纯复盘 ⇒ 那是思考。
+        // 反过来，普通正文几乎不会以这些标签为主体，误伤面很小。
+        // 其余无线索的孤儿仍按正文收尾（F27 的原则不变：看不到回答比看到思考更糟）。
+        if (thinkingEnabled && THINKING_WRAPPER_RE.test(text)) {
+          directThinking += text
+          emitThinking(out, text)
+        } else {
+          directText += text
+          emitText(out, text)
+        }
       }
       if (!sawData) return out
       out.push({ kind: 'finish', reason: pendingFinish, ...(totalTokens !== undefined ? { totalTokens } : {}) })
@@ -1574,7 +1609,16 @@ export async function* parseWebSse(body: any, options?: SseStateOptions): AsyncG
     return { events: Array.from(state.handle(parsed, eventName)), done: false }
   }
 
+  // F28 取证：开关开着就把原始帧逐行落盘（见 dumpSinkPath 的说明），失败不影响主流程。
+  const dumpPath = dumpSinkPath()
   for await (const line of iterateLines(body)) {
+    if (dumpPath) {
+      try {
+        appendFileSync(dumpPath, line + '\n')
+      } catch {
+        /* 取证是尽力而为 */
+      }
+    }
     if (line.length === 0) {
       // 空行 = 事件结束
       const flushed = flushData()

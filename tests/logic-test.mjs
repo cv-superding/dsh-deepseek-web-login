@@ -305,6 +305,23 @@ test('sse: 整轮没有 fragment 时暂存文本按**正文**收尾（F27 修订
   assert.equal(textOf(events, 'thinking'), '')
 })
 
+test('sse: 孤儿是 <analysis>/<summary> 思考包装 → 归思考（F28）', () => {
+  // 实测 2026-09-14 [998]：text 块 27397 字**整块**都是 analysis+summary 复盘、
+  // 没有一句对用户说的话 —— 模型不会把整条回答写成纯复盘 ⇒ 那是思考走错了通道。
+  // 普通正文几乎不会以这些标签为主体，误伤面很小；不含标签的孤儿仍按正文收尾（上一条用例）。
+  const state = createSseState({ thinkingEnabled: true })
+  const events = drain(state, [
+    [{ p: 'response/fragments/-1/content', v: '<analysis>\n让我按时间顺序梳理这次对话。\n</analysis>' }],
+    [{ p: 'response/status', v: 'FINISHED' }],
+  ])
+  assert.equal(
+    textOf(events, 'thinking'),
+    '<analysis>\n让我按时间顺序梳理这次对话。\n</analysis>',
+    '思考包装的孤儿必须归思考',
+  )
+  assert.equal(textOf(events, 'text'), '')
+})
+
 test('sse: 思考耗时（elapsed_secs）是"这段属于思考"的证据（F27）', () => {
   // 真实帧：思考结束时服务端会发 `response/fragments/-1/elapsed_secs`（值=思考耗时），
   // 它紧跟 THINK fragment、在正文 fragment 之前。快照丢失时它是唯一的通道线索。

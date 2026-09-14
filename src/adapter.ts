@@ -450,6 +450,10 @@ const CONTINUE_INSTRUCTION =
 function looksMidSentence(text: string): boolean {
   const trimmed = text.trimEnd()
   if (trimmed.length === 0) return false
+  // F29：短文本（< 40 字）不判「句中被截」——"我在""在吗"这类**完整短答**天然以汉字收尾，
+  // 旧判据对它恒真，会白打 1~2 次续写请求。服务端真截断（cutByServer，无 FINISHED）不走
+  // 这条判据、仍会续写，所以这里收窄只影响「有 FINISHED 但尾部是汉字」的场景。
+  if (trimmed.length < 40) return false
   const last = trimmed[trimmed.length - 1]
   if ('。，？！；：,?!;:…）】》」』"\'`*_#~'.includes(last)) {
     // 标点收尾 → 但 `` ` `` 和 `*` `_` `#` `~` 可能是 markdown 标记被截，单独判
@@ -875,6 +879,20 @@ export function createAdapter(deps: AdapterDeps) {
           if (rounds === 0) {
             rejectedProtocol = drained.rejected.raw
             rejectedReason = drained.rejected.reason ?? 'unparsable'
+          } else {
+            // F28：续写轮的丢弃不能全静默 —— 已上屏的正文保留（不整轮重试，原原则不变），
+            // 但模型和用户都得知道「这次调用没执行」：否则模型下轮无从重发，
+            // 用户只会在网页端看到一段没人处理的乱码（实测 14:29 / 14:52 的 DSML 变体）。
+            const notice =
+              `\n[deepseek-web] 本次输出的一个工具调用因格式无法解析（${drained.rejected.reason ?? 'unparsable'}）` +
+              `被丢弃，该调用未执行；请改用约定的 JSON 格式重发。\n`
+            const noticeBlock = openText()
+            if (!textStarted) {
+              textStarted = true
+              yield { type: 'block-start', index: noticeBlock.index, blockType: 'text' }
+            }
+            noticeBlock.text += notice
+            yield { type: 'text-delta', index: noticeBlock.index, text: notice }
           }
         }
         // ── 一轮流结束：判断是否需要自动续写 ──
@@ -1026,10 +1044,19 @@ export function createAdapter(deps: AdapterDeps) {
     // 0.1.12：不再报 max-tokens（应用户要求移除「已达到输出 token 上限」提示）。
     // 截断由「自动续写」兜底（绝大多数被无声补全）；续写额度用尽仍被截时，
     // 按正常完成（stop）上报并留痕 —— 用户可手动说「继续」。
-    if (looksMidSentence(textBlock?.text ?? '')) {
-      logger?.warn?.(
-        `deepseek-web: 回答在句中被截且自动续写额度已用尽，按正常完成上报（尾部：${JSON.stringify((textBlock?.text ?? '').slice(-60))}）`,
-      )
+    if (textBlock?.text && looksMidSentence(textBlock.text)) {
+      if (!allowsAutoContinue(options?.purpose)) {
+        // F29：内部用途（标题 / 压缩）的回答天然以汉字收尾 —— 旧版在这里打
+        // 「额度已用尽」会让人误判成"标题还在被无尽续写"（实际白名单早就拦住了，
+        // 日志里根本没有续写动作行）。按事实分档打日志。
+        logger?.info?.(
+          `deepseek-web: 内部用途（purpose=${String(options?.purpose)}）的回答以非标点收尾，按约定不自动续写，正常收尾（尾部：${JSON.stringify(textBlock.text.slice(-40))}）`,
+        )
+      } else {
+        logger?.warn?.(
+          `deepseek-web: 回答在句中被截且自动续写额度已用尽，按正常完成上报（尾部：${JSON.stringify(textBlock.text.slice(-60))}）`,
+        )
+      }
     }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }

@@ -278,7 +278,22 @@ const checks = {
   // F27（2026-09-14）：收尾兜底归正文（避免把回答吞进思考）+ 思考耗时作为通道证据。
   'host 收尾兜底归正文 + 思考耗时作证据（F27）':
     /settleOrphans\(out, ["']THINK["']\)/.test(host) &&
-    /sawData && orphanBuffer[\s\S]{0,140}?directText \+= text/.test(host),
+    /sawData && orphanBuffer[\s\S]{0,500}?directText \+= text[\s\S]{0,40}?emitText\(out, text\)/.test(host),
+
+  // F28（2026-09-14）：兜底加思考包装判据 —— <analysis>/<summary> 等标签的孤儿归思考
+  // （实测 [998]：27397 字整块是 analysis+summary 复盘）；帧落盘取证开关默认关、env 控制。
+  // 断言仍按**调用点**：标签判据必须出现在 finish 兜底的分支里，而不是仅存在常量。
+  'host 孤儿思考包装判据 + 帧落盘取证开关（F28）':
+    /sawData && orphanBuffer[\s\S]{0,500}?THINKING_WRAPPER_RE\.test\(text\)[\s\S]{0,120}?emitThinking\(out, text\)/.test(host) &&
+    /DSH_WEB_LOGIN_DUMP_SSE/.test(host) &&
+    /appendFileSync\(dumpPath/.test(host),
+
+  // F29（2026-09-14）：短回答（<40 字）不判句中被截；内部用途收尾日志分档
+  // （旧文案"额度已用尽"在白名单拦截时也打，误导排查）；续写轮丢弃给可见提示。
+  'host 短回答下限 + 日志分档 + 丢弃可见提示（F29）':
+    /trimmed\.length < 40\) return false/.test(host) &&
+    /purpose=\$\{String\(options\?\.purpose\)\}/.test(host) &&
+    /被丢弃，该调用未执行/.test(host),
 }
 
 let failed = 0
