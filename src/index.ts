@@ -1016,7 +1016,7 @@ export function apply(ctx: any, config: Config = {}): void {
             if (req.method === 'POST' && route === '/login/relogin') {
               beginAddAccount()
               logger.info?.(
-                'deepseek-web: 准备重新登录一个凭证可能失效的账号（**不清**浏览器登录态，能复用就直接复用）—— 捕获后原地更新，不改变当前账号',
+                'deepseek-web: 准备重新登录一个凭证可能失效的账号（刻意不清浏览器登录态，能复用就直接复用）—— 捕获后原地更新，不改变当前账号',
               )
               sendJson(res, 200, {
                 ok: true,

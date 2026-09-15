@@ -153,7 +153,7 @@ export function describeCookieLife(
   summary: CookieLifeSummary | undefined,
   now: number = Date.now(),
 ): string {
-  if (!summary) return '未记录（重新登录后会补上）'
+  if (!summary) return '⚠️ 未记录（重新登录后会补上）'
   const parts = [`${summary.total} 项`]
   parts.push(summary.sessionCount > 0 ? `${summary.sessionCount} 会话级` : '无会话级')
   if (summary.persistentCount > 0) parts.push(`${summary.persistentCount} 持久级`)

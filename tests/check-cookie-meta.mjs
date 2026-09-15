@@ -223,7 +223,9 @@ test('剩余时间：天 / 小时 / 已过期', () => {
 })
 
 test('没记录 / 全会话级 / 混合，三种说法各不相同', () => {
-  assert.equal(describeCookieLife(undefined, NOW), '未记录（重新登录后会补上）')
+  // 0.1.64：文案加了 ⚠️ 前缀（界面里这条容易被当成噪音跳过，用户反馈"重要注释要标注"）。
+  // 行为没变，断言的牙齿保留：必须仍然给出"重新登录后会补上"这条可执行指引。
+  assert.equal(describeCookieLife(undefined, NOW), '⚠️ 未记录（重新登录后会补上）')
   assert.equal(
     describeCookieLife(summarizeCookieLife([{ name: 'a', domain: '', session: true }], NOW), NOW),
     '1 项 · 1 会话级',

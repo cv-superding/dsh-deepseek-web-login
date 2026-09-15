@@ -412,7 +412,7 @@ function Panel(): any {
     const loginHead = el('div', 'dsw-cardhead')
     const loginTitle = el('div')
     loginTitle.append(el('span', 'name', '登录状态'))
-    const badge = el('span', 'dsw-badge off', '未登录')
+    const badge = el('span', 'dsw-badge off', '⚪ 未登录')
     loginTitle.append(badge)
     loginHead.append(loginTitle)
     loginCard.append(loginHead)
@@ -495,6 +495,34 @@ function Panel(): any {
     // ⚠️ 风险已在 src/accounts.ts 的模块注释里写明，这里再对使用者说一遍：
     // 用多账号轮换规避单账号限流，会被服务商把账号关联起来，处置通常更重。
     // 所以刻意**只提供手动切换、不做自动轮换** —— 真人不会几分钟换一个号接着发。
+    /**
+     * 一句话反馈节点：给它的 `textContent` 赋值时**自动选样式** ——
+     * 命中「失败/错误/无法」→ 红框红字（醒目），以「已…」开头 → 绿框，其余 → 灰色小字。
+     *
+     * 为什么自动判定、而不是让每个调用点传 kind（2026-09-15 用户反馈）：
+     * 「账号切换失败」原来和旁边的说明文字长得一模一样（都是灰色小字），根本注意不到。
+     * 这三个节点加起来 40 多个赋值点，靠人手传 kind 迟早会漏 —— 而漏掉的那个往往正是报错。
+     */
+    const createMsgNode = (): { node: HTMLElement; textContent: string } => {
+      const node = el('p', 'dsw-hint dsw-gate-msg', '')
+      let text = ''
+      return {
+        node,
+        get textContent(): string {
+          return text
+        },
+        set textContent(value: string) {
+          text = value ?? ''
+          node.textContent = text
+          node.className = /失败|错误|无法|不对/.test(text)
+            ? 'dsw-msg err'
+            : /^(✅|已切换|已移除|已捕获|已保存|已原地)/.test(text)
+              ? 'dsw-msg ok'
+              : 'dsw-hint dsw-gate-msg'
+        },
+      }
+    }
+
     const accountsCard = el('div', 'dsw-card')
     const accountsHead = el('div', 'dsw-cardhead')
     accountsHead.append(el('span', 'name', '账号库'))
@@ -505,7 +533,7 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '保存过的账号都在本机，点「切换」即时生效，不用重新登录。切换后**下一次请求**就用新账号。',
+        '💡 保存过的账号都在本机，点「切换」即时生效、不用重新登录 —— 切换后从下一次请求开始生效。',
       ),
     )
 
@@ -531,18 +559,18 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——' +
+        '💡 「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——' +
           '加完在列表里点「切换」即可使用。某个账号标着「需要重新登录」时，用它自己那行上的按钮修 ——' +
           '那条路不清浏览器登录态，能复用就直接复用。导出/导入会弹系统对话框，自己选位置和文件。',
       ),
     )
-    const accountsMsg = el('p', 'dsw-hint dsw-gate-msg', '')
-    accountsCard.append(accountsMsg)
+    const accountsMsg = createMsgNode()
+    accountsCard.append(accountsMsg.node)
     accountsCard.append(
       el(
         'p',
         'dsw-hint',
-        '导出的备份文件里是**可完整登录的凭证**（等同于账号本身），别分享、别提交到仓库。',
+        '⚠️ 导出的备份文件就是可完整登录的凭证（等同于账号本身）—— 别分享、别提交到仓库。',
       ),
     )
     acctLibraryPane.append(accountsCard)
@@ -597,15 +625,15 @@ function Panel(): any {
       const main = el('div', 'dsw-account-main')
       const title = el('div', 'dsw-account-title')
       title.append(el('span', undefined, item.title || item.id))
-      if (item.isActive) title.append(el('span', 'dsw-badge on', '当前'))
-      if (item.unverified) title.append(el('span', 'dsw-badge off', '未校验'))
+      if (item.isActive) title.append(el('span', 'dsw-badge on', '✅ 当前'))
+      if (item.unverified) title.append(el('span', 'dsw-badge off', '❔ 未校验'))
       const limited = item.limit && Number.isFinite(item.limit.untilMs) && item.limit.untilMs > Date.now()
       if (limited) {
-        title.append(el('span', 'dsw-badge off', `受限至 ${shortTime(item.limit.untilMs)}`))
+        title.append(el('span', 'dsw-badge off', `⏳ 受限至 ${shortTime(item.limit.untilMs)}`))
       }
       // 徽章从「校验失败」改成**明确的行动指令**：原来只写"失败"，用户不知道该干嘛，
       // 也看不出这号还能不能用。探活失败基本只有一种可能 —— 凭证失效，要重新登录。
-      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '需要重新登录'))
+      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '❌ 需要重新登录'))
       main.append(title)
 
       const meta: string[] = []
@@ -626,7 +654,7 @@ function Panel(): any {
           el(
             'span',
             'dsw-hint',
-            `${relTime(item.lastVerifyError.at)}校验失败：${item.lastVerifyError.message}` +
+            `⚠️ ${relTime(item.lastVerifyError.at)}校验失败：${item.lastVerifyError.message}` +
               '（凭证多半已失效；重新登录会原地更新它，不改变当前账号）',
           ),
         )
@@ -928,12 +956,12 @@ function Panel(): any {
         renderContextStatus?.(String(cfg.contextMode), cfg.contextChain)
       }
 
-      badge.textContent = loggedIn ? (status.auth.unverified ? '已捕获（未校验）' : '已登录') : '未登录'
+      badge.textContent = loggedIn ? (status.auth.unverified ? '❔ 已捕获（未校验）' : '✅ 已登录') : '⚪ 未登录'
       badge.className = `dsw-badge ${loggedIn ? (status.auth.unverified ? 'off' : 'on') : 'off'}`
       if (loggedIn && !status.auth.unverified) {
         const valid = status.validation
         if (valid && !valid.ok) {
-          badge.textContent = '登录态校验失败'
+          badge.textContent = '❌ 登录态校验失败'
           badge.className = 'dsw-badge err'
         }
       }
@@ -1203,7 +1231,7 @@ function Panel(): any {
     // 否则「缓存命中 0%」会被当成"真的没命中"，而它其实只是我们没有上报。
     const tokenNote = el('p', 'dsw-hint', '')
     tokenNote.textContent =
-      '说明：DSH 底部的 token 数目前是**按字符估算**的（网页端只回一个「本消息累计 token」，' +
+      '💡 说明：DSH 底部的 token 数目前是按字符估算的（网页端只回一个「本消息累计 token」，' +
       '我们还没接进来）；「缓存命中 0%」是因为网页端不提供缓存信息、我们也就没有上报 —— ' +
       '不代表真的没命中。'
     gateCard.append(tokenNote)
@@ -1465,8 +1493,8 @@ function Panel(): any {
     transportTestOut.style.display = 'none'
     transportCard.append(transportTestOut)
 
-    const transportMsg = el('p', 'dsw-hint dsw-gate-msg', '')
-    transportCard.append(transportMsg)
+    const transportMsg = createMsgNode()
+    transportCard.append(transportMsg.node)
     transportPane.append(transportCard)
 
     // ── 上下文页：每轮发全量 prompt，还是只发增量 + 父消息链 ────────────
@@ -1495,8 +1523,8 @@ function Panel(): any {
     contextCard.append(contextStatus)
     const contextHintText = el('p', 'dsw-hint', '')
     contextCard.append(contextHintText)
-    const contextMsg = el('p', 'dsw-hint dsw-gate-msg', '')
-    contextCard.append(contextMsg)
+    const contextMsg = createMsgNode()
+    contextCard.append(contextMsg.node)
     contextPane.append(contextCard)
 
     renderContextStatus = (rawMode: string, chain: any): void => {
@@ -1612,7 +1640,7 @@ function Panel(): any {
     const pathsKv = el('div', 'dsw-kv')
     pathsCard.append(pathsKv)
     pathsCard.append(
-      el('p', 'dsw-hint', '账号库里每个文件都是**可完整登录的凭证**；导出的备份同样是明文 —— 账号库卡片里的提示请当真。'),
+      el('p', 'dsw-hint', '⚠️ 账号库里每个文件都是可完整登录的凭证；导出的备份同样是明文 —— 账号库卡片里的提示请当真。'),
     )
     aboutPane.append(pathsCard)
 
@@ -1635,7 +1663,7 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '账号库支持一键手动切换，但**刻意不做自动轮换**（检测到限流就自动换一个号继续发）。原因不是保守：',
+        '💡 账号库支持一键手动切换，但刻意不做自动轮换（检测到限流就自动换一个号继续发）。原因不是保守：',
       ),
     )
     riskCard.append(
@@ -2030,7 +2058,7 @@ function Panel(): any {
               showMessage(`已退出账号；打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用手动粘贴 token）`, 'err')
             } else {
               boostUntil = Date.now() + 180_000
-              showMessage('已退出账号，登录窗口已打开：请在窗口里登录**其它账号**，凭证会自动捕获。')
+              showMessage('已退出账号，登录窗口已打开：请在窗口里登录其它账号，凭证会自动捕获。')
             }
           }
         } catch (error: any) {

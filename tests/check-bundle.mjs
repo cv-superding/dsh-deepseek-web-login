@@ -346,6 +346,22 @@ const checks = {
     /params\.onContextFeed\?\.\(\{[\s\S]{0,160}?chained: feed\.parentMessageId !== null/.test(host) &&
     /onContextFeed: \(report\)/.test(host) &&
     host.includes('链式投喂退回全量重发（原因='),
+
+  // 0.1.64（2026-09-15）：界面可读性 —— 报错要醒目、重要提示要有标注、
+  // 文案里不许有 markdown 星号（界面是纯文本，会原样显示成 **xxx**）。
+  // 断言打在**产物**上：样式判定与 append 接线都在 client.js 里，纯源码检查守不住打包后的形态。
+  'client 反馈节点自动醒目 + 徽章标注 + 无 markdown 星号（0.1.64）':
+    /createMsgNode/.test(client) &&
+    /失败\|错误\|无法\|不对\/\.test\(text\)/.test(client) &&
+    /dsw-msg err/.test(client) &&
+    /append\(accountsMsg\.node\)/.test(client) &&
+    client.includes('✅ 当前') &&
+    client.includes('❔ 未校验') &&
+    client.includes('⏳ 受限至') &&
+    client.includes('❌ 需要重新登录') &&
+    client.includes('⚠️ 导出的备份文件就是可完整登录的凭证') &&
+    !/\*\*可完整登录的凭证\*\*/.test(client) &&
+    !/\*\*按字符估算\*\*/.test(client),
 }
 
 let failed = 0
