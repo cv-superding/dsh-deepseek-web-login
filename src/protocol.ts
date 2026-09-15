@@ -191,6 +191,43 @@ export function collectImageRefs(messages: readonly any[] | undefined): any[] {
   return refs
 }
 
+/** mediaType → 文件名后缀。服务端按**后缀**判类型（不看 multipart 里的 content-type）。 */
+const IMAGE_EXT_BY_MEDIA_TYPE: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/** 服务端认得的图片后缀。不在此列的一律重建名字，别把 bmp/tiff 之类原样发过去再被拒一次。 */
+const KNOWN_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif'])
+
+/**
+ * 上传时该用的文件名。
+ *
+ * 为什么必须归一（2026-09-15 真机 A/B，三组对照，同一份 PNG 字节只改名字）：
+ *   `image.png` ✅ / `<64位hex>.png` ✅ / **纯 64 位 hex ❌ `code 9 unsupported file type`** /
+ *   不给 name（走缺省 image.png）✅
+ * ⇒ 服务端**按文件名后缀**判类型，content-type 说了不算。
+ * 而宿主给 `tool/result` 内嵌图片的 `name` 正是**纯 sha256（没有后缀）**，
+ * `user/message` 与 `agent/inbox` 给的是 `image.png` —— 于是"凡是经工具返回的图一律传不上去"：
+ * 本机 09-14 的 36 次 + 09-15 的 6 次被拒，全部是这个原因（会话日志里
+ * `tool/result` 的 name 无一例外是 64 位 hex，user/message 无一例外带 .png）。
+ *
+ * 所以这里只保留**受支持的后缀**，其余按 mediaType 重建为 `image.<ext>`
+ * ——保证发出去的文件名总是声明了一个服务端支持的类型。
+ */
+export function imageUploadName(name: unknown, mediaType: unknown): string {
+  const ext = IMAGE_EXT_BY_MEDIA_TYPE[String(mediaType ?? '').trim().toLowerCase()] ?? 'png'
+  const raw = typeof name === 'string' ? name.trim() : ''
+  // 只取基名：万一宿主给的是路径，别把目录带进 multipart 的文件名
+  const base = raw.split(/[\\/]/).pop() ?? ''
+  const matched = /\.([a-z0-9]{2,5})$/i.exec(base)
+  if (matched && KNOWN_IMAGE_EXT.has(matched[1].toLowerCase())) return base
+  return `image.${ext}`
+}
+
 /** 把一条 assistant 消息里的 tool-call 块渲染回协议 JSON（供历史学习格式）。 */
 function renderToolCalls(blocks: readonly any[]): string | null {
   const calls = (blocks ?? []).filter((block) => block?.type === 'tool-call')

@@ -2,6 +2,42 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.68 — 2026-09-15
+
+### 修：经 read_image 等工具返回的图片一律传不上去（服务端按文件名后缀判类型）
+
+用户看到界面上反复出现「有 2 张图片没能传给模型（code 9：unsupported file type）」，
+但那些图本身是完好的 PNG。真机 A/B 定位到：**服务端按 multipart 里的文件名后缀判类型**，
+`content-type` 说了不算 —— 同一份 PNG 字节，只改文件名：
+
+| 文件名 | 结果 |
+| --- | --- |
+| `image.png` | 成功 |
+| 纯 64 位 hex（无后缀） | 被拒：`code 9 unsupported file type` |
+| `<64位hex>.png` | 成功 |
+| 不传 name（走缺省） | 成功 |
+
+而宿主给图的 `name` 是两套的：`user/message` 与 `agent/inbox` 给的是 `image.png`，
+`tool/result`（`read_image` 之类工具返回）给的是**纯 sha256、没有扩展名**。
+旧实现把 `ref.name` 原样透传 ⇒ **凡是经工具返回的图，一律被拒**
+（本机 09-14 有 36 次、09-15 有 6 次，全部静默降级成纯文本）。
+
+修法：新增纯函数 `imageUploadName(name, mediaType)`（`src/protocol.ts`）——
+只保留受支持的图片后缀（png / jpg / jpeg / webp / gif），其余按 `mediaType` 重建为
+`image.<ext>`；并只取基名（宿主若给的是路径，别把目录带进 multipart 的文件名）。
+`uploadRequestImages` 改用它，不再透传 `ref.name`。
+
+测试：`check-image-refs.mjs` 13 项（新增 5 项：纯 hex 名 / 缺 name / jpeg / `.bmp` / 带路径）；
+`check-bundle.mjs` 新增一组产物断言（按调用点匹配，三条子句各自做过"改坏必红"的反向验证）。
+真机复现脚本：`tests/probe-upload-name.mjs`（需已登录凭证；只上传、不建会话）。
+
+注意：这与 0.1.66 的「同一张图在历史里重复出现 → `ref_file_ids` 去重」是**两个不同**的
+失败形态（那个修的是 `biz_code 9 / invalid ref file id`），两条修复都在，别删任何一条。
+
+### 文档
+
+- README 两版补上两条已知问题：上传文件名必须带受支持后缀；DSH 前端把单个 `$` 当行内公式。
+
 ## 0.1.67 — 2026-09-15
 
 ### 修：新登录的账号不会自己出现在账号库里，要关掉设置页再打开

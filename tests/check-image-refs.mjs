@@ -180,6 +180,42 @@ await test('超长失败原因会被截断，不把整段服务端文案塞进�
   assert.ok(text.includes('A'.repeat(120) + '…'), '截断位置应当是 120 字 + 省略号')
 })
 
+// ── 3) 上传文件名必须声明受支持的图片类型（0.1.68）────────────────────────
+// 真机 A/B（2026-09-15）：同一份 PNG 字节，只改文件名 ——
+//   image.png ✅ / <hex>.png ✅ / **纯 hex ❌ code 9 unsupported file type** / 缺省 ✅
+// 宿主给 tool/result 内嵌图片的 name 正是纯 sha256 ⇒ 经工具返回的图以前必被拒。
+
+await test('工具结果那张图（name 是纯 sha256）→ 上传名必须补成 image.png', async () => {
+  const hexNamed = { attachmentId: 'sha256:' + 'c'.repeat(64), mediaType: 'image/png', name: 'c'.repeat(64) }
+  const { uploads, calls } = await run({ messages: [toolResultWithImage(hexNamed)] })
+  assert.equal(uploads.length, 1, '自证：确实走了一次上传')
+  assert.equal(uploads[0].name, 'image.png', `纯 hex 名会被服务端拒（code 9），实际 ${JSON.stringify(uploads[0].name)}`)
+  assert.deepEqual(calls[0].refFileIds, ['file-1'], '名字修好之后这张图应当正常进 ref_file_ids')
+})
+
+await test('name 缺失 → 按 mediaType 补后缀（jpeg → .jpg）', async () => {
+  const noName = { attachmentId: 'sha256:' + 'd'.repeat(64), mediaType: 'image/jpeg' }
+  const { uploads } = await run({ messages: [userWithImage(noName)] })
+  assert.equal(uploads[0].name, 'image.jpg', `实际 ${JSON.stringify(uploads[0].name)}`)
+})
+
+await test('已有受支持后缀的名字 → 原样保留（不乱改用户认得出来的名字）', async () => {
+  const { uploads } = await run({ messages: [userWithImage(IMG_A)] })
+  assert.equal(uploads[0].name, 'a.png', '这是以前就能成功的那类，不能改坏')
+})
+
+await test('不受支持的后缀（.bmp）→ 按 mediaType 重建，别让服务端再拒一次', async () => {
+  const bmp = { attachmentId: 'sha256:' + 'e'.repeat(64), mediaType: 'image/png', name: 'shot.bmp' }
+  const { uploads } = await run({ messages: [userWithImage(bmp)] })
+  assert.equal(uploads[0].name, 'image.png', `实际 ${JSON.stringify(uploads[0].name)}`)
+})
+
+await test('宿主给的是路径 → 只取基名当文件名', async () => {
+  const withPath = { attachmentId: 'sha256:' + 'f'.repeat(64), mediaType: 'image/png', name: 'C:\\tmp\\shot.png' }
+  const { uploads } = await run({ messages: [userWithImage(withPath)] })
+  assert.equal(uploads[0].name, 'shot.png', `实际 ${JSON.stringify(uploads[0].name)}`)
+})
+
 console.log(failures.length === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)
 for (const f of failures) console.log(`  - ${f}`)
 if (failures.length > 0) process.exitCode = 1

@@ -371,6 +371,15 @@ const checks = {
   // 「需要重新登录」。四处接线缺一不可，故按调用点断言。
   // 0.1.66（2026-09-15）：图片引用去重 + 图丢了要可见。
   // 三条都是接线级行为，纯函数测不到（真实上传要 PoW+网络），按**调用点**断言。
+  // 0.1.68：上传文件名必须声明受支持的图片类型
+  // （服务端按**后缀**判类型；宿主给 tool/result 的 name 是纯 sha256）
+  'host 上传文件名归一为 imageUploadName（按调用点匹配）':
+    // 守调用点：归一后的名字要真的传进上传参数，且入参来自宿主给的 ref.name
+    /name:\s*imageUploadName\([^)]*ref\.name/.test(host) &&
+    // 两张表进了产物才算函数体真的在（否则上面那句可能只是"看起来对了"）
+    host.includes('IMAGE_EXT_BY_MEDIA_TYPE') &&
+    host.includes('KNOWN_IMAGE_EXT'),
+
   'host 图片引用去重 + 失败回传 + 上传可注入（0.1.66）':
     // 去重必须发生在遍历 refs 的循环里（而不是别处的同名字段）
     /for \(const ref of refs\) \{[\s\S]{0,140}?seen\.has\(key\)\) continue;[\s\S]{0,80}?unique\.push\(ref\)/.test(host) &&

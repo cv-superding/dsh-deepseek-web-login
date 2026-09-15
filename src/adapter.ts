@@ -20,7 +20,7 @@ import {
   uploadImageFile,
   type SessionCleaner,
 } from './webapi.ts'
-import { collectImageRefs, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, imageUploadName, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -639,12 +639,15 @@ export function createAdapter(deps: AdapterDeps) {
       }
       try {
         const stored = await deps.readImage(ref, signal)
+        const mediaType = stored.mediaType || String(ref.mediaType ?? 'image/png')
         const uploadedFile = await uploadImage(
           auth,
           {
             data: stored.data,
-            mediaType: stored.mediaType || String(ref.mediaType ?? 'image/png'),
-            ...(stored.name || ref.name ? { name: String(stored.name ?? ref.name) } : {}),
+            mediaType,
+            // 名字必须声明一个服务端支持的图片类型：宿主给 tool/result 内嵌图片的
+            // `name` 是**纯 sha256（无后缀）**，实测会被以 code 9 拒（见 imageUploadName）。
+            name: imageUploadName(stored.name ?? ref.name, mediaType),
           },
           signal,
         )

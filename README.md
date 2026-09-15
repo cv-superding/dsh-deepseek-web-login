@@ -348,7 +348,8 @@ cipher 列表哈希与 Chrome 逐字节一致 —— 且**零新依赖**（不�
 - **工具目录有预算上限**：DSH 下发的工具定义会尽量全部写进 prompt（0.1.33 前只有 2.4 万字符预算，实测 61 个工具时静默砍掉了 26 个）。工具特别多或描述特别长时仍可能装不下，此时会把**没描述到的工具名列出来**，让模型向用户确认参数，而不是默默砍掉
 - **单次请求 60s 上限**（`completion_request_timeout_ms`）：网页端靠 `sse_auto_resume` 续接，**本插件不实现续接**；流在没有 `FINISHED` 标记的情况下结束时报 `max-tokens`，而不是假装正常完成
 - **思考模式的推理过程不进上下文**：历史序列化只回放正文与工具调用/结果，以省 token
-- **图片**：走上传通道（`/api/v0/file/upload_file` → `ref_file_ids`）。上传失败时降级为 `[image attached]` 文本标记，**并在回答开头明确告知**「有 N 张图片没能传给模型（原因）」 —— 图丢了不会再无声无息（0.1.66 前只写日志，界面上看不出来）。同一张图在历史里出现多次（用户消息 + `read_image` 工具结果内嵌）时 `ref_file_ids` **自动去重**：服务端不接受重复 id（`biz_code 9 / invalid ref file id`），被拒后整条会话后续每轮都会失败
+- **图片**：走上传通道（`/api/v0/file/upload_file` → `ref_file_ids`）。上传失败时降级为 `[image attached]` 文本标记，**并在回答开头明确告知**「有 N 张图片没能传给模型（原因）」 —— 图丢了不会再无声无息（0.1.66 前只写日志，界面上看不出来）。同一张图在历史里出现多次（用户消息 + `read_image` 工具结果内嵌）时 `ref_file_ids` **自动去重**：服务端不接受重复 id（`biz_code 9 / invalid ref file id`），被拒后整条会话后续每轮都会失败。**上传时文件名必须带受支持的图片后缀**（png / jpg / jpeg / webp / gif）：服务端是按**文件名后缀**判类型的，multipart 里的 `content-type` 说了不算 —— 而宿主给 `read_image` 这类工具结果的 `name` 是**纯 sha256、没有后缀**。0.1.68 起由 `imageUploadName()` 统一归一回 `image.<ext>`（0.1.67 及以前：凡是经工具返回的图，一律传不上去）
+- **DSH 渲染层把单个 `$` 当行内公式（不是本插件的行为）**：DSH 前端的 markdown 默认开 `singleDollarTextMath`，所以含 `$` 的文本会被渲染成公式 —— 现象是 **`$` 消失、`-` 变成 `−`(U+2212)、`|` 变成 `∣`(U+2223)，字母被逐个拆行而数字串（如 `256`）仍连在一起**。PowerShell / bash 命令首当其冲，看起来极像「模型输出了乱码」。判据：**原文能完整复原 ⇒ 不是模型退化**（退化会丢信息，编码/渲染错只是把信息换了个样子）。规避：讨论命令时套围栏代码块或行内反引号 —— 代码构造里不跑数学扩展。
 - `temperature` / `stop` / `max_tokens` 网页端无对应字段，会被忽略；usage 为**估算值**（网页端不返回 token 计数）
 - 免费额度有频控；`429` 会带上 `providerRetryAfterMs` 交给 DSH 的重试策略
 - `describe_image` 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它
@@ -372,6 +373,7 @@ node tests/check-transport.mjs       # 传输层选择（降级判定 + 注入�
 node tests/check-context-feed.mjs    # 上下文投喂判据（增量/回退的五种情形）
 node tests/check-context-chain.mjs   # 链式投喂接线与生命周期（假 transport + 假 SSE）
 node tests/check-image-refs.mjs       # 图片引用组装（同一张图去重 + 图丢了要写进回答）
+node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响上传（需要已登录凭证）
 node tests/check-account-sync.mjs    # 账号库自动同步（重读节拍 + 内容签名：变了才重建列表）
 node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
 node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
