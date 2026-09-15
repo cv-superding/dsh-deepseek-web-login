@@ -60,7 +60,7 @@ test('cookies 的说明文案同样没有 markdown 星号', () => {
 test('反馈节点自动选样式：失败红框、成功绿框、其余灰色', () => {
   assert.ok(/const createMsgNode = \(\)/.test(CLIENT), 'createMsgNode 必须存在')
   assert.ok(
-    /\/失败\|错误\|无法\|不对\/\.test\(text\)\s*\?\s*'dsw-msg err'/.test(CLIENT),
+    /\/失败\|错误\|无法\|不对(\|⚠️)?\/\.test\(text\)\s*\?\s*'dsw-msg err'/.test(CLIENT),
     '失败类消息必须挂 dsw-msg err（红框红字）',
   )
   assert.ok(/\?\s*'dsw-msg ok'/.test(CLIENT), '成功类消息挂 dsw-msg ok')
@@ -87,6 +87,27 @@ test('关键徽章带 emoji（能用 / 要修 / 被限 一眼可分）', () => {
 test('凭证风险提示带 ⚠️（这是最需要被看见的一条）', () => {
   assert.ok(CLIENT.includes('⚠️ 导出的备份文件就是可完整登录的凭证'), '导出备份的风险提示')
   assert.ok(CLIENT.includes('⚠️ 账号库里每个文件都是可完整登录的凭证'), '关于页的数据位置提示')
+})
+
+// ── 0.1.65：重新登录按钮的位置 + ⚠️ 也算醒目 ──────────────────────────────
+
+test('「重新登录」按钮在右侧动作列里（不再独占一行）', () => {
+  const actionsIdx = CLIENT.indexOf("const actions = el('div', 'dsw-account-actions')")
+  const reloginIdx = CLIENT.indexOf('reloginAccount(item.id')
+  assert.ok(actionsIdx > 0, '找不到动作列')
+  assert.ok(reloginIdx > actionsIdx, 'relogin 按钮必须建在动作列之后 —— 即属于那一列（用户反馈：别单独占一行）')
+})
+
+test('失败说明那块里不再放按钮（用户反馈太占空间）', () => {
+  const start = CLIENT.indexOf("'dsw-account-fix'")
+  const end = CLIENT.indexOf("const actions = el('div', 'dsw-account-actions')")
+  assert.ok(start > 0 && end > start, '定位失败说明块失败')
+  const block = CLIENT.slice(start, end)
+  assert.ok(!/dsw-btn/.test(block), '失败说明块只能放文字，按钮要挪到动作列')
+})
+
+test('醒目样式也认 ⚠️ 前缀（重要提醒不该是灰字）', () => {
+  assert.ok(/\|⚠️\/\.test\(text\)/.test(CLIENT), '自动样式判定要包含 ⚠️')
 })
 
 console.log(failed === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failed} 项 ❌`)

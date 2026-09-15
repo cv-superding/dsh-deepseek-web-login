@@ -352,7 +352,7 @@ const checks = {
   // 断言打在**产物**上：样式判定与 append 接线都在 client.js 里，纯源码检查守不住打包后的形态。
   'client 反馈节点自动醒目 + 徽章标注 + 无 markdown 星号（0.1.64）':
     /createMsgNode/.test(client) &&
-    /失败\|错误\|无法\|不对\/\.test\(text\)/.test(client) &&
+    /失败\|错误\|无法\|不对(\|⚠️)?\/\.test\(text\)/.test(client) &&
     /dsw-msg err/.test(client) &&
     /append\(accountsMsg\.node\)/.test(client) &&
     client.includes('✅ 当前') &&
@@ -362,6 +362,18 @@ const checks = {
     client.includes('⚠️ 导出的备份文件就是可完整登录的凭证') &&
     !/\*\*可完整登录的凭证\*\*/.test(client) &&
     !/\*\*按字符估算\*\*/.test(client),
+
+  // 0.1.65（2026-09-15）：重新登录必须**原地更新那一条记录**。
+  // 用户实测：点「重新登录这个账号」→ 重登成功 → 库里多出一条同名账号、旧那条还挂着
+  // 「需要重新登录」。四处接线缺一不可，故按调用点断言。
+  'host/client 重新登录原地更新（0.1.65）':
+    /beginRelogin\(id\)/.test(host) &&
+    /relogin:\s*commit\.mode\s*===\s*["']relogin["']/.test(host) &&
+    /upsertAccount\(auth,\s*\{\s*id:\s*target\s*\}\)/.test(host) &&
+    /updateAccount\(target,\s*\{\s*lastVerifyError:\s*void 0\s*\}\)/.test(host) &&
+    /sameAccount\(existing, auth\)/.test(host) &&
+    client.includes('凭证已原地更新') &&
+    /dsw-account-actions[\s\S]{0,320}?"重新登录"/.test(client),
 }
 
 let failed = 0

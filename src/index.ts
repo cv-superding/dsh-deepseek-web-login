@@ -36,7 +36,7 @@ import {
 } from './gate.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
-import { beginAddAccount, commitCapturedAuth, endAddAccount } from './account-add.ts'
+import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount } from './account-add.ts'
 import {
   validateAuth,
   createSessionCleaner,
@@ -1014,12 +1014,24 @@ export function apply(ctx: any, config: Config = {}): void {
             // 修好它，但不顶掉你正在用的账号。若它本来就是当前账号，当前账号不会变、
             // 只是凭证被换成新的 —— 这正是期望行为。
             if (req.method === 'POST' && route === '/login/relogin') {
-              beginAddAccount()
+              // 必须记住**要更新哪一条记录**：旧实现只调 beginAddAccount()、把传进来的 id 扔了，
+              // 而 beginAddAccount 只保证"别切换当前账号"，不保证更新同一条 —— 于是重登成功后
+              // 库里新增一条同名记录、旧那条还挂着「需要重新登录」（用户实测，0.1.65 修）。
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              const target = id ? readAccount(id) : undefined
+              if (!target) {
+                sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除），请刷新后重试' })
+                return
+              }
+              beginRelogin(id)
               logger.info?.(
-                'deepseek-web: 准备重新登录一个凭证可能失效的账号（刻意不清浏览器登录态，能复用就直接复用）—— 捕获后原地更新，不改变当前账号',
+                `deepseek-web: 准备重新登录「${target.label || target.id}」（不清理浏览器登录态，能复用就直接复用）` +
+                  '—— 捕获后原地更新这条记录，不新增、也不切换当前账号',
               )
               sendJson(res, 200, {
                 ok: true,
+                targetId: id,
                 keptBrowserSession: true,
                 hint: '登录窗口会打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次',
               })
@@ -1062,6 +1074,7 @@ export function apply(ctx: any, config: Config = {}): void {
                   started: true,
                   mode: 'browser',
                   added: commit.mode === 'add',
+                  relogin: commit.mode === 'relogin',
                   created: commit.created === true,
                   activeId: activeAccountId() ?? null,
                   ok: true,

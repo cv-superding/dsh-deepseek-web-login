@@ -514,7 +514,7 @@ function Panel(): any {
         set textContent(value: string) {
           text = value ?? ''
           node.textContent = text
-          node.className = /失败|错误|无法|不对/.test(text)
+          node.className = /失败|错误|无法|不对|⚠️/.test(text)
             ? 'dsw-msg err'
             : /^(✅|已切换|已移除|已捕获|已保存|已原地)/.test(text)
               ? 'dsw-msg ok'
@@ -608,9 +608,11 @@ function Panel(): any {
             accountsMsg.textContent = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
             return
           }
-          accountsMsg.textContent = result?.added
-            ? `「${title}」的凭证已更新 —— 当前使用的账号没有改变。`
-            : '已捕获并保存凭证。'
+          accountsMsg.textContent = result?.relogin
+            ? `「${title}」的凭证已原地更新（同一条记录、当前账号未变），旧的失败标记也清掉了。`
+            : result?.added
+              ? `「${title}」已加入账号库 —— 当前使用的账号没有改变。`
+              : '已捕获并保存凭证。'
           await loadAccounts()
         } catch (error: any) {
           accountsMsg.textContent = `重新登录失败：${error?.message ?? error}`
@@ -649,23 +651,26 @@ function Panel(): any {
       // 登录态**（因为它的目标是加一个*别的*号），而修同一个号正相反 —— 浏览器里可能还
       // 留着登录态，不清就能一打开直接复用，一个密码都不用敲。见宿主 /login/relogin。
       if (item.lastVerifyError) {
-        const fix = el('div', 'dsw-account-fix')
-        fix.append(
+        // 只留一行说明（短、留在行内）；修复按钮挪到右侧动作列 ——
+        // 原来它独占一整行、又长又占地方（用户反馈：放到 切换/重命名/移除 那一列去）。
+        main.append(
           el(
-            'span',
-            'dsw-hint',
-            `⚠️ ${relTime(item.lastVerifyError.at)}校验失败：${item.lastVerifyError.message}` +
-              '（凭证多半已失效；重新登录会原地更新它，不改变当前账号）',
+            'div',
+            'dsw-account-fix',
+            `⚠️ ${relTime(item.lastVerifyError.at)}校验失败：${item.lastVerifyError.message}`,
           ),
         )
-        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重新登录这个账号') as HTMLButtonElement
-        reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
-        fix.append(reloginBtn)
-        main.append(fix)
       }
       row.append(main)
 
       const actions = el('div', 'dsw-account-actions')
+      // 失效的账号：「重新登录」放动作列最前面 —— 它是这行最该点的按钮
+      if (item.lastVerifyError) {
+        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重新登录') as HTMLButtonElement
+        reloginBtn.title = '不清理浏览器登录态（能复用就直接复用）；捕获后原地更新这条记录，不新增、也不切换当前账号'
+        reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
+        actions.append(reloginBtn)
+      }
       if (item.isActive) {
         actions.append(el('span', 'dsw-hint', '使用中'))
       } else {

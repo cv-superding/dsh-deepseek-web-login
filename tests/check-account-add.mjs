@@ -22,14 +22,19 @@ import { join } from 'node:path'
 const HOME = mkdtempSync(join(tmpdir(), 'dswl-addacct-'))
 process.env.DSH_HOME = HOME
 
-const { activeAccountId, activeAccount, listAccounts, removeAccount } = await import('../src/accounts.ts')
+const { activeAccountId, activeAccount, listAccounts, readAccount, removeAccount, updateAccount } =
+  await import('../src/accounts.ts')
 const { readAuth } = await import('../src/auth.ts')
 const {
   ADD_MODE_TTL_MS,
+  RELOGIN_TTL_MS,
   addModeActive,
   beginAddAccount,
+  beginRelogin,
   commitCapturedAuth,
   endAddAccount,
+  endRelogin,
+  pendingReloginTarget,
 } = await import('../src/account-add.ts')
 
 let passed = 0
@@ -57,6 +62,7 @@ const makeAuth = (token) => ({
 function reset() {
   for (const item of listAccounts()) removeAccount(item.id)
   endAddAccount()
+  endRelogin()
 }
 reset()
 
@@ -190,6 +196,115 @@ run('反复进出添加模式不会串味', () => {
     assert.equal(activeAccount()?.token, 'tok-current', `第 ${i} 轮后当前账号不该变`)
   }
   assert.equal(listAccounts().length, 4, '当前 1 个 + 添加 3 个')
+})
+
+// ── 重新登录：原地更新（0.1.65，用户实测反馈）────────────────────────────
+// 用户点「重新登录这个账号」→ 重登成功 → 库里**多出一条同名账号**、旧那条还挂着
+// 「需要重新登录」。根因两层：① relogin 没记住"要更新哪条记录"；
+// ② 捕获时只有 token/cookie、没有身份，靠 serverId/token 去重都命中不了（重登必然换 token）。
+
+run('重新登录：凭证原地写回同一条记录，不新增、不切换当前账号', () => {
+  reset()
+  const current = commitCapturedAuth(makeAuth('tok-current'))
+  beginAddAccount()
+  const other = commitCapturedAuth(makeAuth('tok-other'))
+  assert.equal(activeAccount()?.token, 'tok-current', '自证：当前账号是 current')
+  const before = listAccounts().length
+
+  updateAccount(other.recordId, {
+    lastVerifyError: { at: new Date().toISOString(), message: 'Authorization Failed (invalid token)' },
+  })
+  assert.ok(readAccount(other.recordId).lastVerifyError, '自证：那条记录确实处于失败态')
+
+  beginRelogin(other.recordId)
+  const commit = commitCapturedAuth(makeAuth('tok-reborn'))
+
+  assert.equal(commit.mode, 'relogin')
+  assert.equal(commit.recordId, other.recordId, '必须写回同一条记录')
+  assert.equal(listAccounts().length, before, '不能新增记录 —— 这就是用户看到"俩137"的原因')
+  assert.equal(readAccount(other.recordId).token, 'tok-reborn', '凭证要更新成新的')
+  assert.equal(readAccount(other.recordId).lastVerifyError, undefined, '旧失败标记必须清掉，否则会一直显示"需要重新登录"')
+  assert.equal(activeAccount()?.token, 'tok-current', '当前账号不能变')
+})
+
+run('重新登录：认得出是另一个号 → 不覆盖，放行成普通捕获', () => {
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-a'))
+  updateAccount(target.recordId, { serverId: 'user-1' })
+  beginRelogin(target.recordId)
+  const commit = commitCapturedAuth({ ...makeAuth('tok-b'), serverId: 'user-2' })
+  assert.notEqual(commit.mode, 'relogin', '明确是另一个号，不能原地覆盖')
+  assert.equal(readAccount(target.recordId).token, 'tok-a', '被指向的那条不能被改')
+})
+
+run('重新登录：认不出身份时按"就是它"处理（捕获只有 token/cookie 的常态）', () => {
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-a'))
+  beginRelogin(target.recordId)
+  const commit = commitCapturedAuth(makeAuth('tok-a-new'))
+  assert.equal(commit.mode, 'relogin')
+  assert.equal(readAccount(target.recordId).token, 'tok-a-new')
+})
+
+run('重新登录：浏览器沿用原会话（token 没变）时，旧的失败标记同样要清掉', () => {
+  // 这条专门盯"清失败标记"那一步（反向验证发现：token 变了的话，upsertAccount 找不到 existing、
+  // 压根不会把 lastVerifyError 带过来 —— 于是那条用例对"清除"这一步是没有牙齿的）。
+  // token 没变时它会按 token 命中已有记录，把 lastVerifyError 一起 inherit 过来；
+  // 没有显式清除的话，这条记录会一直挂着「需要重新登录」（用户实测："重登了怎么还报错"）。
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-same'))
+  updateAccount(target.recordId, {
+    lastVerifyError: { at: new Date().toISOString(), message: 'Authorization Failed (invalid token)' },
+  })
+  assert.ok(readAccount(target.recordId).lastVerifyError, '自证：先让它处于失败态')
+  beginRelogin(target.recordId)
+  const commit = commitCapturedAuth(makeAuth('tok-same'))
+  assert.equal(commit.mode, 'relogin')
+  assert.equal(readAccount(target.recordId).lastVerifyError, undefined, 'token 没变也必须清掉旧的失败标记')
+})
+
+run('重新登录：意图有期限（超时就不生效）', () => {
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-a'))
+  const t0 = Date.now()
+  beginRelogin(target.recordId, t0)
+  assert.equal(pendingReloginTarget(t0 + RELOGIN_TTL_MS - 1), target.recordId, 'TTL 内有效')
+  const commit = commitCapturedAuth(makeAuth('tok-a2'), t0 + RELOGIN_TTL_MS + 1)
+  assert.notEqual(commit.mode, 'relogin')
+  assert.equal(pendingReloginTarget(t0 + RELOGIN_TTL_MS + 1), undefined, '超时后自行清除')
+})
+
+run('重新登录：意图只用一次', () => {
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-a'))
+  beginRelogin(target.recordId)
+  assert.equal(commitCapturedAuth(makeAuth('tok-a2')).mode, 'relogin')
+  assert.equal(pendingReloginTarget(), undefined, '用掉就该没了')
+  assert.notEqual(commitCapturedAuth(makeAuth('tok-a3')).mode, 'relogin', '第二次捕获不该再原地更新')
+})
+
+run('重新登录：目标记录已被移除 → 放行成普通捕获（不凭空写回）', () => {
+  reset()
+  const target = commitCapturedAuth(makeAuth('tok-a'))
+  const id = target.recordId
+  beginRelogin(id)
+  removeAccount(id)
+  const commit = commitCapturedAuth(makeAuth('tok-a2'))
+  assert.notEqual(commit.mode, 'relogin')
+  assert.equal(readAccount(id), undefined)
+})
+
+run('重新登录意图与添加模式互不干扰（同时挂着时，重新登录优先）', () => {
+  reset()
+  const current = commitCapturedAuth(makeAuth('tok-current'))
+  beginAddAccount()
+  const other = commitCapturedAuth(makeAuth('tok-other'))
+  beginAddAccount()
+  beginRelogin(other.recordId)
+  const commit = commitCapturedAuth(makeAuth('tok-reborn'))
+  assert.equal(commit.mode, 'relogin', '重新登录意图优先于添加模式')
+  assert.equal(activeAccount()?.token, 'tok-current')
+  assert.equal(listAccounts().length, 2, '不该多出记录')
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
