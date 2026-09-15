@@ -367,6 +367,14 @@ export interface AdapterDeps {
   /** 注入自定义流函数（单测用假流验证自动续写）；缺省用 streamWebCompletion。 */
   streamCompletion?: (auth: WebAuth, params: any) => AsyncGenerator<any>
   /**
+   * 注入自定义图片上传（单测用假上传验证 ref_file_ids 的组装）；缺省用 uploadImageFile。
+   *
+   * 为什么要留这个缝：真实上传要 PoW（sha3 wasm）+ 一次真网络往返，单测跑不动，
+   * 于是「同一张图在历史里出现两次时，ref_file_ids 会不会重复」这条**接线级**行为
+   * 长期零覆盖（只有纯函数 collectImageRefs 被测过，它压根不管去重）。
+   */
+  uploadImage?: typeof uploadImageFile
+  /**
    * 外部注入的请求闸门（宿主在设置页里要能改它的配置，所以由 index.ts 创建并共享）。
    * 缺省时按 config 自建一个。
    */
@@ -440,12 +448,36 @@ const CONTINUE_INSTRUCTION =
   '如果上一条回复停在句子中间，就从那个断点直接把句子写完并继续。'
 
 /**
+ * 出现在末尾即「明显还有下文」的标点：列举 / 分句写到一半停了。
+ * 正常写完的回答**不可能**以这些收尾（它们是分隔符，不是终止符）。
+ *
+ * 0.1.66 补：`；`（全角分号）与 `、`（顿号）在旧实现里都落到了「非标点字符」那条兜底规则上，
+ * 被判成完整 —— 而这两个恰恰是最强的「没写完」信号（列举到一半、分句列到一半）。
+ * 实测（源码函数直接求值）旧行为：`；` → false、`、` → false，而 `，`/`：`/`;` → true，
+ * 同一个文件里两套标准。
+ */
+const MID_SENTENCE_TAIL = new Set(['，', '、', '；', '：', ',', ';', ':'])
+
+/**
+ * 出现在末尾即视为「正常收尾」的标点。
+ *
+ * ⚠️ `…` 放在这里是**刻意的取舍**：省略号既可能是"话没说完"，也可能是作者有意的收束语气，
+ * 两种都常见。判 true 会让一句正常收尾的话被要求"接着写"（模型容易重复一遍），
+ * 感知上比偶发漏判更打扰，所以保守放行。真被服务端切断（无 FINISHED）时走 `cutByServer`，
+ * 不依赖这条判据。
+ */
+const COMPLETE_TAIL = new Set(['。', '！', '？', '!', '?', '…', '）', ')', '】', '》', '」', '』', '"', '”', '’'])
+
+/**
  * 启发式：正文是否「在句中被截」。
  * 判据（尾部最后一个非空白字符）：
  *  - 是 CJK 汉字/字母/数字（没有任何标点收尾）→ 大概率被截；
  *  - 是 markdown 强调标记（`**` / `__`）→ 被截在标记中间；
- *  - 是逗号/顿号/冒号/开引号/开括号 → 明显未完。
+ *  - 是逗号/顿号/分号/冒号 → 明显未完。
  *  正常结束的正文几乎总以句号/问号/感叹号/右引号/右括号/代码块收尾/表格行结尾出现。
+ *
+ * ⚠️ 这是启发式，**只在"明显没写完"时才敢返回 true**：误判 true 只是白发一次续写请求，
+ * 误判 false 却是用户直接丢内容 —— 两种代价不同，所以判据本身要能读懂「分隔符 vs 终止符」。
  */
 function looksMidSentence(text: string): boolean {
   const trimmed = text.trimEnd()
@@ -455,15 +487,12 @@ function looksMidSentence(text: string): boolean {
   // 这条判据、仍会续写，所以这里收窄只影响「有 FINISHED 但尾部是汉字」的场景。
   if (trimmed.length < 40) return false
   const last = trimmed[trimmed.length - 1]
-  if ('。，？！；：,?!;:…）】》」』"\'`*_#~'.includes(last)) {
-    // 标点收尾 → 但 `` ` `` 和 `*` `_` `#` `~` 可能是 markdown 标记被截，单独判
-    if (last === '*' || last === '_' || last === '#' || last === '~' || last === '`') {
-      // `**` 结尾 = 粗体标记没闭合 → 被截
-      return trimmed.endsWith('**') || trimmed.endsWith('__')
-    }
-    // 逗号/冒号/分号 → 未完
-    return '，：,;：：'.includes(last) || last === '，' || last === ',' || last === ':' || last === '：' || last === ';'
+  // markdown 标记收尾：`*` `_` `#` `~` `` ` `` 本身可能是「标记被截」，只有成对的一半才算
+  if (last === '*' || last === '_' || last === '#' || last === '~' || last === '`') {
+    return trimmed.endsWith('**') || trimmed.endsWith('__')
   }
+  if (MID_SENTENCE_TAIL.has(last)) return true
+  if (COMPLETE_TAIL.has(last)) return false
   // 字母/数字/汉字/其他非标点字符收尾 → 大概率被截
   return /[a-zA-Z0-9\u4e00-\u9fff\u3040-\u30ff]/.test(last)
 }
@@ -490,6 +519,8 @@ export function createAdapter(deps: AdapterDeps) {
   const logger = deps.config.logger
   // 流函数可注入（单测用假流验证自动续写）；缺省走真实网页端实现
   const runStream = deps.streamCompletion ?? streamWebCompletion
+  // 图片上传同理可注入（单测验证 ref_file_ids 组装 / 失败告知）；缺省走真实上传
+  const uploadImage = deps.uploadImage ?? uploadImageFile
 
   // 请求闸门：串行 + 最小间隔，覆盖**每一次**模型调用（含 DSH 的会话标题/压缩等辅助调用）。
   // 宿主（index.ts）会注入一个共享实例，好让设置页改完立即生效；缺省自建。
@@ -560,22 +591,47 @@ export function createAdapter(deps: AdapterDeps) {
    * 失败不致命：记日志后跳过该图（prompt 里仍有 [image attached] 标记，模型会知道有图但看不到）。
    * 但**取消**要照常传播 —— 用户点了停止就不该继续传图，也不该把它降级成"纯文本继续跑"。
    */
-  async function uploadRequestImages(auth: WebAuth, messages: readonly any[] | undefined, signal?: AbortSignal): Promise<string[]> {
+  async function uploadRequestImages(
+    auth: WebAuth,
+    messages: readonly any[] | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ ids: string[]; notice?: string }> {
     signal?.throwIfAborted()
     uploadCache.useScope(auth.token)
     const scope = uploadCache.currentScope()
     const refs = collectImageRefs(messages)
-    if (refs.length === 0) return []
+    if (refs.length === 0) return { ids: [] }
+    // 去重（0.1.66）：同一张图可能在同一份历史里出现多次 —— 用户消息里一次、
+    // `read_image` 的工具结果里又一次（工具结果内嵌图片本体），甚至模型对同一个文件
+    // 连调两次 read_image。实测本机会话 `install-plugin/session-c1fb8208-*` 里就有
+    // 两个 tool/result 各自内嵌同一张 `sha256:23c18a56…`（89962B JPEG）。
+    //
+    // 为什么必须去重：`attachmentId` 是**内容寻址**（sha256），同一张图必然是同一个 key，
+    // 于是缓存命中时会把**同一个 file_id 再推一遍**，请求体变成 `ref_file_ids: [id, id]`。
+    // 服务端不接受重复 id（biz_code 9 / invalid ref file id），一旦被拒，
+    // 该会话**后续每一轮都会失败**（图留在历史里），只能新开对话。
+    //
+    // 每个 attachmentId 只产出一个 file id —— 这是最小、也最贴近语义的修法
+    // （不同附件即使内容相同，也各有各的 id，不该在这里合并）。
+    const seen = new Set<string>()
+    const unique: any[] = []
+    for (const ref of refs) {
+      const key = String(ref?.attachmentId ?? '')
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      unique.push(ref)
+    }
+    if (unique.length === 0) return { ids: [] }
     if (!deps.readImage) {
       logger?.warn?.('deepseek-web: 收到图片但附件服务不可用（ctx.attachments），图片被忽略')
-      return []
+      return { ids: [], notice: imageNotice(unique.length, '宿主没有提供附件读取能力（ctx.attachments）') }
     }
     uploadCache.prune()
     const ids: string[] = []
-    for (const ref of refs) {
+    const failures: string[] = []
+    for (const ref of unique) {
       signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
-      if (!key) continue
       const cached = uploadCache.get(key)
       if (cached) {
         ids.push(cached)
@@ -583,7 +639,7 @@ export function createAdapter(deps: AdapterDeps) {
       }
       try {
         const stored = await deps.readImage(ref, signal)
-        const uploaded = await uploadImageFile(
+        const uploadedFile = await uploadImage(
           auth,
           {
             data: stored.data,
@@ -592,14 +648,34 @@ export function createAdapter(deps: AdapterDeps) {
           },
           signal,
         )
-        uploadCache.set(key, uploaded.fileId, Date.now(), scope)
-        ids.push(uploaded.fileId)
+        uploadCache.set(key, uploadedFile.fileId, Date.now(), scope)
+        ids.push(uploadedFile.fileId)
       } catch (error: any) {
         if (signal?.aborted) throw error
-        logger?.warn?.(`deepseek-web: 图片上传失败（已降级为纯文本）：${error?.message ?? error}`)
+        const message = String(error?.message ?? error)
+        failures.push(message)
+        logger?.warn?.(`deepseek-web: 图片上传失败（已降级为纯文本）：${message}`)
       }
     }
-    return ids
+    // 图丢了必须让**用户**看见，不能只写日志（见 imageNotice 的说明）
+    return failures.length > 0 ? { ids, notice: imageNotice(failures.length, failures[0]) } : { ids }
+  }
+
+  /**
+   * 图片没能送进模型时的用户可见告知。
+   *
+   * 为什么必须写进回答：旧实现只 `logger.warn` 然后降级成纯文本，**界面上一声不响** ——
+   * 用户会以为「模型看不懂图」，而实际上是图根本没发出去（2026-09-15 实测：本机 09-14
+   * 有 36 次上传被服务端以 code 9 unsupported file type 拒绝，当轮 completion 正常
+   * FINISHED，界面上看不到任何异常）。模型对外的 `inputModalities` 声明了 image，
+   * 丢了却不告知，等于让用户对着一个「假装收到了」的输入提问。
+   *
+   * 与 F28 同一个原则：只要是「本该处理、但被丢弃」的输入，就必须显式说出来。
+   */
+  function imageNotice(count: number, reason: string): string {
+    // 失败原因可能很长（授权失败那条带整段引导语），截断后再放进正文
+    const brief = reason.length > 120 ? `${reason.slice(0, 120)}…` : reason
+    return `\n⚠️ [deepseek-web] 有 ${count} 张图片没能传给模型（${brief}），本轮回答只基于文字内容。\n`
   }
 
   /**
@@ -658,7 +734,9 @@ export function createAdapter(deps: AdapterDeps) {
     const { thinkingEnabled } = resolveThinking(options, spec)
 
     // 图片：读取附件 → 上传到网页端 → 用 file_id 随请求引用（网页端看图的实际机制）
-    const refFileIds = await uploadRequestImages(auth, options?.messages, options?.signal)
+    // notice：有图没能送出去时给用户的一句告知（下面会作为正文首段吐出去）
+    const uploaded = await uploadRequestImages(auth, options?.messages, options?.signal)
+    const refFileIds = uploaded.ids
 
     // 链式投喂需要 prompt 的**结构**（固定头 + 未截断的历史条目）才能算增量，
     // 所以这里取 parts、下面的 params 一起把 entries 传下去（见 context-feed.ts）。
@@ -721,6 +799,15 @@ export function createAdapter(deps: AdapterDeps) {
     }
 
     try {
+      // 图片丢失的告知放在最前面：它是**本次调用的输入状态**，不是回答的一部分，
+      // 但界面只有"正文"这一个通道能保证被用户看到（设置页不会自动弹）。
+      if (uploaded.notice) {
+        const noticeBlock = openText()
+        textStarted = true
+        yield { type: 'block-start', index: noticeBlock.index, blockType: 'text' }
+        noticeBlock.text += uploaded.notice
+        yield { type: 'text-delta', index: noticeBlock.index, text: uploaded.notice }
+      }
       // ── 自动续写循环 ──
       // 服务端会在句中截断生成（实测：两个窗口共用同一账号时，后来的请求会抢占在生成中的流，
       // 被抢占的流以 FINISHED 收尾）。截断发生时，这里自动发起新请求让模型「接着写」，

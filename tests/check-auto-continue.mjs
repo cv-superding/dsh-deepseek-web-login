@@ -504,6 +504,44 @@ await test('N03：无换行回答里出现尖括号时要退回缓冲（不能�
   assert.equal(perChar.blocks.join(''), single.blocks.join(''), '分包不变性')
 })
 
+// ── 0.1.66：尾字符判据补漏（「；」「、」是分隔符，不是终止符）──────────────
+// 实测旧实现（把源码函数体切出来直接求值）：`；`（全角分号）与 `、`（顿号）都落到
+// "字母/数字/汉字以外的字符 → false" 那条兜底上，被判成"已写完"。
+// 而服务端**会在句中截断却照发 FINISHED**（README 有记录）—— 此时 cutByServer 为 false，
+// looksMidSentence 是唯一防线 ⇒ 截断点落在分号/顿号后就会**静默少一段**。
+// 这两个恰恰是最强的"还没写完"信号：列举到一半、分句列到一半。
+// ⚠️ 样本必须 > 40 字，否则会被 F29 的短文本门槛吃掉、用例等于什么都没测。
+const FILLER = '先把已知条件逐条摆出来，把边界划清楚，再把推导过程一步步写完整，最后给出结论与对应的示例代码'
+
+await test('结尾是「；」→ 判为句中被截，自动续写（0.1.66）', async () => {
+  const head = FILLER + '；'
+  const { calls, blocks } = await run({}, [fakeStream([head]), fakeStream(['补齐后半段。'])])
+  assert.ok(head.length > 40, `自证：样本要超过 40 字门槛，实际 ${head.length}`)
+  assert.equal(calls.length, 2, '分号收尾 = 还有下文，应续写')
+  assert.ok(blocks[0].endsWith('补齐后半段。'), `续写要拼进同一条回答：${JSON.stringify(blocks)}`)
+})
+
+await test('结尾是「、」→ 判为句中被截，自动续写（0.1.66）', async () => {
+  const head = FILLER + '、'
+  const { calls } = await run({}, [fakeStream([head]), fakeStream(['还有最后一项。'])])
+  assert.ok(head.length > 40, `自证：样本要超过 40 字门槛，实际 ${head.length}`)
+  assert.equal(calls.length, 2, '顿号收尾 = 列举没列完，应续写')
+})
+
+await test('结尾是「。」的长回答 → 不续写（防止判据被放宽成"逢标点就续写"）', async () => {
+  const head = FILLER + '。'
+  const { calls } = await run({}, [fakeStream([head])])
+  assert.ok(head.length > 40, `自证：样本要超过 40 字门槛，实际 ${head.length}`)
+  assert.equal(calls.length, 1, '句号收尾是正常结束，不该续写')
+})
+
+await test('结尾是「…」→ 视为正常收尾（刻意取舍：省略号也可能是有意的收束语气）', async () => {
+  const head = FILLER + '…'
+  const { calls } = await run({}, [fakeStream([head])])
+  assert.ok(head.length > 40, `自证：样本要超过 40 字门槛，实际 ${head.length}`)
+  assert.equal(calls.length, 1, '省略号收尾不续写（详见 COMPLETE_TAIL 的取舍注释）')
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1

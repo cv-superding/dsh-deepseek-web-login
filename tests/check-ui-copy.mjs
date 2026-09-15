@@ -21,6 +21,10 @@ import { join } from 'node:path'
 const ROOT = join(import.meta.dirname, '..')
 const CLIENT = readFileSync(join(ROOT, 'src/client/index.ts'), 'utf8')
 const COOKIES = readFileSync(join(ROOT, 'src/cookies.ts'), 'utf8')
+// 0.1.66：host 侧也有会显示在面板上的文案 —— 原来只扫 client/cookies，
+// 于是 transport.ts 里一处 `**系统代理**` 一直漏着（界面把它原样显示成带星号）。
+const TRANSPORT = readFileSync(join(ROOT, 'src/transport.ts'), 'utf8')
+const CONTEXT_FEED = readFileSync(join(ROOT, 'src/context-feed.ts'), 'utf8')
 
 let passed = 0
 let failed = 0
@@ -55,6 +59,20 @@ test('界面文案里没有 markdown 星号（会被原样显示成 **xxx**）',
 test('cookies 的说明文案同样没有 markdown 星号', () => {
   const hits = markdownAsteriskLines(COOKIES)
   assert.deepEqual(hits.map(([n]) => n), [])
+})
+
+test('host 侧的面板文案也没有 markdown 星号（0.1.66 补上这半边）', () => {
+  // 自证：这两个文件里确实有会显示在面板上的提示文案，不是空扫
+  assert.ok(/TRANSPORT_HINT/.test(TRANSPORT), '自证：transport.ts 确实有面板提示常量')
+  assert.ok(/CONTEXT_MODE_HINT/.test(CONTEXT_FEED), '自证：context-feed.ts 确实有面板提示常量')
+  for (const [label, src] of [['transport.ts', TRANSPORT], ['context-feed.ts', CONTEXT_FEED]]) {
+    const hits = markdownAsteriskLines(src)
+    assert.deepEqual(
+      hits.map(([n, line]) => `${label}:${n}: ${line.trim().slice(0, 60)}`),
+      [],
+      '界面是纯文本，`**xxx**` 会原样显示',
+    )
+  }
 })
 
 test('反馈节点自动选样式：失败红框、成功绿框、其余灰色', () => {

@@ -34,7 +34,7 @@ export type TransportKind = 'chromium' | 'node'
 export const DEFAULT_TRANSPORT: TransportKind = 'chromium'
 
 export const TRANSPORT_HINT =
-  'Chromium 网络栈会跟随**系统代理**（Node 则完全无视代理）。若梯子关闭时系统代理仍指向 ' +
+  'Chromium 网络栈会跟随「系统代理」（Node 则完全无视代理）。若梯子关闭时系统代理仍指向 ' +
   '127.0.0.1:7897，切到 Chromium 后请求会失败 —— 这时切回 Node 即可。'
 
 /** 取 Electron 的 `net.fetch`；不可用（非 Electron 环境 / 未暴露 net）返回 undefined。 */

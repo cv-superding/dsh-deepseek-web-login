@@ -189,7 +189,10 @@ const checks = {
   'host 图片缓存按账号隔离并淘汰过期项':
     host.includes('uploadCache.useScope(auth.token)') &&
     host.includes('uploadCache.prune()') &&
-    host.includes('uploadCache.set(key, uploaded.fileId, Date.now(), scope)'),
+    // 守的是"写缓存时带上 scope"（账号隔离）这个行为，不绑内部变量名：
+    // 0.1.66 把局部变量改名成 uploadedFile（避免与调用方那个同名结果混淆），
+    // 用 \w+\.fileId 就不必为了改名去动断言。
+    /uploadCache\.set\(key,\s*\w+\.fileId,\s*Date\.now\(\),\s*scope\)/.test(host),
   // 审计 F10：建连阶段必须有整体期限，而且**等待本身要可取消** ——
   // abort 只对"肯配合 signal 的传输"立即生效，所以 openCompletion 也被包进了 wait()。
   // 断言调用点：`params.connectTimeoutMs`（3 处读取）+ `await wait(openCompletion(`
@@ -366,6 +369,37 @@ const checks = {
   // 0.1.65（2026-09-15）：重新登录必须**原地更新那一条记录**。
   // 用户实测：点「重新登录这个账号」→ 重登成功 → 库里多出一条同名账号、旧那条还挂着
   // 「需要重新登录」。四处接线缺一不可，故按调用点断言。
+  // 0.1.66（2026-09-15）：图片引用去重 + 图丢了要可见。
+  // 三条都是接线级行为，纯函数测不到（真实上传要 PoW+网络），按**调用点**断言。
+  'host 图片引用去重 + 失败回传 + 上传可注入（0.1.66）':
+    // 去重必须发生在遍历 refs 的循环里（而不是别处的同名字段）
+    /for \(const ref of refs\) \{[\s\S]{0,140}?seen\.has\(key\)\) continue;[\s\S]{0,80}?unique\.push\(ref\)/.test(host) &&
+    // 上传失败要随 ids 一起回传原因（否则调用方无从告知）
+    /notice:\s*imageNotice\(failures\.length,\s*failures\[0\]\)/.test(host) &&
+    // 注入点：缺省才走真实上传（生产调用点必须真的读这个 dep）
+    /deps\.uploadImage\s*\?\?\s*uploadImageFile/.test(host),
+
+  // 0.1.66：面板文案是纯文本 —— `**系统代理**` 会被原样显示成带星号。
+  // 0.1.64 只扫了 client/cookies，host 侧这处一直漏着（界面截图上看不出，得读源码才发现）。
+  'host 传输层提示没有 markdown 星号（0.1.66）':
+    host.includes('Chromium 网络栈会跟随「系统代理」') &&
+    !/跟随\*\*系统代理\*\*/.test(host),
+
+  'host 图片丢失要写进正文（0.1.66）':
+    // 提示必须在流开始处作为正文首段吐出去（设置页不会自动弹，正文是唯一保证可见的通道）
+    /if \(uploaded\.notice\) \{[\s\S]{0,160}?blockType:\s*["']text["']/.test(host) &&
+    /没能传给模型/.test(host) &&
+    /本轮回答只基于文字内容/.test(host),
+
+  // 0.1.66：续写判据补漏 —— 「；」与「、」都是**分隔符**（列举/分句写到一半），
+  // 旧实现把它们落到"非标点字符 → false"兜底上判成已写完；而服务端会在句中截断却照发
+  // FINISHED，此时 cutByServer 为 false、这条判据是唯一防线 ⇒ 静默少一段。
+  'host 续写判据把「；」「、」算作未写完（0.1.66）':
+    /MID_SENTENCE_TAIL = \/\* @__PURE__ \*\/ new Set\(\[[\s\S]*?"、",[\s\S]*?"；",[\s\S]*?\]\)/.test(host) &&
+    /if \(MID_SENTENCE_TAIL\.has\(last\)\) return true/.test(host) &&
+    // 顺带守住"没把句末标点也放宽" —— 否则变成逢标点就续写
+    /COMPLETE_TAIL = \/\* @__PURE__ \*\/ new Set\(\[[\s\S]*?"。"[\s\S]*?\]\)/.test(host),
+
   'host/client 重新登录原地更新（0.1.65）':
     /beginRelogin\(id\)/.test(host) &&
     /relogin:\s*commit\.mode\s*===\s*["']relogin["']/.test(host) &&

@@ -81,7 +81,7 @@ DSH's usage-stats page on the free web channel — 10.4M tokens / 164 calls in a
 | 🛠 **Tool calling** | The web endpoint has no native function calling → a prompting JSON protocol plus a streaming filter (cross-chunk markers, fenced blocks, multiple calls, false-positive fallback) that synthesizes `tool-call` blocks and `finish: tool-calls`; tool definitions are emitted under a 56k-character budget, and when that is exceeded the **names of the omitted tools are listed** with an instruction not to guess their parameters |
 | 🛡 **Drift covered twice** | The instructions explicitly forbid XML/DSML markup (the model then refuses that format by itself), and the parser accepts both the JSON and XML/DSML families (`\|DSML\|` prefix, hyphenated `dsml-` tags, bare `<invoke>`, CDATA) |
 | 🩹 **Lenient JSON repair** | Models write Windows paths with single backslashes: `\A` is an illegal escape while `\r` is legal and would silently turn `\resources` into a carriage return. A chain of repair candidates restores paths literally; if nothing parses, the text is passed through — **content is never silently dropped** |
-| 🖼 **Image input** | Not native multimodal input: images are uploaded via `/api/v0/file/upload_file` and referenced with `ref_file_ids`. Verified against a generated left-red/right-blue PNG — the model answered "left=red, right=blue" |
+| 🖼 **Image input** | Not native multimodal input: images are uploaded via `/api/v0/file/upload_file` and referenced with `ref_file_ids`. The same image appearing more than once in history is deduplicated (the server rejects duplicate ids). Verified against a generated left-red/right-blue PNG — the model answered "left=red, right=blue" |
 | 🧹 **Session hygiene** | One temporary chat session per call, deleted afterwards. Verified: the web chat list is byte-identical before and after |
 | 🎛 **Settings panel** | Status, browser login, recover-from-window, manual token, connectivity test (host API at `/deepseek-web-login/api/*`) |
 | 🔓 **Logout / switch account** | A dedicated "current account" card: **log out** — also clears the chat.deepseek.com storage inside the Electron partition, so the session is really gone and you can log in as somebody else — plus "log out and sign in as another account". Two-step confirmation, so no accidental logout |
@@ -142,7 +142,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `maxPromptChars` | `1500000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
-| `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer) |
+| `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer). The tail character decides: `，` `、` `；` `：` (and their ASCII forms) mean "clearly unfinished" and trigger a continuation; sentence-ending punctuation (`。` `！` `？` `）` …) counts as complete — including `…`, since an ellipsis may be a deliberate ending |
 | `maxContinuations` | `2` | Max auto-continuation rounds (each round is a new web request, so it spends more of the free quota) |
 | `minRequestIntervalMs` | **`2000`** | Lower bound of the gap between two web calls, measured from when the previous one **finished** |
 | `maxRequestIntervalMs` | **`4000`** | Upper bound; the actual wait is picked **randomly** inside the range (equal bounds = fixed interval) |
@@ -323,6 +323,7 @@ credential plaintext normally does not travel over HTTP.
 - **No native tools**: tool calling is prompting-based. Drift is covered by both the instructions and the parser, but it remains model behaviour
 - **The tool catalog has a budget**: the plugin tries to emit every tool definition DSH sends (before 0.1.33 the budget was 24k characters, which silently dropped 26 of 61 real tools). If the catalog still does not fit, the **names of the undescribed tools are listed** so the model asks the user for their parameters instead of guessing
 - **60s per-request cap** (`completion_request_timeout_ms`): the web client resumes streams via `sse_auto_resume`; this plugin does not implement resumption and reports `max-tokens` when a stream ends without a `FINISHED` marker instead of pretending it completed
+- **Images**: uploaded through the web file channel (`/api/v0/file/upload_file` → `ref_file_ids`). If an upload fails the plugin degrades to the `[image attached]` text marker **and says so at the top of the answer** ("N image(s) could not be sent to the model, ...") — before 0.1.66 the image was dropped silently and the log was the only trace. The same image appearing several times in history (user message plus an embedded `read_image` tool result) is deduplicated, because the server rejects duplicate ids (`biz_code 9 / invalid ref file id`) and a rejected session keeps failing on every later turn
 - Reasoning blocks are not replayed into history (token saving)
 - `temperature` / `stop` / `max_tokens` have no web equivalent and are ignored; usage is estimated
 - Free-tier rate limits apply; `429` carries `providerRetryAfterMs` for DSH's retry policy
@@ -337,6 +338,7 @@ node tests/probe-vision.mjs          # image channel (generates a red/blue PNG, 
 node tests/probe-batch-live.mjs     # live repro of incident #4 (deep thinking + a batch of 3 commands with $env:/Windows paths)
 node tools/changelog-section.mjs 0.1.3  # print one CHANGELOG section (reused by the release workflow)
 node tests/check-bundle.mjs          # verify every fix made it into lib/
+node tests/check-image-refs.mjs     # image reference assembly (dedup + "the image was dropped" notice)
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed
