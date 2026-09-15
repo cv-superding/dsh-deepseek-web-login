@@ -13,6 +13,7 @@ import {
   suggestedExportName,
 } from '../file-picker.ts'
 import { describeCookieLife, summarizeCookieLife } from '../cookies.ts'
+import { accountsSignature, shouldSyncAccounts } from '../account-sync.ts'
 
 type ClientContext = {
   slots: any
@@ -728,11 +729,47 @@ function Panel(): any {
       return row
     }
 
+    /**
+     * 渲染账号库，但**内容没变就不重建 DOM**。
+     *
+     * 为什么要有这道守卫：轮询会按秒级节拍重读 `/accounts`（见下面的 syncAccounts），
+     * 无脑重建会把用户正在悬停/正要点的按钮换掉（重命名输入框更糟 —— 直接失焦）。
+     * 签名取的是界面真正渲染的东西，见 account-sync.ts。
+     */
+    const applyAccounts = (data: any): void => {
+      const signature = accountsSignature(data)
+      if (signature && signature === accountsSignatureCache) return
+      accountsSignatureCache = signature
+      renderAccounts(data)
+    }
+
+    /** 显式读取（失败要说给用户听）：初始化 / 切号 / 移除 / 添加 / 重新登录 / 导入之后用。 */
     const loadAccounts = async (): Promise<void> => {
       try {
-        renderAccounts(await api('/accounts'))
+        applyAccounts(await api('/accounts'))
       } catch (error: any) {
         accountsMsg.textContent = `账号库读取失败：${error?.message ?? error}`
+      } finally {
+        accountsSyncedAt = Date.now()
+      }
+    }
+
+    /**
+     * 后台同步账号库（静默；只在内容变了时重建列表）。
+     *
+     * 为什么必须有它：账号库列表**不在 `/status` 里**，登录捕获又是异步落地的
+     * （CDP 那条路要等用户在浏览器里登录完；能开 Electron 窗口那条路更是"开窗即返回"）
+     * ⇒ 只靠上面几个显式调用，捕获晚一步就永远不显示，得关掉设置页再打开。
+     *
+     * 后台同步失败**不写进 accountsMsg** —— 那是给用户操作反馈用的，
+     * 被一个后台轮询的偶发失败覆盖掉会更让人困惑（下一次成功就自然好了）。
+     */
+    const syncAccounts = async (): Promise<void> => {
+      accountsSyncedAt = Date.now()
+      try {
+        applyAccounts(await api('/accounts'))
+      } catch {
+        // 静默：这是后台同步，失败不该覆盖用户正在看的那条消息
       }
     }
 
@@ -934,6 +971,10 @@ function Panel(): any {
     let loggedIn = false
     let electron = false
     let windowOpen = false
+    /** 上次同步账号库的时刻（0 = 还没读过；初始化那次 refresh 之前会先读一次）。 */
+    let accountsSyncedAt = 0
+    /** 上次渲染用的内容签名（见 account-sync.ts）。 */
+    let accountsSignatureCache = ''
     let probeIntervalMs = 0
 
     const renderKv = (rows: [string, string][]): void => {
@@ -2109,6 +2150,10 @@ function Panel(): any {
 
     timer = window.setInterval(() => {
       const active = windowOpen || Date.now() < boostUntil
+      // 账号库单独同步：它不在 /status 里，靠这一句才能"加完账号自己出现"。
+      // 登录流程进行中 3 秒一次（捕获一落地就能看见），空闲 30 秒一次（够让探活补上的
+      // 账号名 / 限制状态 / 失败标记自己出现，又不至于一直读盘）。
+      if (shouldSyncAccounts(Date.now(), accountsSyncedAt, active)) void syncAccounts()
       if (active) {
         void refresh(true)
         return

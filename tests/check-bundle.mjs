@@ -400,6 +400,24 @@ const checks = {
     // 顺带守住"没把句末标点也放宽" —— 否则变成逢标点就续写
     /COMPLETE_TAIL = \/\* @__PURE__ \*\/ new Set\(\[[\s\S]*?"。"[\s\S]*?\]\)/.test(host),
 
+  // 0.1.67（2026-09-15，用户反馈）：账号库列表要**跟着轮询自己更新**。
+  // 现象「新登一个号，账号库不刷新，退出一下才看到」的根因：列表不在 /status 里，
+  // 只有显式 loadAccounts() 才重读，而登录捕获是异步落地的（CDP 那条路要等用户在
+  // 浏览器里登录完；能开 Electron 窗口那条路"开窗即返回"）⇒ 捕获晚一步就永远不显示。
+  // 客户端里那句"万一捕获是异步落地的也能及时刷出来"的注释说明作者本来就想靠轮询兜住，
+  // 但轮询只读 /status，那个兜底从未生效。四处缺一不可，故按调用点断言。
+  'client 账号库跟着轮询自动同步（0.1.67）':
+    // ① 轮询里按节拍真的去同步 —— 这一句就是"让原来那句注释成真"
+    /if \(shouldSyncAccounts\(Date\.now\(\), accountsSyncedAt, active\)\) syncAccounts\(\)/.test(client) &&
+    // ② 内容没变就不重建 DOM（否则每 3 秒会把用户正在悬停/要点的按钮换掉）
+    /if \(signature && signature === accountsSignatureCache\) return;/.test(client) &&
+    // ③ 显式读取与后台同步共用同一个渲染入口
+    /const applyAccounts = \(data\) => \{[\s\S]{0,140}?accountsSignature\(data\)/.test(client) &&
+    // ④ 后台同步必须**静默**（catch 体为空）—— 轮询的偶发失败不该覆盖用户正在看的那条消息
+    /const syncAccounts = async \(\) => \{[\s\S]{0,260}?catch \{\s*\}/.test(client) &&
+    // ⑤ 纯判据模块必须真的被打进产物（不是只写在源码里）
+    /function shouldSyncAccounts\(now, lastSyncedAt, active\)/.test(client),
+
   'host/client 重新登录原地更新（0.1.65）':
     /beginRelogin\(id\)/.test(host) &&
     /relogin:\s*commit\.mode\s*===\s*["']relogin["']/.test(host) &&

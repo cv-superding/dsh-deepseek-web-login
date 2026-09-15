@@ -320,6 +320,7 @@ credential plaintext normally does not travel over HTTP.
 ## Known limitations
 
 - **One chat window per account**: the web client limits generation per account. Running two or more windows against the same account triggers a server-side **temporary ban (1 day)** — the login stays valid, but every request from that account is rejected until it lifts. Use one account per window, or move the extra windows to another provider
+- **The account library refreshes itself**: the settings panel re-reads it every **3 seconds** while a login flow is in progress (so a captured account shows up on its own — before 0.1.67 you had to close and reopen the panel) and every **30 seconds** when idle (so the account name / limit / failure mark that the probe fills in appear by themselves). The list is only rebuilt when its content actually changed, so it will not steal a click from you.
 - **No native tools**: tool calling is prompting-based. Drift is covered by both the instructions and the parser, but it remains model behaviour
 - **The tool catalog has a budget**: the plugin tries to emit every tool definition DSH sends (before 0.1.33 the budget was 24k characters, which silently dropped 26 of 61 real tools). If the catalog still does not fit, the **names of the undescribed tools are listed** so the model asks the user for their parameters instead of guessing
 - **60s per-request cap** (`completion_request_timeout_ms`): the web client resumes streams via `sse_auto_resume`; this plugin does not implement resumption and reports `max-tokens` when a stream ends without a `FINISHED` marker instead of pretending it completed
@@ -339,6 +340,7 @@ node tests/probe-batch-live.mjs     # live repro of incident #4 (deep thinking +
 node tools/changelog-section.mjs 0.1.3  # print one CHANGELOG section (reused by the release workflow)
 node tests/check-bundle.mjs          # verify every fix made it into lib/
 node tests/check-image-refs.mjs     # image reference assembly (dedup + "the image was dropped" notice)
+node tests/check-account-sync.mjs   # account library auto-sync (cadence + change signature)
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed
