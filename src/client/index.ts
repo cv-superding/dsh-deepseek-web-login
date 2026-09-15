@@ -920,9 +920,12 @@ function Panel(): any {
       loggedIn = !!status.auth?.loggedIn
       electron = !!status.electron
       windowOpen = !!status.loginWindowOpen
-      // 上下文投喂的实际状态（模式 + 链是否真的在跑）跟着状态轮询刷新
-      if ((status as any).contextMode) {
-        renderContextStatus?.(String((status as any).contextMode), (status as any).contextChain)
+      // 上下文投喂的实际状态（模式 + 链是否真的在跑）跟着状态轮询刷新。
+      // ⚠️ 这两个字段在 /status 的 **config** 里 —— 0.1.62 写成了顶层，等于这段从来没生效
+      //    （面板不重开就永远停在打开那一刻的段数），0.1.63 修正。
+      const cfg = status.config as { contextMode?: string; contextChain?: unknown } | undefined
+      if (cfg?.contextMode) {
+        renderContextStatus?.(String(cfg.contextMode), cfg.contextChain)
       }
 
       badge.textContent = loggedIn ? (status.auth.unverified ? '已捕获（未校验）' : '已登录') : '未登录'

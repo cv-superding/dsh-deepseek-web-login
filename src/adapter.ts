@@ -749,6 +749,17 @@ export function createAdapter(deps: AdapterDeps) {
           entries: promptParts.entries,
           maxChars: deps.config.maxPromptChars ?? 1_500_000,
         },
+        // 链式投喂的决策回执（0.1.63）→ 一行日志。webapi 只在「原因变化」时回调，
+        // 所以不会每轮刷屏，但"哪一轮开始不再发增量、为什么"一定看得见。
+        onContextFeed: (report) => {
+          logger?.info?.(
+            report.reason === 'chained'
+              ? `deepseek-web: 上下文投喂=链式：本轮只发增量 ${report.promptChars} 字（历史由服务端维护）`
+              : report.reason === 'mode-full'
+                ? 'deepseek-web: 上下文投喂=每轮全量：重发完整 prompt'
+                : `deepseek-web: 链式投喂退回全量重发（原因=${report.reason}）`,
+          )
+        },
         thinkingEnabled,
         modelType: spec.modelType,
         refFileIds: rounds === 0 ? refFileIds : [],

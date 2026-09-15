@@ -32,7 +32,7 @@ import {
   type CleanupRange,
 } from './gate.ts'
 // 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
-import { currentContextMode, decideFeed, type ChainState, type FeedDecision } from './context-feed.ts'
+import { currentContextMode, decideFeed, type ChainState, type FeedDecision, type FeedReason } from './context-feed.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
 
@@ -1701,9 +1701,17 @@ let reuseSlot: { key: string; sessionId: string; turns: number; cleanup?: (id: s
  */
 let contextChain: ChainState | undefined
 
+/**
+ * 上一次上报过的决策原因（0.1.63）。链式投喂的决策每轮都在做，
+ * 但"原因"通常连续几百轮都不变 —— 只在**变化时**上报，日志才不会被刷满，
+ * 同时"哪一轮开始退回全量、为什么"又一定能看见。
+ */
+let lastFeedReason: FeedReason | undefined
+
 /** 丢弃当前的链（会话退役/测试隔离用）。 */
 export function resetContextChain(): void {
   contextChain = undefined
+  lastFeedReason = undefined
 }
 
 /** 给状态页看：当前链式投喂是否真的在跑（没用链式就返回 undefined）。 */
@@ -1807,6 +1815,18 @@ export function disposeSessionReuse(): string | undefined {
 export function resetSessionReuse(): void {
   reuseSlot = undefined
   contextChain = undefined
+  // 决策回执的状态也是模块级的（见 lastFeedReason），一并清掉，测试之间才互不干扰
+  lastFeedReason = undefined
+}
+
+/** 链式投喂的决策回执（见 CompletionParams.onContextFeed）。 */
+export interface FeedReport {
+  /** 决策原因 —— chained = 真的发了增量；其余都是"退回全量"的具体理由。 */
+  reason: FeedReason
+  /** true = 本轮只发了增量；false = 本轮重发了全量 prompt。 */
+  chained: boolean
+  /** 实际写进请求体的 prompt 长度（chained 时就是增量大小）。 */
+  promptChars: number
 }
 
 export interface CompletionParams {
@@ -1817,6 +1837,12 @@ export interface CompletionParams {
    * 漏传会让链式模式静默退化成全量（靠 tests/check-bundle.mjs 的产物断言守）。
    */
   promptParts?: { head: string; entries: readonly string[]; maxChars?: number }
+  /**
+   * 链式投喂的决策回执（0.1.63）。**只在决策原因变化时**回调一次，
+   * 用来回答"这一轮到底发了增量，还是退回全量、因为哪条判据"——
+   * 没有它，0.1.62 的链式投喂在日志里是完全不可见的。
+   */
+  onContextFeed?: (report: FeedReport) => void
   thinkingEnabled: boolean
   searchEnabled?: boolean
   modelType: 'default' | 'expert' | 'vision'
@@ -1888,6 +1914,15 @@ async function openCompletion(
       reused: lease.reused,
       ...(contextChain ? { chain: contextChain } : {}),
     })
+    // 决策回执（0.1.63）：只在原因变化时上报一次，让日志能回答"这一轮为什么没走增量"。
+    if (feed.reason !== lastFeedReason) {
+      lastFeedReason = feed.reason
+      params.onContextFeed?.({
+        reason: feed.reason,
+        chained: feed.parentMessageId !== null,
+        promptChars: feed.prompt.length,
+      })
+    }
     let resp: Response
     try {
       resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {

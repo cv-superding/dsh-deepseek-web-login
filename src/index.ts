@@ -42,6 +42,7 @@ import {
   createSessionCleaner,
   currentFetch,
   contextChainInfo,
+  resetContextChain,
   DEFAULT_SESSION_CLEANUP,
   DEFAULT_SESSION_REUSE_TURNS,
   disposeSessionReuse,
@@ -850,7 +851,9 @@ export function apply(ctx: any, config: Config = {}): void {
                 mode: contextMode,
                 hint: CONTEXT_MODE_HINT,
                 settingsPath: contextModeSettingsPath(),
-                chain: contextChainInfo() ?? null,
+                // 只在链式模式下回链状态（0.1.63）：全量模式下链已经作废，
+                // 回它会让界面出现「每轮全量 + 链式投喂正在跑」这种自相矛盾的组合。
+                chain: contextMode === 'chained' ? (contextChainInfo() ?? null) : null,
               })
               return
             }
@@ -863,6 +866,9 @@ export function apply(ctx: any, config: Config = {}): void {
               }
               // 同 /transport：先即时生效（无需重启），再落盘；落盘失败如实回报，不假装成功
               contextMode = applyContextMode(wanted)
+              // 切到全量 ⇒ 链立刻作废（0.1.63）：全量下每轮都是根消息，链的父消息早就不是最新的了，
+              // 留着它既会让界面自相矛盾，也会在以后切回链式时从一个过期节点续链、让上下文错位。
+              if (contextMode === 'full') resetContextChain()
               let persisted = true
               try {
                 writeContextModeSetting(wanted)
@@ -876,7 +882,7 @@ export function apply(ctx: any, config: Config = {}): void {
                 persisted,
                 hint: CONTEXT_MODE_HINT,
                 settingsPath: contextModeSettingsPath(),
-                chain: contextChainInfo() ?? null,
+                chain: contextMode === 'chained' ? (contextChainInfo() ?? null) : null,
               })
               return
             }

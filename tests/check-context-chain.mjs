@@ -23,6 +23,7 @@ const {
   streamWebCompletion,
   setFetchImpl,
   resetSessionReuse,
+  resetContextChain,
   contextChainInfo,
 } = await import('../src/webapi.ts')
 const { applyContextMode } = await import('../src/context-feed.ts')
@@ -79,6 +80,7 @@ const authB = { token: 'token-B', cookie: 'c=B' }
  */
 async function runRound({ auth = authA, transport, entries, sse, sessionReuseTurns } = {}) {
   const bodies = []
+  const feeds = []
   setFetchImpl(async (url, init) => {
     bodies.push(JSON.parse(String(init?.body ?? '{}')))
     return new Response(typeof sse === 'function' ? sse(bodies.length) : sse ?? SSE_NO_ID, {
@@ -92,6 +94,8 @@ async function runRound({ auth = authA, transport, entries, sse, sessionReuseTur
     {
       prompt: full,
       promptParts: { head: HEAD, entries, maxChars: 1_500_000 },
+      // 决策回执（0.1.63）：webapi 只在「决策原因变化」时回调一次
+      onContextFeed: (report) => feeds.push(report),
       thinkingEnabled: false,
       modelType: 'default',
       idleTimeoutMs: 5_000,
@@ -102,7 +106,7 @@ async function runRound({ auth = authA, transport, entries, sse, sessionReuseTur
   )
   let text = ''
   for await (const ev of gen) if (ev.kind === 'text') text += ev.text
-  return { body: bodies[0], bodies, text, full }
+  return { body: bodies[0], bodies, text, full, feeds }
 }
 
 const E1 = 'User: 第一问'
@@ -245,6 +249,71 @@ await test('固定头变了（工具目录/系统提示变化）⇒ 重新起链
   }
   assert.equal(bodies[0].parent_message_id, null)
   assert.equal(bodies[0].prompt, 'NEW-HEAD\n\n---\n\n' + E2, '头部变了就不能只发增量')
+})
+
+// ── 决策回执（0.1.63）：没有它，链式投喂在日志里完全不可见 ──────────────────
+
+await test('决策回执：第一轮报 new-session，第二轮报 chained 且长度为增量', async () => {
+  resetSessionReuse()
+  applyContextMode('chained')
+  const { transport } = mkTransport()
+  const a = await runRound({ transport, entries: [E1], sse: sseWithId(2) })
+  // resetSessionReuse 之后第一轮必然是新会话 ⇒ 老实报 new-session（不是 no-chain）
+  assert.deepEqual(a.feeds.map((f) => f.reason), ['new-session'])
+  assert.equal(a.feeds[0].chained, false)
+  assert.equal(a.feeds[0].promptChars, a.full.length, '退回全量时上报的是全量长度')
+
+  const b = await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
+  assert.deepEqual(b.feeds.map((f) => f.reason), ['chained'])
+  assert.equal(b.feeds[0].chained, true)
+  assert.equal(b.feeds[0].promptChars, E2.length, '发增量时上报的是增量长度')
+})
+
+await test('决策回执：原因连续不变时不再回调（避免把日志刷满）', async () => {
+  resetSessionReuse()
+  applyContextMode('chained')
+  const { transport } = mkTransport()
+  await runRound({ transport, entries: [E1], sse: sseWithId(2) })
+  const second = await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
+  assert.equal(second.feeds.length, 1, '自证：原因从 no-chain 变 chained，这一轮必须上报')
+  const third = await runRound({ transport, entries: [E1, E2, E3], sse: sseWithId(4) })
+  assert.deepEqual(third.feeds, [], '第三轮原因仍是 chained → 不该再回调')
+  const fourth = await runRound({ transport, entries: [E1, E2, E3, 'User: 第四问'], sse: sseWithId(5) })
+  assert.deepEqual(fourth.feeds, [])
+})
+
+await test('决策回执：历史被改写 → 报 not-appended 且 chained=false', async () => {
+  resetSessionReuse()
+  applyContextMode('chained')
+  const { transport } = mkTransport()
+  await runRound({ transport, entries: [E1], sse: sseWithId(2) })
+  await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
+  const rewritten = await runRound({ transport, entries: ['User: 第一问（被改写）', E2], sse: sseWithId(4) })
+  assert.deepEqual(rewritten.feeds.map((f) => f.reason), ['not-appended'])
+  assert.equal(rewritten.feeds[0].chained, false)
+})
+
+await test('决策回执：全量模式下报 mode-full（一条就够）', async () => {
+  resetSessionReuse()
+  applyContextMode('full')
+  const { transport } = mkTransport()
+  const a = await runRound({ transport, entries: [E1], sse: sseWithId(2) })
+  assert.deepEqual(a.feeds.map((f) => f.reason), ['mode-full'])
+  const b = await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
+  assert.deepEqual(b.feeds, [], '全量模式下不该反复上报')
+})
+
+await test('resetContextChain 一并清掉「上次上报过的原因」（复盘/调试才看得到）', async () => {
+  resetSessionReuse()
+  applyContextMode('full')
+  const { transport } = mkTransport()
+  const a = await runRound({ transport, entries: [E1], sse: sseWithId(2) })
+  assert.deepEqual(a.feeds.map((f) => f.reason), ['mode-full'])
+  const b = await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
+  assert.deepEqual(b.feeds, [], '自证：同原因连续调用确实不上报')
+  resetContextChain()
+  const c = await runRound({ transport, entries: [E1, E2, E3], sse: sseWithId(4) })
+  assert.deepEqual(c.feeds.map((f) => f.reason), ['mode-full'], 'reset 之后必须能重新看到决策原因')
 })
 
 // 收尾：把全局模式还原成默认，避免影响同进程里的其它用例/后续跑批

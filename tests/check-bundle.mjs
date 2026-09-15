@@ -330,6 +330,22 @@ const checks = {
     // 打包器把字符串字面量统一成双引号，别写死引号形式（老坑）
     /api\(["']\/context-mode["']/.test(client) &&
     /renderContextStatus = \(/.test(client),
+
+  // 0.1.63（2026-09-15）：三处修正，都是"看不见但会让人误判"的那类。
+  // ① 客户端读的层级必须与宿主返回一致（`/status` 的字段在 `config` 里；0.1.62 读顶层 = 死代码）；
+  // ② 链状态只在链式模式下回（否则界面会出现「每轮全量 + 链式正在跑」）；
+  // ③ 切到全量时链立刻作废（否则以后切回链式会从一个过期父消息续链）；
+  // ④ 决策原因要真的上报一次（无它则链式在日志里完全不可见）。
+  'host/client 链式投喂可诊断性与状态一致性（0.1.63）':
+    /const cfg = status\.config/.test(client) &&
+    /cfg\?\.contextMode/.test(client) &&
+    !/status\.contextMode/.test(client) &&
+    /contextMode === ["']chained["'] \? contextChainInfo\(\) \?\? null : null/.test(host) &&
+    /contextMode === ["']full["']\) resetContextChain\(\)/.test(host) &&
+    /feed\.reason !== lastFeedReason/.test(host) &&
+    /params\.onContextFeed\?\.\(\{[\s\S]{0,160}?chained: feed\.parentMessageId !== null/.test(host) &&
+    /onContextFeed: \(report\)/.test(host) &&
+    host.includes('链式投喂退回全量重发（原因='),
 }
 
 let failed = 0
