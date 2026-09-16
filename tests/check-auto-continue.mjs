@@ -229,6 +229,42 @@ await test('已发起工具调用的轮次不续写（等工具结果）', async
   assert.equal(finish?.kind, 'tool-calls')
 })
 
+await test('只有思考、无正文无工具调用 → 必须报可重试错误，不能静默 stop（0.1.70）', async () => {
+  // 现场（2026-09-16 dsh-Pet 会话）：思考写了 11 万字、正文与工具调用都没有，
+  // 旧实现按 stop 上报 ⇒ agent loop 认为回合正常结束 ⇒ 用户看到"模型停住了"。
+  const thinkingOnly = async function* () {
+    yield { kind: 'thinking', text: '我先把这个问题的来龙去脉想一遍……' }
+    yield { kind: 'finish', reason: 'FINISHED' }
+  }
+  const { calls, blocks, finish } = await run({}, [thinkingOnly])
+  assert.equal(calls.length, 1, '适配器自己不重试（重发交给 dsh-llm-retry）')
+  assert.equal(blocks.length, 0, '不该产出正文块')
+  assert.equal(finish?.kind, 'error', `必须报错，实际 ${JSON.stringify(finish)}`)
+  assert.equal(finish?.failure?.code, 'EMPTY_RESPONSE', '必须是可重试码，否则 DSH 不会自动重发')
+})
+
+await test('防误伤：正文 0 字但有工具调用 → 照常收尾（0.1.70）', async () => {
+  // 这是**健康形态**（实测占 30%）：工具调用被 ToolCallStreamFilter 从正文流里取走，
+  // 所以此刻正文必然为空。绝不能因为"正文 0 字"就报错。
+  const toolCallOnly = async function* () {
+    yield { kind: 'thinking', text: '先查一下这个文件。' }
+    yield { kind: 'text', text: '{"tool_calls":[{"name":"read","arguments":{"file_path":"a.txt"}}]}' }
+    yield { kind: 'finish', reason: 'FINISHED' }
+  }
+  const { finish } = await run({}, [toolCallOnly])
+  assert.equal(finish?.kind, 'tool-calls', `工具调用轮必须照常收尾，实际 ${JSON.stringify(finish)}`)
+})
+
+await test('防误伤：有思考也有正文 → 正常 stop（0.1.70）', async () => {
+  const both = async function* () {
+    yield { kind: 'thinking', text: '想一下。' }
+    yield { kind: 'text', text: '答案在这里。' }
+    yield { kind: 'finish', reason: 'FINISHED' }
+  }
+  const { finish } = await run({}, [both])
+  assert.equal(finish?.kind, 'stop', `有正文就该正常收尾，实际 ${JSON.stringify(finish)}`)
+})
+
 await test('续写轮次失败 → 保留已输出部分并报 stop（不让整轮失败）', async () => {
   const adapter = createAdapter({
     getAuth: () => AUTH,

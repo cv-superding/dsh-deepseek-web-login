@@ -438,6 +438,27 @@ const checks = {
   // 0.1.69：账号显示名不再二次屏蔽（幂等守卫必须真的进了产物）
   'host 账号显示名不再二次屏蔽（maskIdentifier 幂等）':
     /function maskIdentifier[\s\S]{0,260}?includes\(["']\*\*\*["']\)/.test(host),
+  // 0.1.70：日志必须区分「正文 0 字 + 已提取到工具调用」（健康形态，实测占 30%）与
+  // 「正文 0 字 + 无工具调用」（异常）。旧文案一律说"内容可能全在思考通道"，
+  // 实测把读日志的另一个模型窗口带偏成"每天上百次故障"。
+  'host 日志区分「工具调用轮」与「真空转」':
+    /已提取到工具调用[\s\S]{0,80}?且无工具调用/.test(host) &&
+    host.includes('全落在思考通道'),
+  // 0.1.71（A）：回声守卫是「从命中行起砍到结尾」⇒「有正文 + 有回声」必须**告知用户**，
+  // 不能静默丢掉后半段（实测 2026-09-16 17:35 两次断在「问题项 4」处，丢的正是 4/5 项与结论）。
+  'host 回声过滤后必须告知用户（不静默丢内容）':
+    /echoedTranscript\s*&&\s*toolCallCount\s*===\s*0[\s\S]{0,200}?历史回放格式/.test(host) &&
+    host.includes('回答可能因此不完整'),
+  // 0.1.71（C）：行内转写特征分强弱两档 —— 弱档（正文里引用一次 `[Tool Result …]`）只扣住、等后文再判；
+  // 强档（prompt 的截断占位符）照旧立即判回声。
+  'host 行内转写特征分强弱两档（弱档不再一律砍）':
+    /ECHO_INLINE_WEAK_SIGNATURES\s*=\s*\[/.test(host) &&
+    /ECHO_INLINE_STRONG_SIGNATURES\s*=\s*\[/.test(host) &&
+    /WEAK_HOLD_LINES\s*=\s*2/.test(host),
+  // 弱特征行扣住期间，后续行也必须缓冲 —— 否则它们会抢在被扣的行之前上屏（正文顺序错乱）。
+  'host 扣住期间缓冲后续行（保正文顺序）':
+    /heldTail\.push\(line\)/.test(host) &&
+    /for \(const held of this\.heldTail\)\s*out \+= held/.test(host),
 }
 
 let failed = 0

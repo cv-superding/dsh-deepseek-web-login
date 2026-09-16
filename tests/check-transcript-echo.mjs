@@ -192,6 +192,49 @@ test('分块到达时同样拦得住', () => {
   assert.equal(text, '正文。\n\n\n\n')
 })
 
+// ⑨ 2026-09-16 17:35 新形态：模型在**正文里引用一次**工具结果当证据（行内、单行）
+// 现场（1ceshi 工作区会话 e17f4ccf）：它要证明 `subagent_fork` 的继承范围与文档不符，
+// 于是正文里出现 `[Tool Result for call_…]`。旧判据「行内命中即从该行起砍到结尾」
+// 把整段回答（问题项 4、5 + 结论）一起吞了，用户只看到「话说到一半就停了」。
+const INLINE_QUOTE =
+  '## ⚠️ 确实有问题\n\n' +
+  '4. **`subagent_fork` 的继承范围与文档不符**（重点）\n\n' +
+  '- 实测：`[Tool Result for call_abc123]` 返回 `FORK-OK`，但文档写的是会继承全部上下文。\n' +
+  '- 影响：子代理读不到父会话历史，需要显式传参。\n\n' +
+  '5. **`workflow` 的并发上限没写进文档**。\n'
+
+test('正文里引用一次工具结果（行内、单行）不误伤', () => {
+  const { text, echoed } = run([INLINE_QUOTE])
+  assert.equal(echoed, false, `不该判回声：${JSON.stringify(text)}`)
+  assert.equal(text, INLINE_QUOTE, '整段应原样上屏')
+})
+
+test('引用行在流式分块下同样不误伤（且顺序不乱）', () => {
+  const chunks = INLINE_QUOTE.match(/[\s\S]{1,7}/g) ?? []
+  const { text, echoed } = run(chunks)
+  assert.equal(echoed, false)
+  assert.equal(text, INLINE_QUOTE, `分块后顺序/内容不一致：${JSON.stringify(text)}`)
+})
+
+test('行内引用 + 空行 + 正文：仍属正文（放行）', () => {
+  const src = '开头。\n引用：`[Tool Result for call_a]`\n\n\n继续写正文。\n'
+  const { text, echoed } = run([src])
+  assert.equal(echoed, false)
+  assert.equal(text, src)
+})
+
+test('连续两行都在贴工具结果 → 判回声（防漏）', () => {
+  const { text, echoed } = run(['正文。\n', '- `[Tool Result for call_a]`\n', '- `[Tool Result for call_b]`\n'])
+  assert.equal(echoed, true)
+  assert.equal(text, '正文。\n')
+})
+
+test('行内引用之后紧跟行首标记 → 整段拦下（防漏）', () => {
+  const { text, echoed } = run(['开头。\n', '引用：`[Tool Result for call_a]`\n', '[status: running]\n'])
+  assert.equal(echoed, true)
+  assert.equal(text, '开头。\n')
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)
 if (failures.length) process.exitCode = 1

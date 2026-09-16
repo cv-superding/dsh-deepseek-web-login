@@ -1660,17 +1660,46 @@ const ECHO_TURN_RE = /^(?:User|Assistant)\s*:/
  * 被当成「正文里偶尔出现的 User: 字样」放行（还顺带把后面那行也带了出来）。
  * 所以只要一行里**含有**这些标记，就当回声处理。
  */
-const ECHO_INLINE_SIGNATURES: readonly RegExp[] = [
+/**
+ * 行内转写特征 —— **拆成强弱两档**，因为两者的可信度完全不同。
+ *
+ * 弱档：模型在**正常回答里引用一次**工具结果当证据是很常见的写法。
+ *   实测（2026-09-16 17:35，1ceshi 工作区会话 e17f4ccf）：它正是在正文里引 `[Tool Result …]`
+ *   来证明 `subagent_fork` 的继承范围与文档不符 —— 旧判据"行内命中即从该行起砍到结尾"把
+ *   整段回答（问题项 4、5 + 结论）一起吞了，用户只看到"话说到一半就停了"。
+ *   ⇒ 单独出现**不足以判定**是回声：只扣住，等后文再看（见 TranscriptEchoGuard.heldKind）。
+ *
+ * 强档：`truncated]` / `Assistant truncated` / `[N chars omitted]` 是 **prompt 自己的截断占位符**，
+ *   正常回答几乎不会引用它们 ⇒ 仍按回声立即处理
+ *   （实测 2026-09-11 17:2x：会话超长后模型原样复读这些占位符）。
+ */
+const ECHO_INLINE_WEAK_SIGNATURES: readonly RegExp[] = [
   /\[\s*Tool Result\b/i,
   /\[\s*status\s*:/i,
-  /\[\s*Truncated\s*\]/i,
   /\[\s*(?:System|Assistant)\s*\]/i,
-  // DSH 核心与 serializePrompt 自己的截断占位符 —— 会话超长后它们就躺在 prompt 里，
-  // 模型会原样复读（实测 2026-09-11 17:2x：正文里出现 `truncated]` / `[Assistant truncated]`）
+]
+
+const ECHO_INLINE_STRONG_SIGNATURES: readonly RegExp[] = [
   /\[\s*truncated\s*\]/i,
   /assistant\s+truncated/i,
   /\[\s*\d+\s*chars?\s+omitted\s*\]/i,
 ]
+
+/** 任一档（用于「该行是否含行内标记」的组合判断，如轮次前缀 + 行内标记）。 */
+const ECHO_INLINE_SIGNATURES: readonly RegExp[] = [
+  ...ECHO_INLINE_WEAK_SIGNATURES,
+  ...ECHO_INLINE_STRONG_SIGNATURES,
+]
+
+/**
+ * 行内弱特征行被扣住后，还要看到几行**普通内容**才敢判它是正文。
+ *
+ * 取 2：真回声紧跟着的还是转写内容（行首标记 / 轮次行 / 又一处引用），两行都干净就基本不是回放。
+ */
+const WEAK_HOLD_LINES = 2
+
+/** 扣住的行最多再缓冲几行就强制放行（防止"只有空行"时无限期扣住）。 */
+const MAX_HELD_TAIL = 6
 
 /** 光秃秃的 `Assistant:` / `User:`（冒号后没有内容）—— 模型正在起一行假转写。 */
 const ECHO_BARE_TURN_RE = /^(?:User|Assistant)\s*:\s*$/
@@ -1695,8 +1724,19 @@ function looksLikeEchoPrefix(line: string): boolean {
 export class TranscriptEchoGuard {
   private pending = ''
   private inFence = false
-  /** 已扣住、尚未判定的一行转写轮次行（等下一行决定它是回声还是正文）。 */
-  private turnCandidate: string | null = null
+  /**
+   * 已扣住、尚未判定的一行（等后文决定它是回声还是正文）。
+   * 两种来源：转写轮次行（`User:` / `Assistant:` 后有内容）、行内弱特征行（正文里引用了一次 `[Tool Result …]`）。
+   */
+  private heldLine: string | null = null
+  private heldKind: 'turn' | 'weak' | null = null
+  /** 弱特征行之后已看到的**非空白**普通行数（够 `WEAK_HOLD_LINES` 行仍无回声 → 判为正文、放行）。 */
+  private heldSeen = 0
+  /**
+   * 扣住期间**后续行也要缓冲**，否则它们会抢在被扣的那行之前上屏（顺序错乱）。
+   * 放行时按原顺序一次性吐出；判回声时整段丢弃。
+   */
+  private heldTail: string[] = []
   private fired = false
 
   /**
@@ -1715,24 +1755,48 @@ export class TranscriptEchoGuard {
       if (verdict === 'echo') {
         this.fired = true
         this.pending = ''
-        this.turnCandidate = null
+        this.heldLine = null
+        this.heldKind = null
+        this.heldTail = []
         return { text: out, echoed: true }
       }
-      if (verdict === 'turn') {
-        // 转写轮次行：单行可能是正常正文，**先扣住**，等下一行判定（否则第一行会先泄漏上屏）
-        if (this.turnCandidate !== null) {
+      if (verdict === 'turn' || verdict === 'weak') {
+        // 单行可能只是正常正文（正文里写 `User: admin`、或引用一次 `[Tool Result …]` 当证据），
+        // **先扣住**，等后文判定 —— 否则第一行会先泄漏上屏。
+        // 已经持有一行时说明两者**相邻出现** ⇒ 判回声（"连续两行才算回放"的判据）。
+        if (this.heldLine !== null) {
           this.fired = true
           this.pending = ''
-          this.turnCandidate = null
+          this.heldLine = null
+          this.heldKind = null
+          this.heldTail = []
           return { text: out, echoed: true }
         }
-        this.turnCandidate = line
+        this.heldLine = line
+        this.heldKind = verdict
+        this.heldSeen = 0
         continue
       }
-      // 普通行/围栏行：只有在这一行**非空白**时，才说明扣住的那行只是正文里的 `User:` 字样 → 放行
-      if (this.turnCandidate !== null && line.trim() !== '') {
-        out += this.turnCandidate
-        this.turnCandidate = null
+      // 普通行/围栏行：
+      //  - 扣住的是转写轮次行 ⇒ 只要这一行**非空白**，就说明那只是正文里的 `User:` 字样 → 放行
+      //  - 扣住的是行内弱特征行 ⇒ 再看 `WEAK_HOLD_LINES` 行普通内容才敢放行
+      //    （引用一次工具结果是极常见的写法；而真回声紧跟着的还是转写内容 —— 多等两行能把两者分开）
+      if (this.heldLine !== null) {
+        // ⚠️ 扣住期间后续行**也必须缓冲**：否则它们会先上屏、被扣的那行后上屏，正文顺序就乱了。
+        this.heldTail.push(line)
+        const blank = line.trim() === ''
+        const release =
+          (this.heldKind === 'turn' ? !blank : !blank && ++this.heldSeen >= WEAK_HOLD_LINES) ||
+          // 兜底：一直只有空行时别无限扣（最多扣 `MAX_HELD_TAIL` 行就开始放行）
+          this.heldTail.length >= MAX_HELD_TAIL
+        if (release) {
+          out += this.heldLine
+          for (const held of this.heldTail) out += held
+          this.heldLine = null
+          this.heldKind = null
+          this.heldTail = []
+        }
+        continue
       }
       out += line
     }
@@ -1742,10 +1806,13 @@ export class TranscriptEchoGuard {
   flush(): { text: string; echoed: boolean } {
     if (this.fired) return { text: '', echoed: true }
     let out = ''
-    // 只有孤零零一行轮次行 → 判定为正文，放行
-    if (this.turnCandidate !== null) {
-      out += this.turnCandidate
-      this.turnCandidate = null
+    // 只有孤零零一行待判定行 → 判定为正文，放行（连同扣住期间缓冲的后续行）
+    if (this.heldLine !== null) {
+      out += this.heldLine
+      for (const held of this.heldTail) out += held
+      this.heldLine = null
+      this.heldKind = null
+      this.heldTail = []
     }
     const rest = this.pending
     this.pending = ''
@@ -1757,7 +1824,7 @@ export class TranscriptEchoGuard {
     return { text: out + rest, echoed: false }
   }
 
-  private classify(line: string): 'echo' | 'turn' | 'fence' | 'plain' {
+  private classify(line: string): 'echo' | 'turn' | 'weak' | 'fence' | 'plain' {
     const t = line.trim()
     if (t.startsWith('```') || t.startsWith('~~~')) {
       this.inFence = !this.inFence
@@ -1767,11 +1834,18 @@ export class TranscriptEchoGuard {
     for (const re of ECHO_SIGNATURES) if (re.test(t)) return 'echo'
     // 截断占位符被拦腰切开后剩下的残片（如单独一行 `truncated]`）
     if (/^\]?\s*truncated\s*\]?\s*$/i.test(t)) return 'echo'
-    // 加了 `Assistant: ` 前缀的回声：标记不在行首，但确实是转写回放
-    for (const re of ECHO_INLINE_SIGNATURES) if (re.test(t)) return 'echo'
+    // 强档行内特征（prompt 的截断占位符）：正常回答几乎不会引用 ⇒ 照旧立即判回声
+    for (const re of ECHO_INLINE_STRONG_SIGNATURES) if (re.test(t)) return 'echo'
     // 冒号后没内容的 `Assistant:` —— 真回答里几乎不会出现，放过它就等着看回放
     if (ECHO_BARE_TURN_RE.test(t)) return 'echo'
-    if (ECHO_TURN_RE.test(t)) return 'turn'
+    if (ECHO_TURN_RE.test(t)) {
+      // 转写轮次前缀 **+** 行内标记 = 两个证据叠加
+      // （2026-09-11 现场形态：`Assistant: [Tool Result for call_…]`）⇒ 判回声
+      for (const re of ECHO_INLINE_WEAK_SIGNATURES) if (re.test(t)) return 'echo'
+      return 'turn'
+    }
+    // 只有行内弱特征 ⇒ 可能只是正文里引用了一次工具结果，交给 push 扣住、等后文再判
+    for (const re of ECHO_INLINE_WEAK_SIGNATURES) if (re.test(t)) return 'weak'
     return 'plain'
   }
 }

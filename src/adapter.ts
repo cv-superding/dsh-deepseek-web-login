@@ -774,6 +774,8 @@ export function createAdapter(deps: AdapterDeps) {
     let rejectedProtocol = ''
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
     let echoedTranscript = false
+    /** 被回声守卫砍掉后半段时追加的告知字符数（从 usage 估算里扣掉，别当成模型的输出）。 */
+    let echoNoticeChars = 0
     let systemMarkersStripped = false
     /** 本轮是否剥掉了网页端免责声明（`本回答由 AI 生成…`）。 */
     let disclaimerStripped = false
@@ -1021,7 +1023,10 @@ export function createAdapter(deps: AdapterDeps) {
             `${midSentence ? '，尾部是句中' : ''}` +
             // F27 诊断：正文 0 字而本轮确实有输出时，多半是内容全走了思考通道
             // （模型把回答写进思考 / 通道错位）。留一行显式提示，下次一眼可判。
-            `${roundChars === 0 && rounds === 0 ? '（⚠️ 本轮正文 0 字 —— 内容可能全在思考通道）' : ''}`,
+            // 0.1.70：旧文案把"正文 0 字"一律说成"内容可能全在思考通道"，读日志的人（含另一个
+            // 模型窗口）据此把**健康的调工具轮**当成了故障规模（实测把它们算成了 127 次/天）。
+            // 工具调用是被工具过滤器从正文流里取走的 ⇒「正文 0 字 + 有工具调用」是正常形态，必须分开说。
+            `${roundChars === 0 && rounds === 0 ? (toolCallCount > 0 ? '（本轮正文 0 字，但已提取到工具调用 —— 正常形态）' : '（本轮正文 0 字、且无工具调用 —— 内容可能全在思考通道）') : ''}`,
         )
         const eligible =
           // F26：只对用户可见的回答续写（见 allowsAutoContinue 的说明）。
@@ -1062,6 +1067,19 @@ export function createAdapter(deps: AdapterDeps) {
       throw new AdapterLlmError(`deepseek-web 流失败：${error?.message ?? error}`, 'TRANSPORT', { cause: error })
     }
 
+    // 0.1.71：回声守卫是「从命中行起砍到结尾」—— 所以「有正文 + 本轮有回声」意味着**后半段很可能被砍掉了**。
+    // 不能静默：实测 2026-09-16 17:35（1ceshi 会话 e17f4ccf）两次都因此断在「问题项 4」处，
+    // 丢的正是问题项 4、5 与结论，而 turn/end 却是 completed、界面上一个字都没有 ——
+    // 用户只能以为"它没说完就停了"。这里补一句告知，让他知道是被过滤而不是模型罢工。
+    // **不重试也不续写**：正文已有价值；回声意味着模型正在复读历史，续写大概率又是回声。
+    if (echoedTranscript && toolCallCount === 0 && textBlock && textBlock.text.length > 0) {
+      const echoNotice =
+        '\n\n[deepseek-web] 本轮有一部分「历史回放格式」的内容被过滤（未上屏），回答可能因此不完整。\n'
+      textBlock.text += echoNotice
+      echoNoticeChars = echoNotice.length
+      yield { type: 'text-delta', index: textBlock.index, text: echoNotice }
+    }
+
     // 关闭未闭合的块
     if (reasoningBlock) {
       yield { type: 'block-end', index: reasoningBlock.index, block: { type: 'reasoning', text: reasoningBlock.text } }
@@ -1070,7 +1088,8 @@ export function createAdapter(deps: AdapterDeps) {
       yield { type: 'block-end', index: textBlock.index, block: { type: 'text', text: textBlock.text } }
     }
 
-    const outputChars = (textBlock?.text?.length ?? 0) + (reasoningBlock?.text?.length ?? 0)
+    const outputChars =
+      (textBlock?.text?.length ?? 0) + (reasoningBlock?.text?.length ?? 0) - echoNoticeChars
     let inputTokens = 0, outputTokens = 0
     for (const round of usageRounds) {
       const estimateOutput = Math.ceil(round.outputChars / 3.2)
@@ -1142,13 +1161,26 @@ export function createAdapter(deps: AdapterDeps) {
       }
       return
     }
-    const hasVisible = outputChars > 0
-    if (!hasVisible) {
+    // 0.1.70：判据只看**正文**（`hasVisibleText` 在上面已声明）。
+    // 旧写法用 `outputChars > 0`，而 `outputChars` 含思考通道 ⇒「思考写了一堆、正文与工具调用
+    // 都没有」的轮次会跳过这里、一路落到下面的 stop（＝正常完成）；agent loop 收到"回合干完了、
+    // 零个工具调用"就结束回合 —— 用户看到的是"模型莫名停住，只能手动说『继续』"。
+    // 实测（2026-09-16）：该形态全局 3/885，但长思考的会话里 2/15；共同成因是**思考不收敛**
+    // （实测那一轮思考 11 万字）→ 服务端始终没进入正文阶段 → 流被截断。
+    // 报 EMPTY_RESPONSE 会被 dsh-llm-retry 自动重发，比静默停住强。
+    // 注：走到这里 toolCallCount 必为 0（上面已对 >0 提前 return）⇒ 不会误伤健康的调工具轮。
+    if (!hasVisibleText) {
+      const onlyThinking = outputChars > 0
       yield {
         type: 'finish',
         reason: {
           kind: 'error',
-          failure: { message: 'DeepSeek 网页端返回了空响应（可能触发频控或长上下文截断）', code: 'EMPTY_RESPONSE' },
+          failure: {
+            message: onlyThinking
+              ? 'DeepSeek 网页端本轮没有正文、也没有工具调用（内容可能全落在思考通道 —— 通常是思考不收敛后被截断），已按可重试错误上报'
+              : 'DeepSeek 网页端返回了空响应（可能触发频控或长上下文截断）',
+            code: 'EMPTY_RESPONSE',
+          },
         },
       }
       return
