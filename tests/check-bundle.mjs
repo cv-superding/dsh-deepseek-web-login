@@ -435,6 +435,9 @@ const checks = {
     /sameAccount\(existing, auth\)/.test(host) &&
     client.includes('凭证已原地更新') &&
     /dsw-account-actions[\s\S]{0,320}?"重新登录"/.test(client),
+  // 0.1.69：账号显示名不再二次屏蔽（幂等守卫必须真的进了产物）
+  'host 账号显示名不再二次屏蔽（maskIdentifier 幂等）':
+    /function maskIdentifier[\s\S]{0,260}?includes\(["']\*\*\*["']\)/.test(host),
 }
 
 let failed = 0

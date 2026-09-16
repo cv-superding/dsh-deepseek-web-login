@@ -182,6 +182,11 @@ export function unwrapStoredToken(raw: unknown): string {
 export function maskIdentifier(raw: string): string {
   const value = String(raw || '').trim()
   if (!value) return ''
+  // 幂等：网页端返回的 `user.display` **本身就是屏蔽过的**（形如 `192******27`、
+  // `lidi*********+mn1@gmail.com`），记录里存的就是它。若在这里再屏蔽一次，会把
+  // 「能区分两个号」的那截尾巴抹掉 —— 实测两个 Gmail 账号都变成 `lid***@gmail.com`，
+  // 看着像同一个号，恰好违背本函数「保留可辨识部分」的目的。真账号标识里不会有连续三星号。
+  if (value.includes('***')) return value
   const at = value.indexOf('@')
   if (at > 0) {
     const local = value.slice(0, at)

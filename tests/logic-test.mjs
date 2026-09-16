@@ -447,6 +447,26 @@ test('maskIdentifier: 邮箱/手机号/通用', () => {
   assert.equal(maskIdentifier('ab'), 'a***')
 })
 
+test('maskIdentifier: 幂等（网页端 display 已屏蔽过，别二次抹掉可辨识部分）', () => {
+  // 服务端只给屏蔽后的值，记录里存的就是它 —— 两个不同账号的差异全在这截尾巴上
+  const a = 'lidin*********md01@gmail.com'
+  const b = 'lidi*********+mn1@gmail.com'
+  assert.equal(maskIdentifier(a), a)
+  assert.equal(maskIdentifier(b), b)
+  // 曾经的 bug：两者都变成 'lid***@gmail.com'，用户以为是一个账号
+  assert.notEqual(maskIdentifier(a), maskIdentifier(b))
+  assert.equal(maskIdentifier('192******27'), '192******27')
+  assert.equal(maskIdentifier('137******78'), '137******78')
+  assert.equal(maskIdentifier('294*****43@qq.com'), '294*****43@qq.com')
+  assert.equal(maskIdentifier('173******36'), '173******36')
+  // 自己产出的掩码再进来也不该变样
+  assert.equal(maskIdentifier('use***@example.com'), 'use***@example.com')
+  assert.equal(maskIdentifier('138****5678'), '138****5678')
+  // 未屏蔽过的原始值照旧要屏蔽（安全网不能丢）
+  assert.equal(maskIdentifier('user1234567@example.com'), 'use***@example.com')
+  assert.equal(maskIdentifier('13987654321'), '139****4321')
+})
+
 // ── XML 风格工具调用（实测漂移：思考模式下模型偶发改用 XML 标记）──────
 // 用户实测样本（原实现会把标记当正文吐给用户 —— 必须被识别成真正的工具调用）：
 // <tool_calls>
