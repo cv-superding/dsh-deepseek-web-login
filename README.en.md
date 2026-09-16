@@ -277,7 +277,16 @@ only an **upper bound on the browser side**. Older records and manually pasted t
 info and the panel says "not recorded (will be filled in on your next login)".
 
 - **Account library** (`~/.dsh/web-login/accounts/`): keep several DeepSeek web accounts, switch with
-  one click, rename, remove, export/import backups (both open a **native OS dialog** so you pick the location and file yourself). Switching takes effect on the **next** request.
+  one click, add a **note** (the per-account label), remove, export/import backups (both open a **native OS dialog** so you pick the location and file yourself). Switching takes effect on the **next** request.
+- **Groups**: create / rename / delete groups, assign an account with the per-row dropdown, sections
+  collapse (state is local only), and the group holding the **current account is pinned to the top** so the
+  account you are using never sinks. Inside a group the order is still newest-captured-first.
+  Group definitions live in `~/.dsh/web-login/groups.json` and an account only stores a pointer, so
+  **deleting a group never deletes accounts** — orphans fall back into "Ungrouped".
+  Groups affect **display only**: switching, session reuse and cleanup ignore them.
+- **Verify all**: one read-only `users/current` probe per account (**zero quota**, run serially) to refresh
+  login state, fill in account names and clear recovered failure marks. Not the same as the per-account
+  "refresh" button, which re-reads `/status`.
   **Switching accounts does not lose your conversation** — the transcript lives locally in DSH and
   every request re-sends the whole history; the account is just a pass and a quota owner.
 - **Call ledger**: per-day JSONL (metadata only, no conversation content or credentials) showing the
@@ -345,6 +354,7 @@ node tests/check-bundle.mjs          # verify every fix made it into lib/
 node tests/check-image-refs.mjs     # image reference assembly (dedup + "the image was dropped" notice)
 node tests/probe-upload-name.mjs    # live A/B: how the filename suffix affects upload (needs a logged-in account)
 node tests/check-account-sync.mjs   # account library auto-sync (cadence + change signature)
+node tests/check-account-groups.mjs # account groups (storage tolerance / CRUD / section ordering)
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed

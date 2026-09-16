@@ -73,6 +73,14 @@ import {
   updateAccount,
 } from './accounts.ts'
 import {
+  createGroup,
+  partitionByGroup,
+  readGroups,
+  removeGroup,
+  renameGroup,
+  writeGroups,
+} from './account-groups.ts'
+import {
   applyTransport,
   readTransportSetting,
   transportSettingsPath,
@@ -222,6 +230,9 @@ function sendJson(res: any, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(text)
 }
+
+/** `/accounts/refresh` 的互斥：手动刷新是串行探活，狂点按钮不该叠起来打。 */
+let accountsRefreshInFlight = false
 
 export function apply(ctx: any, config: Config = {}): void {
   const logger = normalizeLogger(ctx.logger)
@@ -665,13 +676,24 @@ export function apply(ctx: any, config: Config = {}): void {
             // 设置页跑在渲染层，把它能触及的敏感面收窄没有坏处。
             if (req.method === 'GET' && route === '/accounts') {
               const activeId = activeAccountId()
+              const list = listAccounts()
+              const groups = readGroups()
               sendJson(res, 200, {
                 activeId: activeId ?? null,
-                accounts: listAccounts().map((record) => ({
+                // 分组定义单独存 groups.json；账号记录里只有 groupId 指针。
+                // ⚠️ 客户端的重建签名按 `{activeId, accounts, groups}` 整包算 ——
+                // 顶层字段不列进签名，新建/改名组后面板就不会自己刷新（0.1.63/0.1.67 那类坑）。
+                groups,
+                // 「按组分区」在宿主侧算好：客户端只负责画。
+                // 这样分区规则（当前账号所在组置顶 → 其余按 order → 未分组垫底）只有一份实现，
+                // 也就只有一处要测 —— 放进客户端会因为 node 依赖而不得不复制一份。
+                sections: partitionByGroup(list, groups, activeId),
+                accounts: list.map((record) => ({
                   id: record.id,
                   title: accountTitle(record, maskIdentifier),
                   display: record.user?.display ? maskIdentifier(record.user.display) : '',
                   label: record.label ?? '',
+                  groupId: record.groupId ?? '',
                   unverified: record.unverified === true,
                   capturedAt: record.capturedAt,
                   lastVerifiedAt: record.lastVerifiedAt ?? null,
@@ -738,6 +760,90 @@ export function apply(ctx: any, config: Config = {}): void {
               }
               logger.info?.(`deepseek-web: 已从账号库移除 ${id}`)
               sendJson(res, 200, { ok: true, removed: id, activeId: activeAccountId() ?? null })
+              return
+            }
+            // ── 分组：组定义存 groups.json，账号记录里只留 groupId 指针 ──
+            // 组**只影响显示**（分区 / 折叠），不参与切号、会话复用与清理 —— 让调度逻辑保持可预期。
+            if (req.method === 'POST' && route === '/accounts/group/create') {
+              const body = await readJsonBody(req)
+              const result = createGroup(readGroups(), body?.name)
+              if (result.error || !result.group) {
+                sendJson(res, 400, { ok: false, error: result.error ?? '创建失败' })
+                return
+              }
+              writeGroups(result.list)
+              sendJson(res, 200, { ok: true, group: result.group, groups: result.list })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/group/rename') {
+              const body = await readJsonBody(req)
+              const result = renameGroup(readGroups(), String(body?.id ?? ''), body?.name)
+              if (result.error) {
+                sendJson(res, 400, { ok: false, error: result.error })
+                return
+              }
+              writeGroups(result.list)
+              sendJson(res, 200, { ok: true, groups: result.list })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/group/delete') {
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              const next = removeGroup(readGroups(), id)
+              writeGroups(next)
+              // 组内账号的 groupId 会变成悬挂指针 ⇒ 界面上按「未分组」显示。
+              // 所以这里**故意不去改账号文件**：删一个组不该逐个重写凭证文件。
+              logger.info?.(`deepseek-web: 已删除分组 ${id}（组内账号回到「未分组」，账号本身未动）`)
+              sendJson(res, 200, { ok: true, groups: next })
+              return
+            }
+            if (req.method === 'POST' && route === '/accounts/group/assign') {
+              const body = await readJsonBody(req)
+              const id = String(body?.id ?? '')
+              const groupId = String(body?.groupId ?? '')
+              // 只接受已知组 id（空串 = 移出组）；传了不存在的组就当场拒绝，
+              // 免得界面看起来"归组成功"而列表里并没有它
+              if (groupId && !readGroups().some((group) => group.id === groupId)) {
+                sendJson(res, 400, { ok: false, error: '分组不存在' })
+                return
+              }
+              if (!updateAccount(id, { groupId })) {
+                sendJson(res, 404, { ok: false, error: '账号不存在' })
+                return
+              }
+              sendJson(res, 200, { ok: true, id, groupId })
+              return
+            }
+            /**
+             * 手动刷新账号状态：对库里每个账号做一次**只读探活**（`users/current`，零额度），
+             * 顺带把补上的显示名、清掉的失败标记写回记录（那是 probeOnce 自己干的）。
+             *
+             * 为什么需要它：自动探活 30 分钟才一次，而"我刚在浏览器里动过这个号，它现在到底还行不行"
+             * 是随时会冒出来的问题 —— 以前只能等，或者切过去试（那要发一次生成请求，烧额度）。
+             * 串行 + 互斥：单次探活虽轻，一口气并发 7 个也会像脚本；狂点按钮更不该叠起来打。
+             */
+            if (req.method === 'POST' && route === '/accounts/refresh') {
+              if (accountsRefreshInFlight) {
+                sendJson(res, 200, { ok: false, error: '正在刷新，请稍候' })
+                return
+              }
+              accountsRefreshInFlight = true
+              try {
+                let passed = 0
+                let failed = 0
+                for (const account of listAccounts()) {
+                  const outcome = await probeOnce(account, {
+                    info: (message) => logger.info?.(message),
+                    warn: (message) => logger.warn?.(message),
+                  })
+                  if (outcome?.ok) passed += 1
+                  else if (outcome) failed += 1
+                }
+                logger.info?.(`deepseek-web: 手动刷新账号状态完成 —— 通过 ${passed}、失败 ${failed}`)
+                sendJson(res, 200, { ok: true, checked: passed + failed, passed, failed })
+              } finally {
+                accountsRefreshInFlight = false
+              }
               return
             }
             // 回退路径：宿主自己写到插件目录，只回传**路径**（明文 token 不进 HTTP）。

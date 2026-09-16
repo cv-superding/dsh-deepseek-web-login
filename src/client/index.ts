@@ -236,6 +236,16 @@ border-radius:10px;padding:9px 11px;background:var(--bg1)}
 .dsw-labelinput{font:inherit;font-size:12px;padding:3px 7px;border-radius:6px;border:1px solid var(--bd2);
 background:var(--bg2);color:var(--fg);width:150px;margin-top:4px}
 .dsw-limit{color:var(--warn)}
+/* 分组：组标题行 + 组内缩进 + 归组下拉 */
+.dsw-grouphead{display:flex;align-items:center;gap:8px;margin:12px 0 0;font-size:12px}
+.dsw-grouphead .gname{font-weight:500}
+.dsw-grouphead .gcount{color:var(--fg3);font-size:11px}
+.dsw-grouphead .gtoggle{cursor:pointer;user-select:none;color:var(--fg2);width:12px;display:inline-block;text-align:center}
+.dsw-grouphead .gspacer{flex:1 1 auto}
+.dsw-grouphead .dsw-btn{font-size:11px;padding:1px 7px}
+.dsw-account.grouped{margin-left:14px}
+.dsw-groupsel{font:inherit;font-size:11px;padding:2px 4px;border-radius:6px;border:1px solid var(--bd2);
+background:var(--bg2);color:var(--fg);max-width:110px}
 /* 操作反馈：不归属任何一页，常驻在标签栏之上 */
 .dsw-alert{margin:0 0 12px;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);
 background:var(--bg1);white-space:pre-wrap;font-size:12px}
@@ -550,7 +560,17 @@ function Panel(): any {
     const addAccountBtn = el('button', 'dsw-btn', '登录新账号（添加）') as HTMLButtonElement
     const exportBtn = el('button', 'dsw-btn ghost', '导出备份…') as HTMLButtonElement
     const importBtn = el('button', 'dsw-btn ghost', '导入备份…') as HTMLButtonElement
-    accountsIOPanel.append(addAccountBtn, exportBtn, importBtn)
+    // 「校验全部」：对库里每个账号做一次**只读探活**（零额度）—— 自动探活 30 分钟才一次，
+    // 而"我刚在浏览器里动过这个号，它现在到底还行不行"是随时会冒出来的问题。
+    // 以前只能等，或者切过去试（那要发一次生成请求、烧额度）。
+    //
+    // ⚠️ 命名避开「刷新状态」：那个名字已经被「当前账号」卡片上的按钮占了
+    //（它刷的是 `/status`，只看当前那个号）—— 两个同名按钮在同一个面板里会互相误导。
+    const refreshAccountsBtn = el('button', 'dsw-btn ghost', '校验全部') as HTMLButtonElement
+    refreshAccountsBtn.title = '对每个账号做一次只读校验（零额度）：刷新登录态、补上账号名、清掉已恢复的失败标记'
+    const newGroupBtn = el('button', 'dsw-btn ghost', '新建分组') as HTMLButtonElement
+    newGroupBtn.title = '给账号分类，只影响列表的显示方式 —— 不参与切号、也不影响会话复用与清理'
+    accountsIOPanel.append(addAccountBtn, exportBtn, importBtn, refreshAccountsBtn, newGroupBtn)
     accountsCard.append(accountsIOPanel)
     // 以前这里是个"要导入的备份文件路径"输入框 —— 让人手打路径本来就别扭。
     // 现在两个按钮都弹**系统对话框**（另存为 / 打开），位置和文件名由用户自己选。
@@ -576,13 +596,92 @@ function Panel(): any {
     )
     acctLibraryPane.append(accountsCard)
 
+    /**
+     * 一个组的标题行：折叠箭头 + 组名 + 数量 + （真实组才有）改名 / 删除。
+     *
+     * 「未分组」是**伪组**（`groupId === null`），不给改名/删除入口 —— 它不是一个实体，
+     * 只是"没归组的账号"的落脚处。
+     */
+    const sectionRow = (section: any, groups: any[]): HTMLElement => {
+      const key = String(section?.key ?? '')
+      const collapsed = collapsedGroups.has(key)
+      const head = el('div', 'dsw-grouphead')
+      const toggle = el('span', 'gtoggle', collapsed ? '▸' : '▾')
+      toggle.title = collapsed ? '展开' : '折叠'
+      toggle.addEventListener('click', () => {
+        if (collapsedGroups.has(key)) collapsedGroups.delete(key)
+        else collapsedGroups.add(key)
+        persistCollapsedGroups()
+        // 折叠是纯前端状态 ⇒ 直接重画，不用再打一次 /accounts（也不该走重建签名）
+        redrawAccounts()
+      })
+      head.append(toggle, el('span', 'gname', String(section?.name ?? '')))
+      head.append(el('span', 'gcount', `${Array.isArray(section?.accounts) ? section.accounts.length : 0} 个`))
+      head.append(el('span', 'gspacer'))
+      if (section?.groupId) {
+        const renameGroupBtn = el('button', 'dsw-btn ghost', '改名') as HTMLButtonElement
+        renameGroupBtn.addEventListener('click', () => {
+          const input = el('input', 'dsw-labelinput') as HTMLInputElement
+          input.value = String(section.name ?? '')
+          input.placeholder = '分组名'
+          head.append(input)
+          input.focus()
+          let settled = false
+          const commit = (): void => {
+            if (settled) return
+            settled = true
+            void renameAccountGroup(String(section.groupId), input.value)
+          }
+          input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') commit()
+            if (event.key === 'Escape') {
+              settled = true
+              redrawAccounts()
+            }
+          })
+          input.addEventListener('blur', commit)
+        })
+        const deleteGroupBtn = el('button', 'dsw-btn danger', '删除') as HTMLButtonElement
+        deleteGroupBtn.title = '只删分组本身；组里的账号会回到「未分组」，账号与凭证都不动'
+        let armed = false
+        deleteGroupBtn.addEventListener('click', () => {
+          if (!armed) {
+            armed = true
+            deleteGroupBtn.textContent = '确认删除？'
+            window.setTimeout(() => {
+              armed = false
+              deleteGroupBtn.textContent = '删除'
+            }, 4000)
+            return
+          }
+          void deleteAccountGroup(String(section.groupId))
+        })
+        head.append(renameGroupBtn, deleteGroupBtn)
+      }
+      return head
+    }
+
     const renderAccounts = (data: any): void => {
       const items: any[] = Array.isArray(data?.accounts) ? data.accounts : []
+      const groups: any[] = Array.isArray(data?.groups) ? data.groups : []
+      const sections: any[] = Array.isArray(data?.sections) ? data.sections : []
       accountsBadge.textContent = `${items.length} 个`
       accountsBadge.className = `dsw-badge ${items.length ? 'on' : 'off'}`
       accountsEmpty.hidden = items.length > 0
       accountsList.textContent = ''
-      for (const item of items) accountsList.append(accountRow(item))
+      // 兜底：万一拿到的是没有 sections 的载荷（老宿主 / 异常响应），退回单区平铺 ——
+      // 宁可少个分组标题，也不能什么都看不到。
+      if (!sections.length) {
+        for (const item of items) accountsList.append(accountRow(item, groups, false))
+        return
+      }
+      for (const section of sections) {
+        accountsList.append(sectionRow(section, groups))
+        if (collapsedGroups.has(String(section?.key ?? ''))) continue
+        for (const item of Array.isArray(section?.accounts) ? section.accounts : []) {
+          accountsList.append(accountRow(item, groups, true))
+        }
+      }
     }
 
     /**
@@ -623,8 +722,8 @@ function Panel(): any {
       })()
     }
 
-    const accountRow = (item: any): HTMLElement => {
-      const row = el('li', `dsw-account${item.isActive ? ' active' : ''}`)
+    const accountRow = (item: any, groups: any[] = [], indent = false): HTMLElement => {
+      const row = el('li', `dsw-account${item.isActive ? ' active' : ''}${indent ? ' grouped' : ''}`)
       const main = el('div', 'dsw-account-main')
       const title = el('div', 'dsw-account-title')
       title.append(el('span', undefined, item.title || item.id))
@@ -665,9 +764,10 @@ function Panel(): any {
       row.append(main)
 
       const actions = el('div', 'dsw-account-actions')
-      // 失效的账号：「重新登录」放动作列最前面 —— 它是这行最该点的按钮
+      // 失效的账号：「重登」放动作列最前面 —— 它是这行最该点的按钮。
+      // 文案从「重新登录」缩成「重登」：动作列现在要放下切换/备注/归组/移除，太长会挤成两行。
       if (item.lastVerifyError) {
-        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重新登录') as HTMLButtonElement
+        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重登') as HTMLButtonElement
         reloginBtn.title = '不清理浏览器登录态（能复用就直接复用）；捕获后原地更新这条记录，不新增、也不切换当前账号'
         reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
         actions.append(reloginBtn)
@@ -680,7 +780,9 @@ function Panel(): any {
         actions.append(useBtn)
       }
 
-      const renameBtn = el('button', 'dsw-btn ghost dsw-preset', '重命名') as HTMLButtonElement
+      // 文案叫「备注」而不是「重命名」：它写的是 `label`（备注名），**不是**改显示名 ——
+      // 原来的名字让人以为是重命名账号本身，结果 7 个账号的 label 一直是空的（功能没人发现）。
+      const renameBtn = el('button', 'dsw-btn ghost dsw-preset', '备注') as HTMLButtonElement
       let editing = false
       renameBtn.addEventListener('click', () => {
         if (editing) return
@@ -706,6 +808,16 @@ function Panel(): any {
         input.addEventListener('blur', commit)
       })
       actions.append(renameBtn)
+
+      // 归组用**下拉**而不是拖拽：这套面板是手写 DOM，拖拽的命中判定、与轮询重建的冲突
+      // 都太容易出坑；下拉最少点击，而且天然幂等（"设成某个值"而不是"挪到某个位置"）。
+      const groupSel = el('select', 'dsw-groupsel') as HTMLSelectElement
+      groupSel.title = '放进某个分组（只影响显示方式，不影响切号与会话复用）'
+      groupSel.append(new Option('未分组', ''))
+      for (const group of groups) groupSel.append(new Option(String(group?.name ?? ''), String(group?.id ?? '')))
+      groupSel.value = String(item.groupId ?? '')
+      groupSel.addEventListener('change', () => void assignAccountGroup(item.id, groupSel.value))
+      actions.append(groupSel)
 
       // 移除要二次确认：凭证一旦删掉就找不回来了（不保留明文归档，见 accounts.ts）
       const removeBtn = el('button', 'dsw-btn danger dsw-preset', '移除') as HTMLButtonElement
@@ -737,10 +849,16 @@ function Panel(): any {
      * 签名取的是界面真正渲染的东西，见 account-sync.ts。
      */
     const applyAccounts = (data: any): void => {
+      lastAccountsPayload = data
       const signature = accountsSignature(data)
       if (signature && signature === accountsSignatureCache) return
       accountsSignatureCache = signature
       renderAccounts(data)
+    }
+
+    /** 用最近一次载荷重画（折叠这类纯前端状态用它，不走重建签名、也不打 HTTP）。 */
+    const redrawAccounts = (): void => {
+      if (lastAccountsPayload) renderAccounts(lastAccountsPayload)
     }
 
     /** 显式读取（失败要说给用户听）：初始化 / 切号 / 移除 / 添加 / 重新登录 / 导入之后用。 */
@@ -772,6 +890,108 @@ function Panel(): any {
         // 静默：这是后台同步，失败不该覆盖用户正在看的那条消息
       }
     }
+
+    /**
+     * 分组动作：**只有显示方式会变，账号与凭证一律不动。**
+     *
+     * 每次操作后都 `loadAccounts()` 重读，而不是就地改 DOM：
+     * 宿主的 `/accounts` 是唯一事实来源；重读既能拿到组的新状态，也会顺带走一遍内容签名 ——
+     * 签名没变就不重建，正在输入的框不会被打断。
+     */
+    const groupApi = async (path: string, body: unknown, okText: string): Promise<void> => {
+      try {
+        const result = await api(path, { method: 'POST', body: JSON.stringify(body) })
+        if (result?.ok === false) {
+          accountsMsg.textContent = `分组操作失败：${result?.error ?? '未知原因'}`
+          return
+        }
+        accountsMsg.textContent = okText
+      } catch (error: any) {
+        accountsMsg.textContent = `分组操作失败：${error?.message ?? error}`
+      } finally {
+        await loadAccounts()
+      }
+    }
+
+    const assignAccountGroup = (id: string, groupId: string): Promise<void> =>
+      groupApi(
+        '/accounts/group/assign',
+        { id, groupId },
+        groupId ? '已归组。' : '已移出分组（回到「未分组」）。',
+      )
+
+    const renameAccountGroup = (id: string, name: string): Promise<void> =>
+      groupApi('/accounts/group/rename', { id, name }, `分组已改名为「${name.trim()}」。`)
+
+    const deleteAccountGroup = (id: string): Promise<void> =>
+      groupApi('/accounts/group/delete', { id }, '分组已删除；组里的账号回到「未分组」（账号本身没动）。')
+
+    /** 「新建分组」的内联输入框（与「备注」同款交互：Enter 提交、Esc 取消、失焦也提交）。 */
+    let newGroupInput: HTMLInputElement | null = null
+    const promptNewGroup = (): void => {
+      if (newGroupInput && newGroupInput.isConnected) {
+        newGroupInput.focus()
+        return
+      }
+      const input = el('input', 'dsw-labelinput') as HTMLInputElement
+      input.placeholder = '分组名，如「工作号」'
+      accountsIOPanel.append(input)
+      input.focus()
+      newGroupInput = input
+      let settled = false
+      const dismiss = (): void => {
+        settled = true
+        newGroupInput = null
+        input.remove()
+      }
+      const commit = (): void => {
+        if (settled) return
+        const name = input.value
+        dismiss()
+        if (!name.trim()) return
+        void groupApi('/accounts/group/create', { name }, `已创建分组「${name.trim()}」。`)
+      }
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') commit()
+        if (event.key === 'Escape') dismiss()
+      })
+      input.addEventListener('blur', commit)
+    }
+
+    /**
+     * 手动刷新账号状态：只读探活，零额度。
+     *
+     * 按钮会**禁用并改文案** —— 库里账号是串行校验的，7 个要十几秒；不置灰的话
+     * 用户会以为没反应而反复点（宿主侧也有互斥，但界面先挡住更好）。
+     */
+    const refreshAccountStates = async (): Promise<void> => {
+      refreshAccountsBtn.disabled = true
+      const original = refreshAccountsBtn.textContent
+      refreshAccountsBtn.textContent = '校验中…'
+      accountsMsg.textContent = '正在逐个校验账号（只读、零额度，串行进行，请稍候）……'
+      try {
+        const result = await api('/accounts/refresh', { method: 'POST', body: '{}' })
+        if (result?.ok === false) {
+          accountsMsg.textContent = `刷新失败：${result?.error ?? '未知原因'}`
+          return
+        }
+        const failed = Number(result?.failed ?? 0)
+        accountsMsg.textContent =
+          failed > 0
+            ? `已校验 ${result?.checked ?? 0} 个账号：${result?.passed ?? 0} 个正常、${failed} 个需要重登（列表里已标出）。`
+            : `已校验 ${result?.checked ?? 0} 个账号：全部正常。`
+      } catch (error: any) {
+        accountsMsg.textContent = `刷新失败：${error?.message ?? error}`
+      } finally {
+        refreshAccountsBtn.disabled = false
+        refreshAccountsBtn.textContent = original
+        // 探活会回写记录（补账号名、清失败标记）⇒ 让它立刻出现在列表里
+        await refresh(false).catch(() => undefined)
+      }
+    }
+
+    refreshAccountsBtn.addEventListener('click', () => void refreshAccountStates())
+    newGroupBtn.addEventListener('click', () => promptNewGroup())
 
     const switchToAccount = async (id: string): Promise<void> => {
       accountsMsg.textContent = '切换中……'
@@ -975,6 +1195,35 @@ function Panel(): any {
     let accountsSyncedAt = 0
     /** 上次渲染用的内容签名（见 account-sync.ts）。 */
     let accountsSignatureCache = ''
+    /**
+     * 最近一次 `/accounts` 载荷。
+     *
+     * 折叠是**纯前端状态**（不进账号库、也不该进重建签名），但切换折叠要重画列表 ——
+     * 所以留一份载荷，让"折叠"能直接触发一次局部重绘，而不必多打一次 HTTP。
+     */
+    let lastAccountsPayload: any = null
+
+    const COLLAPSE_KEY = 'dsw-accounts-collapsed-groups'
+
+    /** 折叠的组 key。读一次就常驻，避免每行都去碰 localStorage。 */
+    const collapsedGroups = new Set<string>((() => {
+      try {
+        const raw = window.localStorage.getItem(COLLAPSE_KEY)
+        const parsed = raw ? JSON.parse(raw) : []
+        return Array.isArray(parsed) ? parsed.map((item: unknown) => String(item)) : []
+      } catch {
+        // 隐私模式 / 存储被禁：折叠状态退化成"本次会话不折叠"，不该让面板挂掉
+        return []
+      }
+    })())
+
+    const persistCollapsedGroups = (): void => {
+      try {
+        window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedGroups]))
+      } catch {
+        /* 存不下就算了 —— 折叠只是显示偏好 */
+      }
+    }
     let probeIntervalMs = 0
 
     const renderKv = (rows: [string, string][]): void => {

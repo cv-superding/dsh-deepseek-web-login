@@ -50,8 +50,12 @@ export function shouldSyncAccounts(now: number, lastSyncedAt: number, active: bo
 /**
  * 账号库响应的内容签名 —— 变了才重建列表。
  *
- * 只取**界面真正渲染的东西**（账号数组 + 当前账号 id），不取 `footprint`：
+ * 只取**界面真正渲染的东西**（账号数组 + 分组定义 + 分组分区 + 当前账号 id），不取 `footprint`：
  * 后者是给台账页用的文件统计，跟列表无关，把它算进来只会平白触发重建。
+ *
+ * ⚠️ `groups` / `sections` 必须是**顶层字段显式列进来**：整包 stringify 只覆盖这里写出的键，
+ * 漏一个就会出现"新建了组、列表却不刷新"—— 与 0.1.63（读错字段名）和 0.1.67（数据压根不在
+ * `/status` 里）是同一类坑：**界面渲染什么，签名就得覆盖什么。**
  *
  * 整包 `JSON.stringify` 而不是逐个字段挑：**按构造就是完整的** ——
  * 将来 `/accounts` 多返回一个会被渲染的字段，这里不用改也不会漏。
@@ -59,10 +63,12 @@ export function shouldSyncAccounts(now: number, lastSyncedAt: number, active: bo
  *  真出现那种字段，应该在这里显式排除。）
  */
 export function accountsSignature(payload: unknown): string {
-  const data = (payload ?? {}) as { activeId?: unknown; accounts?: unknown }
+  const data = (payload ?? {}) as { activeId?: unknown; accounts?: unknown; groups?: unknown; sections?: unknown }
   const accounts = Array.isArray(data.accounts) ? data.accounts : []
+  const groups = Array.isArray(data.groups) ? data.groups : []
+  const sections = Array.isArray(data.sections) ? data.sections : []
   try {
-    return JSON.stringify({ activeId: data.activeId ?? null, accounts })
+    return JSON.stringify({ activeId: data.activeId ?? null, accounts, groups, sections })
   } catch {
     // 序列化失败时给空串：调用方约定"空签名 = 每次都重建"，宁可重建也别卡住不更新
     return ''

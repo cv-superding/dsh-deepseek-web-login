@@ -57,6 +57,14 @@ export interface AccountRecord extends WebAuth {
   /** 用户可改的备注名（如「工作号」）。为空时界面显示掩码账号。 */
   label?: string
   /**
+   * 所属分组 id（指向 `groups.json` 里的 `AccountGroup.id`）。
+   *
+   * 刻意**只存指针、不存组名**：组要能改名与排序，写进每条账号记录就得遍历全库；
+   * 而组被删掉时这里会变成"悬挂指针"，`partitionByGroup` 一律按「未分组」处理 ——
+   * 所以删组不需要（也不应该）去逐个改账号文件。
+   */
+  groupId?: string
+  /**
    * DeepSeek 服务端的 user id（来自 `users/current` 的 `data.id`）。
    * 用途：**同一账号重复捕获时更新而不是新增**，避免库里堆一堆同一个号。
    */
@@ -188,6 +196,7 @@ function normalizeRecord(raw: any, fallbackId?: string): AccountRecord | undefin
       return meta ? { cookieMeta: meta } : {}
     })(),
     ...(typeof raw.label === 'string' && raw.label ? { label: raw.label } : {}),
+    ...(typeof raw.groupId === 'string' && raw.groupId ? { groupId: raw.groupId } : {}),
     ...(typeof raw.serverId === 'string' && raw.serverId ? { serverId: raw.serverId } : {}),
     ...(typeof raw.lastVerifiedAt === 'string' ? { lastVerifiedAt: raw.lastVerifiedAt } : {}),
     ...(raw.lastVerifyError && typeof raw.lastVerifyError?.at === 'string'
@@ -312,7 +321,9 @@ export function upsertAccount(auth: WebAuth, patch: Partial<AccountRecord> = {})
   const id = patch.id ?? existing?.id ?? newAccountId()
 
   const carried: Partial<AccountRecord> = {}
-  for (const key of ['label', 'serverId', 'lastVerifiedAt', 'lastVerifyError', 'limit'] as const) {
+  // ⚠️ 这个白名单决定「重新登录 / 导入」时哪些**用户附加的元数据**会被带过去。
+  // 少了 groupId 就会出现"重登一次，账号从组里掉出来"这种很难查的 bug。
+  for (const key of ['label', 'groupId', 'serverId', 'lastVerifiedAt', 'lastVerifyError', 'limit'] as const) {
     const value = (patch as any)[key] ?? (incoming as any)[key] ?? (existing as any)?.[key]
     if (value !== undefined) (carried as any)[key] = value
   }

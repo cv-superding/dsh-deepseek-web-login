@@ -434,7 +434,11 @@ const checks = {
     /updateAccount\(target,\s*\{\s*lastVerifyError:\s*void 0\s*\}\)/.test(host) &&
     /sameAccount\(existing, auth\)/.test(host) &&
     client.includes('凭证已原地更新') &&
-    /dsw-account-actions[\s\S]{0,320}?"重新登录"/.test(client),
+    // ⚠️ 这里原来写的是 `/dsw-account-actions[\s\S]{0,320}?"重新登录"/` —— 一个脆弱的巧合：
+    // 它匹配到的其实是 **CSS 里**那次 `dsw-account-actions`，靠 320 字符的窗口罩住了后面的文案。
+    // 于是"把按钮文案从「重新登录」缩成「重登」"这种纯文案改动就会让它假红（实测 2026-09-16）。
+    // 改成绑函数名：真正要守的是「动作列里的入口调的是 reloginAccount（那条不清浏览器登录态的路）」。
+    /reloginAccount\(item\.id/.test(client),
   // 0.1.69：账号显示名不再二次屏蔽（幂等守卫必须真的进了产物）
   'host 账号显示名不再二次屏蔽（maskIdentifier 幂等）':
     /function maskIdentifier[\s\S]{0,260}?includes\(["']\*\*\*["']\)/.test(host),
@@ -459,6 +463,34 @@ const checks = {
   'host 扣住期间缓冲后续行（保正文顺序）':
     /heldTail\.push\(line\)/.test(host) &&
     /for \(const held of this\.heldTail\)\s*out \+= held/.test(host),
+  // 0.1.71：账号分组（组定义单独落盘、分区在宿主算、删组不碰账号文件）+ 备注改名 + 手动校验。
+  // 断言一律按**打包后的真实形态**写（打包器统一双引号、纯逻辑常量会被内联掉）。
+  'host 分组：分区在宿主侧算好并随列表返回':
+    /sections: partitionByGroup\(list, groups, activeId\)/.test(host),
+  'host 分组：组定义单独落盘 + 读盘容错':
+    host.includes('groups.json') &&
+    /function normalizeGroupList/.test(host) &&
+    /function writeGroups/.test(host) &&
+    /MAX_GROUPS|最多/.test(host),
+  'host 分组：删组只删定义（不动账号文件）':
+    /removeGroup\(readGroups\(\), id\)/.test(host),
+  'host 校验全部：串行探活 + 互斥开关 + 只读路由':
+    host.includes('/accounts/refresh') &&
+    /accountsRefreshInFlight = true/.test(host) &&
+    /accountsRefreshInFlight = false/.test(host),
+  'client 分组：分区渲染 + 折叠 + 归组下拉都在':
+    client.includes('dsw-grouphead') &&
+    client.includes('dsw-groupsel') &&
+    client.includes('dsw-accounts-collapsed-groups') &&
+    client.includes('new Option("未分组", "")'),
+  'client 按钮文案：重登 / 备注 / 校验全部 / 新建分组':
+    client.includes('"重登"') &&
+    client.includes('"备注"') &&
+    client.includes('"校验全部"') &&
+    client.includes('"新建分组"') &&
+    !/dsw-btn dsw-preset",\s*"重新登录"/.test(client),
+  'client 重建签名必须覆盖 groups 与 sections（否则新建组不刷新）':
+    /JSON\.stringify\(\{\s*activeId: data\.activeId \?\? null,\s*accounts,\s*groups,\s*sections\s*\}\)/.test(client),
 }
 
 let failed = 0
