@@ -2,6 +2,38 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.72 — 2026-09-16
+
+### 修：账号库标题退化成 `acc_97768033`（0.1.71 的回归）
+
+0.1.71 把「按组分区」挪到宿主算时，喂给 `partitionByGroup` 的是**原始账号记录**，
+而它返回的 `accounts` 会**原样**交给客户端渲染 —— 而 `title` / `display` / `isActive`
+都是**响应加工字段**，原始记录里没有。于是面板上：
+
+- 标题退化成内部 id（`acc_97768033`），显示名与「✅ 当前」徽章一起消失；
+- 分区本身是好的（排序、置顶、未分组兜底都正常）—— 坏的只是"渲染字段"这一层。
+
+修法：先 map 出「可直接渲染的视图」，再把**视图数组**喂给 `partitionByGroup`
+（它是泛型 `T extends GroupableAccount`，只要求 `id` + `groupId`，视图满足）。
+顶层 `accounts` 继续返回 —— 客户端有"没有 sections 就平铺"的兜底路径，且重建签名覆盖它。
+
+**为什么原来的测试没抓住**：
+
+- `check-account-groups.mjs` 的 17 条是**纯函数**用例，而 `partitionByGroup` 对
+  "喂原始记录还是喂视图"一视同仁（两者都有 `id` + `groupId`）—— 差别只在**接线层由谁喂**；
+- 更糟的是那条产物断言当时写成 `sections: partitionByGroup(list, groups, activeId)`，
+  **把 bug 固化成了期望值**。
+
+新增 `tests/check-accounts-view.mjs`（9 条，用真实 `apply()` 调 `/accounts`）：
+
+- `title` 非空、不等于内部 id、且是掩码后的标识；`display` 非空；
+- `sections` 里的账号同样带 `title` / `isActive` / `cookieMeta` / `lastVerifiedAt`
+  （回归的哨兵：标题退化与「当前」徽章消失都在这里抓）；
+- 同时守住「分区 / 置顶 / 未分组兜底仍然工作」，免得修这个把那个砍了。
+
+产物断言改成表达**意图**：`sections` 必须喂视图数组 + 不得再出现
+`partitionByGroup(list, …)`。反向验证 4/4 精确命中。
+
 ## 0.1.71 — 2026-09-16
 
 ### 新增：账号库分组、备注与状态刷新；按钮文案名实相符

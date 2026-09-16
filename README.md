@@ -392,6 +392,7 @@ node tests/check-image-refs.mjs       # 图片引用组装（同一张图去重 
 node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响上传（需要已登录凭证）
 node tests/check-account-sync.mjs    # 账号库自动同步（重读节拍 + 内容签名：变了才重建列表）
 node tests/check-account-groups.mjs   # 账号库分组（读盘容错 / 建改删重名 / 分区排序含当前组置顶）
+node tests/check-accounts-view.mjs    # /accounts 的 sections 必须是「可直接渲染的视图」（标题不能退化成 id）
 node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
 node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
 ```

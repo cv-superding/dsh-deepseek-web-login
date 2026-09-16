@@ -678,6 +678,27 @@ export function apply(ctx: any, config: Config = {}): void {
               const activeId = activeAccountId()
               const list = listAccounts()
               const groups = readGroups()
+              // ⚠️ 先把记录加工成「可直接渲染的视图」，**再**拿去分区。
+              // partitionByGroup 只按 id / groupId 归组，但它返回的 accounts 会**原样**
+              // 交给客户端渲染 —— 喂原始记录的话，title / display / isActive 这些
+              // 「响应加工字段」就不在数组里：标题退化成 acc_xxxxxxx、显示名与「当前」
+              // 徽章一起消失（0.1.71 的真实回归，由端到端用例 + 产物断言守）。
+              const accounts = list.map((record) => ({
+                id: record.id,
+                title: accountTitle(record, maskIdentifier),
+                display: record.user?.display ? maskIdentifier(record.user.display) : '',
+                label: record.label ?? '',
+                groupId: record.groupId ?? '',
+                unverified: record.unverified === true,
+                capturedAt: record.capturedAt,
+                lastVerifiedAt: record.lastVerifiedAt ?? null,
+                lastVerifyError: record.lastVerifyError ?? null,
+                limit: record.limit ?? null,
+                // cookie 的过期构成（捕获时记下）。老记录 / 手动粘 token 的账号是空数组，
+                // 界面据此区分"没记录"和"记录到全是会话级"—— 这两种含义完全不同。
+                cookieMeta: record.cookieMeta ?? [],
+                isActive: record.id === activeId,
+              }))
               sendJson(res, 200, {
                 activeId: activeId ?? null,
                 // 分组定义单独存 groups.json；账号记录里只有 groupId 指针。
@@ -687,23 +708,10 @@ export function apply(ctx: any, config: Config = {}): void {
                 // 「按组分区」在宿主侧算好：客户端只负责画。
                 // 这样分区规则（当前账号所在组置顶 → 其余按 order → 未分组垫底）只有一份实现，
                 // 也就只有一处要测 —— 放进客户端会因为 node 依赖而不得不复制一份。
-                sections: partitionByGroup(list, groups, activeId),
-                accounts: list.map((record) => ({
-                  id: record.id,
-                  title: accountTitle(record, maskIdentifier),
-                  display: record.user?.display ? maskIdentifier(record.user.display) : '',
-                  label: record.label ?? '',
-                  groupId: record.groupId ?? '',
-                  unverified: record.unverified === true,
-                  capturedAt: record.capturedAt,
-                  lastVerifiedAt: record.lastVerifiedAt ?? null,
-                  lastVerifyError: record.lastVerifyError ?? null,
-                  limit: record.limit ?? null,
-                  // cookie 的过期构成（捕获时记下）。老记录 / 手动粘 token 的账号是空数组，
-                  // 界面据此区分"没记录"和"记录到全是会话级"—— 这两种含义完全不同。
-                  cookieMeta: record.cookieMeta ?? [],
-                  isActive: record.id === activeId,
-                })),
+                sections: partitionByGroup(accounts, groups, activeId),
+                // 顶层 `accounts` 必须继续返回：客户端有"没有 sections 就平铺"的兜底路径，
+                // 而且重建签名是 `{activeId, accounts, groups, sections}` 整包算的。
+                accounts,
                 footprint: accountsFootprint(),
               })
               return

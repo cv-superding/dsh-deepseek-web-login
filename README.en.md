@@ -355,6 +355,7 @@ node tests/check-image-refs.mjs     # image reference assembly (dedup + "the ima
 node tests/probe-upload-name.mjs    # live A/B: how the filename suffix affects upload (needs a logged-in account)
 node tests/check-account-sync.mjs   # account library auto-sync (cadence + change signature)
 node tests/check-account-groups.mjs # account groups (storage tolerance / CRUD / section ordering)
+node tests/check-accounts-view.mjs  # /accounts sections must carry renderable views (title must not fall back to the id)
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed

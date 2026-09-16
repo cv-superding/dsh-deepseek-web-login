@@ -465,8 +465,14 @@ const checks = {
     /for \(const held of this\.heldTail\)\s*out \+= held/.test(host),
   // 0.1.71：账号分组（组定义单独落盘、分区在宿主算、删组不碰账号文件）+ 备注改名 + 手动校验。
   // 断言一律按**打包后的真实形态**写（打包器统一双引号、纯逻辑常量会被内联掉）。
-  'host 分组：分区在宿主侧算好并随列表返回':
-    /sections: partitionByGroup\(list, groups, activeId\)/.test(host),
+  // ⚠️ 断言要写「**意图**」，不能照抄当时的代码 —— 下面这条曾经写成 `partitionByGroup(list, …)`，
+  // 等于把 0.1.71 的回归（sections 里喂原始记录 ⇒ 标题退化成 acc_xxxxxxx）固化成了期望值。
+  'host 分组：sections 里喂的是「可直接渲染的视图」':
+    /sections: partitionByGroup\(accounts, groups, activeId\)/.test(host) &&
+    /const accounts = list\.map\(/.test(host) &&
+    /^\s*accounts,$/m.test(host),
+  'host 分组：sections 不得喂原始记录（0.1.71 回归的哨兵）':
+    !/partitionByGroup\(list, groups/.test(host),
   'host 分组：组定义单独落盘 + 读盘容错':
     host.includes('groups.json') &&
     /function normalizeGroupList/.test(host) &&
