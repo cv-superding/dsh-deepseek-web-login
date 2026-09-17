@@ -266,11 +266,15 @@ points at `127.0.0.1:7897` while the VPN is off, requests will fail — switch b
 ### Account library, call ledger, login probe
 
 **When credentials die, the panel tells you what to do.** An account that fails the probe is
-flagged **"needs re-login"** and gets a **"re-login this account"** button on its own row. The only
-difference from "add new account" is that re-login **does not clear the browser session**: adding must
+flagged **"needs re-login"** and gets a **"re-login this account"** button on its own row. Unlike
+"add new account", re-login by default **does not clear the browser session**: adding must
 clear it (otherwise the window opens already logged in as the old account and you capture that one
 again), whereas repairing the *same* account is the opposite — keeping it means the window may reuse
-it immediately with no password at all. The record is updated **in place**, so whichever account you
+it immediately with no password at all.
+⚠️ The exception is an account that is **already flagged as failed**: there the browser session is
+cleared first, because that session is exactly what went bad — reusing it would capture the same
+dead credential over and over (you would click re-login any number of times and it would never work).
+The record is updated **in place**, so whichever account you
 are currently using does not change.
 
 **Cookie expiry composition is recorded at capture time** — per cookie, whether it is session-scoped

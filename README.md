@@ -108,7 +108,9 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 > （`~/.dsh/web-login/browser-profile`，**不碰你日常 Edge 的 cookie 与历史**），
 > 所以窗口一打开就是干净的登录页，不会带着上一个账号。
 > 想省一次输入（凭证明明还有效、只是要重新捕获）就用账号行上的「**重登**」——
-> 那条路**有意不清**，浏览器里若还留着登录态会立刻复用、一个密码都不用敲。
+> 那条路**默认不清**，浏览器里若还留着登录态会立刻复用、一个密码都不用敲。
+> ⚠️ 但**如果这条账号已经被标记失效**（红标「需要重新登录」），它就会先清掉再让你重新登录 ——
+> 因为此时浏览器里那份登录态**也已经不可用**，复用只会把同一个坏凭证再抓一遍（会陷入点多少遍都失败的死循环）。
 
 - 凭证只存在本机 `~/.dsh/web-login/deepseek-auth.json`，**不在仓库里**；面板「当前账号 → 退出当前账号」一键清除（同时清掉浏览器分区里的登录态，保证真退出、可换号）
 - 凭证丢了或校验不通过：点 **从已登录窗口恢复**（复用上次登录的持久化分区，无需重新登录）
@@ -401,6 +403,7 @@ node tests/check-account-groups.mjs   # 账号库分组（读盘容错 / 建改�
 node tests/check-accounts-view.mjs    # /accounts 的 sections 必须是「可直接渲染的视图」（标题不能退化成 id）
 node tests/check-login-fresh.mjs      # 登录前按需清理登录态（清 profile + 清分区，幂等语义）
 node tests/check-unexecuted-program.mjs  # 判「模型把要执行的程序写进了正文」（正反两侧都钉）
+node tests/check-relogin-integrity.mjs   # 重登不能损坏记录（保住显示名 / 失效账号先清登录态）
 node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
 node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
 ```

@@ -1137,16 +1137,33 @@ export function apply(ctx: any, config: Config = {}): void {
                 sendJson(res, 404, { ok: false, error: '账号不存在（可能已被移除），请刷新后重试' })
                 return
               }
+              // 0.1.75：账号**已经被标记失效**时，复用浏览器登录态是无解的 ——
+              // 那份登录态正是让它失效的那一份，复用只会把同一个坏 token 再抓一遍
+              // （2026-09-17 实测：连点两次重登，两次都在 1 秒内"已捕获 token"、又在 5 秒内
+              //  校验失败 invalid token；用户看到的是一个点不出来的死循环）。
+              // 这种情况直接按"全新登录"走：清掉 profile + 登录分区，让用户在浏览器里真正登一次。
+              // 账号健康时的复用行为**完全不变** —— 那才是"一个密码都不用敲"的便利所在。
+              const stale = !!target.lastVerifyError
+              if (stale) {
+                const cleared = await clearLoginState()
+                logger.info?.(
+                  `deepseek-web: 账号「${target.label || target.id}」已被标记失效，重登不再复用登录态，` +
+                    `先清掉（profile=${cleared.profileCleared} partition=${cleared.partitionCleared}）`,
+                )
+              }
               beginRelogin(id)
               logger.info?.(
-                `deepseek-web: 准备重新登录「${target.label || target.id}」（不清理浏览器登录态，能复用就直接复用）` +
+                `deepseek-web: 准备重新登录「${target.label || target.id}」` +
+                  `（${stale ? '登录态已失效，本次不复用' : '不清理浏览器登录态，能复用就直接复用'}）` +
                   '—— 捕获后原地更新这条记录，不新增、也不切换当前账号',
               )
               sendJson(res, 200, {
                 ok: true,
                 targetId: id,
-                keptBrowserSession: true,
-                hint: '登录窗口会打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次',
+                keptBrowserSession: !stale,
+                hint: stale
+                  ? '这条账号已被标记失效，浏览器里剩下的登录态也已经不可用 —— 已帮你清掉，请在打开的窗口里重新登录一次'
+                  : '登录窗口会打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次',
               })
               return
             }

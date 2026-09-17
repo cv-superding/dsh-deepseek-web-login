@@ -328,6 +328,21 @@ export function upsertAccount(auth: WebAuth, patch: Partial<AccountRecord> = {})
     if (value !== undefined) (carried as any)[key] = value
   }
 
+  // ⚠️ `user` 必须单独做**深合并**，不能塞进上面那个 `??` 链里 ——
+  // 它是服务端在**校验通过**时才给的「一次性」信息，而重登 / 导入时新凭证往往还是
+  // `unverified`（拿不到 user）。若按"新值整体覆盖"处理，就会把原记录里可辨识的显示名抹成空：
+  // 界面上的账号从「137******78」退化成「未识别账号 (acc_xxxx)」—— 2026-09-17 实测，
+  // 用户看到的现象是"发个消息账号就退出了"。而 `serverId` 还在，说明这条记录本来是有身份的。
+  // 这里按字段合并、新值优先、缺的字段沿用旧值。
+  const userFromPatch = (patch as any)?.user
+  const userFromIncoming = (incoming as any)?.user
+  const mergedUser = {
+    ...(existing?.user ?? {}),
+    ...(userFromIncoming && typeof userFromIncoming === 'object' ? userFromIncoming : {}),
+    ...(userFromPatch && typeof userFromPatch === 'object' ? userFromPatch : {}),
+  }
+  if (Object.keys(mergedUser).length > 0) carried.user = mergedUser as AccountRecord['user']
+
   const record = normalizeRecord({ ...auth, ...carried, id }, id)!
   saveAccount(record)
   return record

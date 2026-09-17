@@ -693,7 +693,9 @@ function Panel(): any {
      */
     const reloginAccount = (id: string, title: string): void => {
       void (async () => {
-        accountsMsg.textContent = `正在为「${title}」打开登录窗口（不清理浏览器登录态，能复用就直接复用）……`
+        // 这里刻意不写死"会复用登录态" —— 宿主在「这条账号已被标记失效」时会走清理路径
+        // （0.1.75），该说什么由它随响应返回（下面用 prep.hint），免得界面与实际行为对不上。
+        accountsMsg.textContent = `正在为「${title}」打开登录窗口……`
         try {
           const prep = await api('/login/relogin', { method: 'POST', body: JSON.stringify({ id }) })
           if (prep?.ok === false) {
@@ -701,8 +703,10 @@ function Panel(): any {
             return
           }
           boostUntil = Date.now() + 300_000
-          accountsMsg.textContent =
-            '登录窗口已打开：浏览器里若还留着这个账号的登录态会立刻复用；否则在里面重新登录一次……'
+          accountsMsg.textContent = String(
+            prep?.hint ??
+              '登录窗口已打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次……',
+          )
           const result = await api('/login/browser', { method: 'POST', body: '{}' })
           if (result?.started === false) {
             accountsMsg.textContent = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
@@ -768,7 +772,7 @@ function Panel(): any {
       // 文案从「重新登录」缩成「重登」：动作列现在要放下切换/备注/归组/移除，太长会挤成两行。
       if (item.lastVerifyError) {
         const reloginBtn = el('button', 'dsw-btn dsw-preset', '重登') as HTMLButtonElement
-        reloginBtn.title = '不清理浏览器登录态（能复用就直接复用）；捕获后原地更新这条记录，不新增、也不切换当前账号'
+        reloginBtn.title = '能复用浏览器里的登录态就直接复用（不必敲密码）；若这条账号已被标记失效，会先清掉登录态、让你重新登录一次。捕获后原地更新这条记录，不新增、也不切换当前账号'
         reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
         actions.append(reloginBtn)
       }

@@ -480,9 +480,18 @@ const checks = {
   'host 登录前按需清理：/login/browser 的 fresh 分支（且真调了清理）':
     /route === ["']\/login\/browser["'][\s\S]{0,160}?fresh === true/.test(host) &&
     /fresh === true[\s\S]{0,140}?clearLoginState\(\)/.test(host),
-  'host 登录前清理收口到同一个函数（/login/add 不再重复那两行）':
-    (host.match(/clearLoginState\(\)/g) || []).length === 2 &&
-    /beginAddAccount\(\);[\s\S]{0,90}?clearLoginState\(\)/.test(host),
+  // 0.1.75 更新：又多了「重登 → 账号已失效」这个清理入口 ⇒ 老断言数"恰好 2 次"被打破。
+  // 按**意图**重写：逐个入口断言它们都走 clearLoginState()（"收口"的含义），
+  // 而不是数总次数 —— 否则每加一个入口都要改一次，等于把"当时有几处"当成期望值。
+  'host 三个登录入口的清理都收口到 clearLoginState()':
+    /beginAddAccount\(\);[\s\S]{0,90}?clearLoginState\(\)/.test(host) &&
+    /if \(stale\)[\s\S]{0,220}?clearLoginState\(\)/.test(host) &&
+    /fresh === true[\s\S]{0,140}?clearLoginState\(\)/.test(host),
+  'host 重登的失效判定只看 lastVerifyError（不被"刚捕获还没校验"干扰）':
+    /const stale = !!target\.lastVerifyError/.test(host) &&
+    // 负向：别把 unverified 也算进"已失效" —— 捕获后短暂 unverified 是正常中间态，
+    // 把它当失效会让健康账号每次重登都被清一遍登录态。
+    !/const stale = [^\n]*unverified/.test(host),
   'host 清理函数两件事都做（清 profile + 清登录分区）':
     /async function clearLoginState[\s\S]{0,300}?clearBrowserLoginProfile\(/.test(host) &&
     /async function clearLoginState[\s\S]{0,400}?clearLoginPartition\(/.test(host),
@@ -525,6 +534,30 @@ const checks = {
   'host 纠正轮发的是纠正指令、不是续写指令（两分支互斥）':
     host.includes('写在正文里的代码不会被执行') &&
     /TOOL_CALL_RETRY_INSTRUCTION : CONTINUE_INSTRUCTION/.test(host),
+  // ── 0.1.75：重登不能损坏账号记录（2026-09-17 现场的两个真 bug）──────────
+  // ① 显示名被抹掉：新凭证在 unverified 状态下没有 user，而白名单漏了 user ⇒ 整包覆盖成空。
+  'host 重登 upsert 保住显示名（user 单独深合并，且没被塞进整包白名单）':
+    /mergedUser/.test(host) &&
+    /carried\.user = mergedUser/.test(host) &&
+    /existing\?\.user/.test(host) &&
+    // 负向：别有人又把它加回那个 `??` 链（那会退化成"新值整体覆盖"）
+    !/\["label",\s*"groupId",[\s\S]{0,120}?"user"/.test(host),
+  // ② 重登死循环：账号已失效时仍去复用浏览器里那份坏登录态。
+  'host 重登：账号已标记失效时先清登录态，健康账号照旧复用':
+    /const stale = !!target\.lastVerifyError/.test(host) &&
+    /if \(stale\)[\s\S]{0,220}?clearLoginState\(\)/.test(host) &&
+    /keptBrowserSession: !stale/.test(host),
+  'host 重登的两条日志/提示都按 stale 分流（不误导用户）':
+    host.includes('重登不再复用登录态') &&
+    /hint:\s*stale\s*\?/.test(host) &&
+    // 旧形态：无条件宣称"能复用就直接复用"必须消失
+    !/（不清理浏览器登录态，能复用就直接复用）—— 捕获后原地更新/.test(host),
+  // 界面文案必须跟着行为走：老文案把"不清理登录态"写死在了按钮 title 与提示里，
+  // 而 0.1.75 起"账号已失效"时会先清 ⇒ 那两句会误导用户（0.1.71 的"文案与行为脱节"同类）。
+  'client 重登提示跟随宿主的 hint（不再写死"不清理登录态"）':
+    /prep\?\.hint/.test(client) &&
+    !client.includes('不清理浏览器登录态') &&
+    client.includes('若这条账号已被标记失效'),
 }
 
 let failed = 0
