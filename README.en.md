@@ -182,7 +182,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 
 | Field | Default | Meaning |
 |---|---|---|
-| `maxPromptChars` | `1500000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
+| `maxPromptChars` | `400000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns). ⚠️ **Raising it clearly increases the risk of being rate-limited**; range `[120000, 1500000]`, and the default is deliberately **not** at the ceiling |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
 | `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer). The tail character decides: `，` `、` `；` `：` (and their ASCII forms) mean "clearly unfinished" and trigger a continuation; sentence-ending punctuation (`。` `！` `？` `）` …) counts as complete — including `…`, since an ellipsis may be a deliberate ending. It also gates the corrective round used when the model writes a tool program into the visible text instead of emitting a tool call |
@@ -199,6 +199,17 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `transport` | **`chromium`** | Transport: `chromium` = Electron `net.fetch` (browser-identical fingerprint) / `node` = Node fetch |
 | `contextMode` | **`full`** | Context feeding: `full` = resend the whole prompt every turn / `chained` = send only the delta and hang it off the previous answer (see below) |
 | `probeIntervalMs` | `1800000` | Read-only login-state probe interval (ms); `0` disables. Uses `users/current`, zero quota |
+
+> ⚠️ **`maxPromptChars` is a throttling valve, not a "bigger is better" knob.**
+> The web API is **stateless**: every turn resends the **entire transcript**, so this ceiling directly sets the
+> size of each request. Measured within a single conversation, one request grew from 9.7k to **293k tokens**;
+> leaving the default at 1.5 M characters (≈1 M tokens of Chinese) means the default itself permits
+> "fill the whole 1 M context in one shot". Four of our own accounts were rate-limited within two days,
+> with request size the prime suspect. **So from 0.1.76 the default is 400 000** (≈270k tokens — plenty for
+> long tasks). You can still raise it (the ceiling stays at 1.5 M), but read that as **trading account
+> stability for longer memory**: if you genuinely need long context, switch "Context feeding" to `chained`
+> (send only the delta and let the server keep the history) instead of raising this ceiling — the ceiling
+> costs you on *every single turn*.
 
 ### Context feeding: full resend vs chained incremental
 

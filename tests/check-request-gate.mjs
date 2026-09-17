@@ -691,10 +691,18 @@ await test('F11 闸门可取消：排队等待中取消 → 能退出且不放�
 // ── prompt 上限（token 体量的总阀门，2026-09-13 加入设置页）──
 // 它不参与节流，只是搭同一份 gate.json 存储；执行方是 adapter。
 
-await test('prompt 上限：默认 150 万字符', () => {
+await test('prompt 上限：默认值要「保守」（落在可调区间内、且不顶格）', () => {
   const gate = createRequestGate({ longRunThreshold: 0 })
   assert.equal(gate.settings().maxPromptChars, DEFAULT_MAX_PROMPT_CHARS)
-  assert.equal(DEFAULT_MAX_PROMPT_CHARS, 1_500_000)
+  // 0.1.76：默认由「顶格 150 万」降到 40 万。这里**不再写死数值** —— 写死等于把"当时恰好取了
+  // 这个数"当成期望值（同类教训见 0.1.72 那条 sections 断言）。改断**意图**：默认必须落在
+  // 可调区间内，而且**不能等于上限**。顶格 ＝ 默认就把风控阀门开到最大，而这个数字直接决定
+  // 每轮重发的请求体量（网页端无状态，每轮都要重发整段转写）。
+  assert.ok(
+    DEFAULT_MAX_PROMPT_CHARS >= MAX_PROMPT_CHARS_BOUNDS.min &&
+      DEFAULT_MAX_PROMPT_CHARS < MAX_PROMPT_CHARS_BOUNDS.max,
+    `默认值要保守：应落在 [${MAX_PROMPT_CHARS_BOUNDS.min}, ${MAX_PROMPT_CHARS_BOUNDS.max}) 内，实际 ${DEFAULT_MAX_PROMPT_CHARS}`,
+  )
 })
 
 await test('prompt 上限：越界夹到边界，非数回落默认', () => {

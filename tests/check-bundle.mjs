@@ -558,6 +558,13 @@ const checks = {
     /prep\?\.hint/.test(client) &&
     !client.includes('不清理浏览器登录态') &&
     client.includes('若这条账号已被标记失效'),
+  // 0.1.76：prompt 上限默认值不再顶格（它同时是风控阀门，直接决定每轮重发的请求体量）。
+  // ⚠️ 打包器会把 400000 写成 `4e5`、1500000 写成 `15e5` —— 断言必须容忍这两种形态。
+  'host prompt 上限默认值已降到 40 万、且不再等于上限值':
+    /DEFAULT_MAX_PROMPT_CHARS\s*=\s*(?:4e5|400000|400_000)\s*;/.test(host) &&
+    /MAX_PROMPT_CHARS_BOUNDS\s*=\s*\{[\s\S]{0,80}?max:\s*(?:15e5|1500000|1_500_000)/.test(host) &&
+    // 负向：默认值不能再是那个顶格的 150 万（这正是本版要改掉的形态）
+    !/DEFAULT_MAX_PROMPT_CHARS\s*=\s*(?:15e5|1500000|1_500_000)\s*;/.test(host),
 }
 
 let failed = 0

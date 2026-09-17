@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 import { webLoginDir } from './paths.ts'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
-import { createRequestGate, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
+import { createRequestGate, DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
 import {
   scheduleDeleteSession,
@@ -766,7 +766,7 @@ export function createAdapter(deps: AdapterDeps) {
       system: options?.system,
       messages: options?.messages ?? [],
       tools: (options?.tools ?? []) as ToolSchemaLike[],
-      maxChars: deps.config.maxPromptChars ?? 1_500_000,
+      maxChars: deps.config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     })
     const prompt = promptParts.full
 
@@ -860,7 +860,7 @@ export function createAdapter(deps: AdapterDeps) {
         promptParts: {
           head: promptParts.head,
           entries: promptParts.entries,
-          maxChars: deps.config.maxPromptChars ?? 1_500_000,
+          maxChars: deps.config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
         },
         // 链式投喂的决策回执（0.1.63）→ 一行日志。webapi 只在「原因变化」时回调，
         // 所以不会每轮刷屏，但"哪一轮开始不再发增量、为什么"一定看得见。
@@ -1097,7 +1097,7 @@ export function createAdapter(deps: AdapterDeps) {
             },
           ],
           tools: (options?.tools ?? []) as ToolSchemaLike[],
-          maxChars: deps.config.maxPromptChars ?? 1_500_000,
+          maxChars: deps.config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
         })
         currentPrompt = promptParts.full
         // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例

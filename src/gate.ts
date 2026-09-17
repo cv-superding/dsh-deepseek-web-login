@@ -60,7 +60,19 @@ export const LONG_RUN_THRESHOLD_BOUNDS = { min: 0, max: 100 }
  * - 下限取**更早的默认值 12 万**：那是长期在用的值，说明这个量级还能干活（工具目录占约 5.6 万）。
  */
 export const MAX_PROMPT_CHARS_BOUNDS = { min: 120_000, max: 1_500_000 } as const
-export const DEFAULT_MAX_PROMPT_CHARS = 1_500_000
+
+/**
+ * **默认**上限 —— 0.1.76 起由 150 万降到 **40 万**。
+ *
+ * 它同时是一个**风控阀门**：网页端无状态，每一轮都要把整段转写重发，所以这个数字直接决定
+ * 单次请求的体量。会话内实测单次输入从 9.7k token 一路涨到 293k，而 150 万字符（纯中文
+ * ≈100 万 token）意味着默认就允许"一次顶满 1M 上下文" —— 四个账号两天内陆续被限制，
+ * 体量是主要嫌疑。40 万 ≈27 万 token，够跑长任务，又不会让默认配置本身贴着天花板。
+ *
+ * ⚠️ 可调范围不变（见上面的 BOUNDS）：确实需要更长的转写可以自己往上调，
+ * 但要知道那是在拿账号的稳定换更长的记忆 —— 面板上那个旋钮的说明写了同一件事。
+ */
+export const DEFAULT_MAX_PROMPT_CHARS = 400_000
 
 /** 规整 prompt 字符上限：非数 → 默认；越界 → 夹到边界。 */
 export function clampMaxPromptChars(value: number): number {
