@@ -2249,9 +2249,14 @@ function Panel(): any {
     browserBtn.addEventListener('click', () => {
       void (async () => {
         browserBtn.disabled = true
-        showMessage('正在启动浏览器……若是真实浏览器，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。')
+        showMessage(
+          '正在启动浏览器……会先清掉上次的登录状态，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。',
+        )
         try {
-          const result = await api('/login/browser', { method: 'POST', body: '{}' })
+          // fresh：登录前先清掉独立 profile 与登录分区里的登录态。
+          // 这个按钮此前是四个登录入口里**唯一没有前置清理**的那个 —— profile 里若还留着
+          // 上次那个账号，窗口一打开就是已登录，用户以为在登录、抓回来的却是旧号。
+          const result = await api('/login/browser', { method: 'POST', body: JSON.stringify({ fresh: true }) })
           if (result?.mode === 'browser') {
             // 真实浏览器 + CDP：成功即已抓完 token/cookie/指纹头
             if (result.ok) {

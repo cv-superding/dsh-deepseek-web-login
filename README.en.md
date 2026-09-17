@@ -112,6 +112,11 @@ Credentials live only on your machine (`~/.dsh/web-login/deepseek-auth.json`), n
 In manual-token mode the panel shows "cookie / fingerprint headers not captured" — that is expected for this
 path (it only has the Bearer token), and it is verified working end to end: validation, PoW solving and a real
 completion all succeed. Switch to browser login if you ever hit frequent `AUTH` / `40003` errors.
+> 💡 **The browser-login button clears the previous login state first** — it drives a dedicated
+> profile (`~/.dsh/web-login/browser-profile`, which never reads or writes your everyday Edge cookies
+> or history), so the window always opens on a clean sign-in page. If you would rather reuse a session
+> that is still valid, use **Re-login** on the account row instead — that path deliberately keeps it.
+
 If they are lost, **Recover from the logged-in window** reuses the persistent partition — no re-login needed.
 
 ## Models
@@ -356,6 +361,7 @@ node tests/probe-upload-name.mjs    # live A/B: how the filename suffix affects 
 node tests/check-account-sync.mjs   # account library auto-sync (cadence + change signature)
 node tests/check-account-groups.mjs # account groups (storage tolerance / CRUD / section ordering)
 node tests/check-accounts-view.mjs  # /accounts sections must carry renderable views (title must not fall back to the id)
+node tests/check-login-fresh.mjs    # optional login-state wipe before sign-in (profile + partition, idempotent)
 ```
 
 Two assertions are frozen from a real incident: a tool call containing an unescaped Windows path once failed

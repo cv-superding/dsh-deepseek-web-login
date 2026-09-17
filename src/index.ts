@@ -35,7 +35,7 @@ import {
   type GateSettings,
 } from './gate.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
-import { canOpenElectronWindow, clearLoginPartition, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
+import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount } from './account-add.ts'
 import {
   validateAuth,
@@ -1102,8 +1102,7 @@ export function apply(ctx: any, config: Config = {}): void {
             // 注意这里**不动账号库里的任何账号** —— 与 /logout 的区别就在这。
             if (req.method === 'POST' && route === '/login/add') {
               beginAddAccount()
-              const profileCleared = clearBrowserLoginProfile()
-              const partitionCleared = await clearLoginPartition().catch(() => false)
+              const { profileCleared, partitionCleared } = await clearLoginState()
               logger.info?.(
                 `deepseek-web: 准备添加新账号（profile=${profileCleared} partition=${partitionCleared}）—— 接下来捕获到的凭证只入库、不切换`,
               )
@@ -1153,6 +1152,17 @@ export function apply(ctx: any, config: Config = {}): void {
             }
 
             if (req.method === 'POST' && route === '/login/browser') {
+              // 主按钮（「用 Microsoft Edge 登录」）带 `fresh: true` 过来：**登录前先清登录态**。
+              // 它此前是唯一**没有任何前置清理**的登录入口 —— 独立 profile 里若还留着上次那个
+              // 账号，窗口一打开就是已登录，用户以为在登录、抓回来的却是旧号。
+              // （「重登」那条路有意不清，所以这里做成按需，而不是路由的默认行为。）
+              const freshBody = await readJsonBody(req).catch(() => undefined)
+              if (freshBody?.fresh === true) {
+                const { profileCleared, partitionCleared } = await clearLoginState()
+                logger.info?.(
+                  `deepseek-web: 登录前清理登录态（profile=${profileCleared} partition=${partitionCleared}）`,
+                )
+              }
               // 两条路：
               //  1) 宿主在主进程（旧架构）→ 插件自己开 Electron 窗口（带指纹伪装，见 login.ts）
               //  2) 宿主在 utility 进程（2026-09-11 起的架构）→ 没有窗口 API，

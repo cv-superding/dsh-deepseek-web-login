@@ -104,6 +104,12 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 「使用环境异常」直接拒绝服务；若仍被拦，用同一行的 **用我的默认浏览器登录**，按提示用 F12 取 token 粘贴。
 捕获成功后窗口自动关闭，面板显示**已登录**。
 
+> 💡 **这个按钮每次都会先清掉上次的登录状态** —— 登录用的是独立 profile
+> （`~/.dsh/web-login/browser-profile`，**不碰你日常 Edge 的 cookie 与历史**），
+> 所以窗口一打开就是干净的登录页，不会带着上一个账号。
+> 想省一次输入（凭证明明还有效、只是要重新捕获）就用账号行上的「**重登**」——
+> 那条路**有意不清**，浏览器里若还留着登录态会立刻复用、一个密码都不用敲。
+
 - 凭证只存在本机 `~/.dsh/web-login/deepseek-auth.json`，**不在仓库里**；面板「当前账号 → 退出当前账号」一键清除（同时清掉浏览器分区里的登录态，保证真退出、可换号）
 - 凭证丢了或校验不通过：点 **从已登录窗口恢复**（复用上次登录的持久化分区，无需重新登录）
 - 非 Electron 环境（纯 web profile）：用面板里的**手动粘贴 Token**通道
@@ -393,6 +399,7 @@ node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响
 node tests/check-account-sync.mjs    # 账号库自动同步（重读节拍 + 内容签名：变了才重建列表）
 node tests/check-account-groups.mjs   # 账号库分组（读盘容错 / 建改删重名 / 分区排序含当前组置顶）
 node tests/check-accounts-view.mjs    # /accounts 的 sections 必须是「可直接渲染的视图」（标题不能退化成 id）
+node tests/check-login-fresh.mjs      # 登录前按需清理登录态（清 profile + 清分区，幂等语义）
 node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
 node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
 ```

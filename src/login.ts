@@ -848,6 +848,27 @@ export async function loginWithToken(
  *   2) 点「浏览器窗口登录」打开的是已登录页面，根本没法换号。
  * 只清 deepseek 域，不动分区里的其它数据；失败静默（退出登录本身必须成功）。
  */
+/**
+ * 登录前清掉「登录态存放处」—— 独立 profile 目录 + Electron 登录分区。
+ *
+ * 只有**明确需要从零开始**的入口才该调它：
+ *  - 「登录新账号（添加）」：不清的话新窗口一打开就是旧账号，抓回来还是它（等于没加）；
+ *  - 「用浏览器登录」主按钮：登录前按 `fresh: true` 请求清理；
+ *  - 「退出并登录其它账号」：走 `logout()`，那边已清。
+ *
+ * ⚠️ **「重登」有意不清** —— 留着登录态才可能一打开就复用、一个密码都不用敲
+ * （见 `beginRelogin` 那条路由的日志）。所以这里是"按需清理"，不是路由的默认行为。
+ *
+ * 拆成函数是为了能单测：删目录这种事，值得有一条用例盯着它真的删掉了。
+ */
+export async function clearLoginState(
+  options: { profileDir?: string } = {},
+): Promise<{ profileCleared: boolean; partitionCleared: boolean }> {
+  const profileCleared = clearBrowserLoginProfile(options.profileDir)
+  const partitionCleared = await clearLoginPartition().catch(() => false)
+  return { profileCleared, partitionCleared }
+}
+
 export async function clearLoginPartition(): Promise<boolean> {
   if (!electronAvailable()) return false
   try {

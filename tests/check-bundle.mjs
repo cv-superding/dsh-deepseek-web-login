@@ -473,6 +473,21 @@ const checks = {
     /^\s*accounts,$/m.test(host),
   'host 分组：sections 不得喂原始记录（0.1.71 回归的哨兵）':
     !/partitionByGroup\(list, groups/.test(host),
+
+  // A 方案（0.1.73）：主按钮是四个登录入口里**唯一裸的**那个 —— 独立 profile 里若还留着
+  // 上次那个账号，Edge 一打开就是已登录，用户以为在登录、抓回来的却是旧号。
+  // ⚠️ 断言别直接数 `fresh`：`refresh` 里就有这个子串（client 里 36 次全是假的）。
+  'host 登录前按需清理：/login/browser 的 fresh 分支（且真调了清理）':
+    /route === ["']\/login\/browser["'][\s\S]{0,160}?fresh === true/.test(host) &&
+    /fresh === true[\s\S]{0,140}?clearLoginState\(\)/.test(host),
+  'host 登录前清理收口到同一个函数（/login/add 不再重复那两行）':
+    (host.match(/clearLoginState\(\)/g) || []).length === 2 &&
+    /beginAddAccount\(\);[\s\S]{0,90}?clearLoginState\(\)/.test(host),
+  'host 清理函数两件事都做（清 profile + 清登录分区）':
+    /async function clearLoginState[\s\S]{0,300}?clearBrowserLoginProfile\(/.test(host) &&
+    /async function clearLoginState[\s\S]{0,400}?clearLoginPartition\(/.test(host),
+  'client 主按钮点了会先清上次的登录态（body 带 fresh）':
+    /browserBtn\.addEventListener\(["']click["'][\s\S]{0,900}?stringify\(\{\s*fresh:\s*true\s*\}\)/.test(client),
   'host 分组：组定义单独落盘 + 读盘容错':
     host.includes('groups.json') &&
     /function normalizeGroupList/.test(host) &&
