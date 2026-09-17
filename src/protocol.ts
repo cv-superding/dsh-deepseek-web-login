@@ -104,6 +104,41 @@ Rules:
 9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
 10. Each call must be able to run on its own: no shared shell variables across calls, no dependence on another call in the same batch.`
 
+/** 判定「这是一段要执行的程序」的最小长度：短于它的多半只是行内提及某个 API。 */
+const MIN_TOOL_PROGRAM_CHARS = 80
+
+/**
+ * 检测「模型把工具程序写成了正文」——而不是作为工具调用发出。
+ *
+ * 现场（2026-09-17 11:00，`--F-Code-DSH-Code-gongji--` 会话）：第三方 preset（染神）
+ * 的 `tool-bootstrap.mjs` 注入了一条 PTC 说明 ——「你在 Programmatic Tool Calling 模式，
+ * 所有动作必须通过 run_code 写 TypeScript 程序完成」；同 preset 的 persona 还写着
+ * `One complete deliverable per turn: numbered steps or code blocks`。
+ * 于是模型把 run_code 的 code 参数**原样贴进了正文**：三轮里一次工具调用都没发出
+ * （`toolCallCount` 始终为 0），agent loop 判定回合结束 → 用户看到「它停下来了」。
+ * 模型自己在 reasoning 里也承认："我把 TypeScript 代码写成了正文文本，而不是作为工具调用发出"。
+ *
+ * 判据：正文里出现**围栏代码块**且块内含 `tools.<name>(…)` 形态的调用 —— 那是 PTC
+ * 程序体的特征（正常回答不会这么写）。没有围栏时只认带 `await` 的形态，更严格，
+ * 免得把「提到某个 API」错判成「写了程序」。
+ *
+ * ⚠️ 这**只是判据**：调用方还要确认「本轮零工具调用」，否则健康的程序化调用轮会被误伤。
+ */
+export function looksLikeUnexecutedToolProgram(text: string): boolean {
+  const source = String(text ?? '')
+  if (!source) return false
+  const blocks: string[] = []
+  const fence = /```[^\n]*\n([\s\S]*?)```/g
+  let match: RegExpExecArray | null
+  while ((match = fence.exec(source)) !== null) blocks.push(match[1])
+  if (blocks.length === 0) {
+    return /await\s+tools\.[A-Za-z_$][\w$]*\s*\(/.test(source)
+  }
+  return blocks.some(
+    (block) => block.length >= MIN_TOOL_PROGRAM_CHARS && /tools\.[A-Za-z_$][\w$]*\s*\(/.test(block),
+  )
+}
+
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
   return `${text.slice(0, max - 3)}...`

@@ -20,7 +20,7 @@ import {
   uploadImageFile,
   type SessionCleaner,
 } from './webapi.ts'
-import { collectImageRefs, imageUploadName, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { collectImageRefs, imageUploadName, looksLikeUnexecutedToolProgram, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -448,6 +448,25 @@ const CONTINUE_INSTRUCTION =
   '如果上一条回复停在句子中间，就从那个断点直接把句子写完并继续。'
 
 /**
+ * 「把工具程序写成了正文」时的纠正指令（比自动续写更强的措辞 —— 续写是"接着写"，
+ * 这个是"你刚才那一轮等于什么都没做，请重新发一次"）。
+ *
+ * 为什么需要（2026-09-17 11:00 现场，见 protocol.ts 里 looksLikeUnexecutedToolProgram 的说明）：
+ * 染神 preset 注入了 PTC 说明（"所有动作必须通过 run_code 写 TypeScript 程序"），
+ * 模型于是把 run_code 的 code 直接贴进正文；这一轮零工具调用 ⇒ agent loop 判定回合结束
+ * ⇒ 界面上看起来"它停下来了"。加这一轮纠正后，模型有机会把同一段程序改发成工具调用。
+ *
+ * 措辞要点：① 点破"写出来 ≠ 执行了"；② 给出唯一被接受的形态；③ 明确对抗 PTC 措辞 ——
+ * 否则模型会继续把系统提示里那句"写出 TypeScript 程序"当成"写进正文"的许可。
+ */
+const TOOL_CALL_RETRY_INSTRUCTION =
+  '你刚才把要执行的程序写进了正文文本。写在正文里的代码不会被执行 —— 这一轮因此没有发生任何工具调用。\n' +
+  '请把同一段程序作为工具调用重新发出：只输出一个 JSON 对象，前后不要有任何其它文字：\n' +
+  '{"tool_calls":[{"name":"<工具名>","arguments":{...}}]}\n' +
+  '即使系统提示要求你写 TypeScript 程序来完成动作，那个程序也必须放进工具调用的 arguments 里，' +
+  '不能直接写在正文中 —— 只有作为工具调用发出，它才会真的被执行。'
+
+/**
  * 出现在末尾即「明显还有下文」的标点：列举 / 分句写到一半停了。
  * 正常写完的回答**不可能**以这些收尾（它们是分隔符，不是终止符）。
  *
@@ -818,6 +837,8 @@ export function createAdapter(deps: AdapterDeps) {
       // 被抢占的流以 FINISHED 收尾）。截断发生时，这里自动发起新请求让模型「接着写」，
       // 并把续写内容无缝拼进同一条回答 —— 等价于用户手动说「继续」，但无需用户参与。
       let rounds = 0
+      /** 本步已因「把工具程序写成正文」纠正过一次 —— 只给一次机会，别把请求密度打上去。 */
+      let toolCallRetried = false
       let currentPrompt = prompt
       /** 本轮开始前已累计的正文长度（用来量出「这一轮到底吐了多少字」）。 */
       let textLenAtRoundStart = 0
@@ -1040,16 +1061,40 @@ export function createAdapter(deps: AdapterDeps) {
           partial.length > 0 &&
           roundChars > 0 &&
           (midSentence || cutByServer)
-        if (!eligible) break
+        // 0.1.74：另一种「这一轮等于什么都没做」的形态 —— 模型把要执行的程序写进了正文
+        // （判据见 protocol.ts 的 looksLikeUnexecutedToolProgram，现场见其注释）。
+        // 它与续写**互斥**：续写是"话没说完"，这个是"话说完了、但该发的动作没发出去"，
+        // 两者要发的指令完全不同，所以走两条分支。
+        // 只给一次机会（toolCallRetried）：纠正不成就正常收尾，不把请求密度打上去。
+        const unexecutedProgram =
+          !eligible &&
+          allowsAutoContinue(options?.purpose) &&
+          roundError === undefined &&
+          deps.config.autoContinue !== false &&
+          rounds < maxRounds &&
+          toolCallCount === 0 &&
+          !toolCallRetried &&
+          !options?.signal?.aborted &&
+          partial.length > 0 &&
+          looksLikeUnexecutedToolProgram(partial)
+        if (!eligible && !unexecutedProgram) break
         rounds += 1
-        logger?.info?.(`deepseek-web: 回答疑似在句中被截，自动续写（第 ${rounds}/${maxRounds} 轮）……`)
-        // 续写 prompt = 原对话 + 已输出的半截回答（作为 assistant 消息）+ 继续指令
+        if (unexecutedProgram) toolCallRetried = true
+        logger?.info?.(
+          unexecutedProgram
+            ? `deepseek-web: 本轮把工具程序写进了正文（零工具调用），已要求它改发工具调用（第 ${rounds}/${maxRounds} 轮）……`
+            : `deepseek-web: 回答疑似在句中被截，自动续写（第 ${rounds}/${maxRounds} 轮）……`,
+        )
+        // 续写/纠正 prompt = 原对话 + 已输出的那一轮（作为 assistant 消息）+ 指令
         promptParts = serializePromptParts({
           system: options?.system,
           messages: [
             ...(options?.messages ?? []),
             { role: 'assistant', content: [{ type: 'text', text: partial }] },
-            { role: 'user', content: [{ type: 'text', text: CONTINUE_INSTRUCTION }] },
+            {
+              role: 'user',
+              content: [{ type: 'text', text: unexecutedProgram ? TOOL_CALL_RETRY_INSTRUCTION : CONTINUE_INSTRUCTION }],
+            },
           ],
           tools: (options?.tools ?? []) as ToolSchemaLike[],
           maxChars: deps.config.maxPromptChars ?? 1_500_000,

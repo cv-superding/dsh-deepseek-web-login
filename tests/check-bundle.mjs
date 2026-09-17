@@ -512,6 +512,19 @@ const checks = {
     !/dsw-btn dsw-preset",\s*"重新登录"/.test(client),
   'client 重建签名必须覆盖 groups 与 sections（否则新建组不刷新）':
     /JSON\.stringify\(\{\s*activeId: data\.activeId \?\? null,\s*accounts,\s*groups,\s*sections\s*\}\)/.test(client),
+  // ── 0.1.74：模型把工具程序写进正文 ⇒ 追加一轮纠正 ────────────────────────
+  // 注：这三条断的是「接线」，不是文案。判据函数本身由 tests/check-unexecuted-program.mjs
+  // 从正反两侧钉住（含样本），这里只保证它**真的被接进了决定"要不要再发一轮"的地方**。
+  'host 零工具调用且正文是未执行的工具程序 → 追加一轮纠正请求（0.1.74）':
+    /function looksLikeUnexecutedToolProgram\(/.test(host) &&
+    /looksLikeUnexecutedToolProgram\(partial\)/.test(host) &&
+    // 旧形态（直接 break）必须已经被换成"续写 or 纠正"的联合判断
+    /if \(!eligible && !unexecutedProgram\) break/.test(host),
+  'host 这种纠正只给一次机会（置真后再判定就不成立）':
+    /toolCallRetried = true/.test(host) && /!toolCallRetried/.test(host),
+  'host 纠正轮发的是纠正指令、不是续写指令（两分支互斥）':
+    host.includes('写在正文里的代码不会被执行') &&
+    /TOOL_CALL_RETRY_INSTRUCTION : CONTINUE_INSTRUCTION/.test(host),
 }
 
 let failed = 0

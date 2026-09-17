@@ -147,7 +147,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | `maxPromptChars` | `1500000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns) |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
-| `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer). The tail character decides: `，` `、` `；` `：` (and their ASCII forms) mean "clearly unfinished" and trigger a continuation; sentence-ending punctuation (`。` `！` `？` `）` …) counts as complete — including `…`, since an ellipsis may be a deliberate ending |
+| `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer). The tail character decides: `，` `、` `；` `：` (and their ASCII forms) mean "clearly unfinished" and trigger a continuation; sentence-ending punctuation (`。` `！` `？` `）` …) counts as complete — including `…`, since an ellipsis may be a deliberate ending. It also gates the corrective round used when the model writes a tool program into the visible text instead of emitting a tool call |
 | `maxContinuations` | `2` | Max auto-continuation rounds (each round is a new web request, so it spends more of the free quota) |
 | `minRequestIntervalMs` | **`2000`** | Lower bound of the gap between two web calls, measured from when the previous one **finished** |
 | `maxRequestIntervalMs` | **`4000`** | Upper bound; the actual wait is picked **randomly** inside the range (equal bounds = fixed interval) |

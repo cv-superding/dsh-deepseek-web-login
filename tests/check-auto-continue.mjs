@@ -578,6 +578,77 @@ await test('结尾是「…」→ 视为正常收尾（刻意取舍：省略号�
   assert.equal(calls.length, 1, '省略号收尾不续写（详见 COMPLETE_TAIL 的取舍注释）')
 })
 
+// ── 0.1.74：模型把「要执行的程序」写进了正文，而不是作为工具调用发出 ──────────
+// 现场（2026-09-17 11:00，`--F-Code-DSH-Code-gongji--` 会话）：第三方 preset（染神）的
+// tool-bootstrap.mjs 注入了一条 PTC 说明（"所有动作必须通过 run_code 写 TypeScript 程序"），
+// 模型于是把 run_code 的 code 参数**原样贴进正文** —— 三轮里一次工具调用都没发出，
+// agent loop 判定回合结束，用户看到的是"它停下来了"；模型自己在 reasoning 里也承认了。
+// 修法：识别这种形态后追加一轮**纠正**请求（与"续写"互斥，且只给一次机会）。
+// ⚠️ 样本照抄现场，别凭记忆重写 —— 长度与形态都是判据的一部分。
+const PTC_PROGRAM = [
+  '我先把现场摸清：目标站是否还活着、返回什么、本地有没有样本和逆向工具链。',
+  '',
+  '```ts',
+  'const out = [];',
+  'const run = async (label, command, workdir) => {',
+  '  try {',
+  '    const r = await tools.bash({ command, workdir });',
+  '    out.push(r.text.slice(0, 4000));',
+  '  } catch (e) {',
+  '    out.push(String(e && e.message));',
+  '  }',
+  '};',
+  '',
+  "await run('cwd + files', 'pwd; ls -la');",
+  "await run('node/python', 'node -v; python -V; which curl curl.exe 2>/dev/null');",
+  '',
+  'console.log(out.join("\\n"));',
+  '```',
+].join('\n')
+
+await test('正文里是未执行的工具程序 ⇒ 追加一轮纠正请求（0.1.74）', async () => {
+  assert.ok(PTC_PROGRAM.includes('tools.bash('), '自证：样本必须含工具 API 调用形态')
+  assert.ok(PTC_PROGRAM.includes('```ts'), '自证：样本必须真的带围栏')
+  const { calls, blocks } = await run({}, [fakeStream([PTC_PROGRAM]), fakeStream(['好，现在发。'])])
+  assert.equal(calls.length, 2, '零工具调用 + 正文含程序 ⇒ 应该再发一次')
+  assert.ok(calls[1].prompt.includes('写在正文里的代码不会被执行'), '纠正指令必须进 prompt')
+  assert.ok(
+    !calls[1].prompt.includes('无缝接着往下写'),
+    '走的应该是纠正分支、不是续写分支（两者互斥）',
+  )
+  assert.ok(calls[1].prompt.includes('我先把现场摸清'), '上一轮的输出要作为 assistant 消息回放给它')
+  assert.ok(blocks.join('').startsWith('我先把现场摸清'), '已上屏的内容不能因为纠正而丢失')
+})
+
+await test('这种纠正只给一次机会（第二次仍写程序时不再追加请求）', async () => {
+  const { calls } = await run({}, [fakeStream([PTC_PROGRAM]), fakeStream([PTC_PROGRAM])])
+  assert.equal(calls.length, 2, '纠正过一轮就收手，别把请求密度打上去')
+})
+
+await test('防误伤：普通正文不触发纠正', async () => {
+  const { calls } = await run({}, [fakeStream(['这个是正常的回答，里面没有任何要执行的程序。'])])
+  assert.equal(calls.length, 1, '普通回答不该多发一次请求')
+})
+
+await test('防误伤：与工具 API 无关的普通代码块不触发纠正', async () => {
+  const plain = ['看下面的例子：', '', '```js', 'const a = 1;', 'console.log(a);', '```'].join('\n')
+  const { calls } = await run({}, [fakeStream([plain])])
+  assert.equal(calls.length, 1, '单纯贴一段示例代码不是"程序没发出去"')
+})
+
+await test('防误伤：本轮已拿到工具调用 → 正文里再有同类代码块也不纠正', async () => {
+  const mixed = async function* () {
+    yield { kind: 'text', text: PTC_PROGRAM + '\n' }
+    yield {
+      kind: 'text',
+      text: '{"tool_calls":[{"name":"run_code","arguments":{"code":"return 1","description":"x"}}]}',
+    }
+    yield { kind: 'finish', reason: 'stop' }
+  }
+  const { calls } = await run({}, [mixed])
+  assert.equal(calls.length, 1, '有工具调用的轮次是健康形态，不该再纠正')
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1
