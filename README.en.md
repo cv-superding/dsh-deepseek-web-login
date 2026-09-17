@@ -54,6 +54,44 @@ echo '{"mode":"probe"}' > "$HOME/.dsh/web-login/probe-request.json"
 Use `"mode":"stream"` instead to also verify DeepSeek's SSE end-to-end (**consumes a little quota**).
 The file is renamed to `probe-request.json.done-<timestamp>` once consumed, so it runs only once.
 
+## How it works (and why it is not a "reverse proxy")
+
+The two questions we get most: **does it drive the DOM, or intercept the page's requests? Is it a reverse
+proxy?** Neither. It builds the requests itself and sends them straight to the web app's private endpoints.
+The accurate label is an **unofficial client for the web app's private API**.
+
+| Stage | What happens | How |
+| --- | --- | --- |
+| **① Login capture** (once) | Opens a browser window on an **isolated profile** for you to sign in, then reads one copy of the headers the page itself sends: `Authorization: Bearer`, domain cookies, the anti-bot headers `x-hif-dliq` / `x-hif-leim`, and a set of `x-client-*` | Electron `webRequest.onBeforeSendHeaders` |
+| **② Request building** (every call) | Assembles `POST /api/v0/chat/completion` itself; solves the PoW itself: asks `create_pow_challenge`, computes the answer with the SHA3 WASM, sends it as `x-ds-pow-response` | the plugin's own HTTP client |
+| **③ Sending** | Leaves through the **Chromium network stack** by default (Electron `net.fetch`), so TLS / HTTP2 fingerprints match a real browser; can be switched back to Node | see "Transport" below |
+| **④ Parsing and bridging** | Decodes the `response/fragments` SSE frames itself and splits thinking from answer text; tool calls use a **prompt-based protocol** (the web app has no native function calling) | in-house parser |
+
+**Only step ① touches anything like "interception"** — and it is a read plus cleaning up our own fingerprints:
+the same callback strips the Electron branding (UA and UA-CH) from the headers, because otherwise the page
+flags the environment as suspicious. It never rewrites the page's own requests and never forwards anything,
+and it only applies during that one login. **Once you are signed in, the window can be closed and the plugin
+keeps working.**
+
+### Why it is not a "reverse proxy"
+
+A reverse proxy is an **intermediary**: the client believes it is talking to the origin server while the
+request is forwarded through another hop. There is no intermediary here — **the plugin is the client**,
+talking to DeepSeek as the web app does. No forwarding layer, and no extra local service to run.
+
+### How it differs from the two common alternatives
+
+| | DOM automation (e.g. cuckoo-code) | Request hooking (browser extension, e.g. deepseek-pp) | This plugin |
+| --- | --- | --- | --- |
+| **Who sends the request** | **The page** | **The page** | **The plugin itself** |
+| Where the session comes from | You sign in inside its window | Your everyday browser's session | Captured once, stored locally |
+| When the site is redesigned | Selectors break | Only depends on endpoint paths | Only depends on endpoints, never touches the DOM |
+| Browser must stay open | Yes | Yes | **No** |
+
+Both alternatives share one property: **the browser sends the requests**. This plugin is the sender instead.
+The trade-off is that endpoint changes require updates; what you get is independence from the DOM and
+unattended background operation.
+
 ## Screenshots
 
 The settings panel is split into **6 tabs** (one page at a time): **Account** (login status /
