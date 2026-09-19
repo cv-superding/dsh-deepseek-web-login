@@ -183,6 +183,7 @@ Context (verified field by field on 2026-09-11 via `GET /api/v0/client/settings?
 | Field | Default | Meaning |
 |---|---|---|
 | `maxPromptChars` | `400000` | Prompt character budget (excess is middle-truncated, keeping the system prompt, the tool protocol and the most recent turns). ⚠️ **Raising it clearly increases the risk of being rate-limited**; range `[120000, 1500000]`, and the default is deliberately **not** at the ceiling |
+| `maxRefImages` | `24` | How many images one request may carry (`ref_file_ids` length). The web endpoint caps that batch (measured: 40 pass, 52 rejected); going over rejects the **whole turn**, and then **every later turn in that conversation fails** because the images stay in the history. So only the most recent N are sent; skipped ones are marked `[earlier image omitted]` in the prompt. `0` = unlimited (**not recommended**) |
 | `idleTimeoutMs` | `120000` | SSE idle timeout |
 | `deleteWebSessions` | `true` | Delete the temporary web chat session after each call |
 | `autoContinue` | `true` | Auto-continue when an answer is cut mid-sentence (seamlessly appended to the same answer). The tail character decides: `，` `、` `；` `：` (and their ASCII forms) mean "clearly unfinished" and trigger a continuation; sentence-ending punctuation (`。` `！` `？` `）` …) counts as complete — including `…`, since an ellipsis may be a deliberate ending. It also gates the corrective round used when the model writes a tool program into the visible text instead of emitting a tool call |

@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 import { webLoginDir } from './paths.ts'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
-import { createRequestGate, DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
+import { createRequestGate, DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MAX_REF_IMAGES, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
 import {
   scheduleDeleteSession,
@@ -274,6 +274,16 @@ function isContextTooLong(message: string): boolean {
 export interface AdapterConfig {
   /** prompt 字符上限（超出走中段截断）。服务端硬上限是 2621440 字符，默认留 ~43% 余量。 */
   maxPromptChars?: number
+  /**
+   * 一次请求最多带多少张图片（`ref_file_ids` 的长度上限）。
+   *
+   * 为什么要加（0.1.77，群友实测）：图片是**请求级**的，网页端对一批引用的数量有上限 ——
+   * 实测最后一次成功 40 张、第一次失败 52 张（真值落在 (40, 52]）。超长会话里不同图片数会一路涨
+   * （内容寻址去重对"重新截图/重新渲染"无效），越过之后 `biz_code 10 / too many ref file`
+   * 会让**该会话此后每一轮都失败**。所以按时间只带最近的 N 张。
+   * `0` ＝ 不限制（逃生舱，但等于把这个故障放回来，别设）。
+   */
+  maxRefImages?: number
   /** SSE 空闲超时（毫秒）。 */
   idleTimeoutMs?: number
   /** 是否在调用结束后删除网页端会话（默认 true）。 */
@@ -614,12 +624,12 @@ export function createAdapter(deps: AdapterDeps) {
     auth: WebAuth,
     messages: readonly any[] | undefined,
     signal?: AbortSignal,
-  ): Promise<{ ids: string[]; notice?: string }> {
+  ): Promise<{ ids: string[]; keptKeys: Set<string>; notice?: string }> {
     signal?.throwIfAborted()
     uploadCache.useScope(auth.token)
     const scope = uploadCache.currentScope()
     const refs = collectImageRefs(messages)
-    if (refs.length === 0) return { ids: [] }
+    if (refs.length === 0) return { ids: [], keptKeys: new Set() }
     // 去重（0.1.66）：同一张图可能在同一份历史里出现多次 —— 用户消息里一次、
     // `read_image` 的工具结果里又一次（工具结果内嵌图片本体），甚至模型对同一个文件
     // 连调两次 read_image。实测本机会话 `install-plugin/session-c1fb8208-*` 里就有
@@ -640,15 +650,40 @@ export function createAdapter(deps: AdapterDeps) {
       seen.add(key)
       unique.push(ref)
     }
-    if (unique.length === 0) return { ids: [] }
+    if (unique.length === 0) return { ids: [], keptKeys: new Set() }
     if (!deps.readImage) {
       logger?.warn?.('deepseek-web: 收到图片但附件服务不可用（ctx.attachments），图片被忽略')
-      return { ids: [], notice: imageNotice(unique.length, '宿主没有提供附件读取能力（ctx.attachments）') }
+      return {
+        ids: [],
+        keptKeys: new Set(),
+        notice: imageNotice(unique.length, '宿主没有提供附件读取能力（ctx.attachments）'),
+      }
+    }
+    // ── 0.1.77：图片数量阀门 ──────────────────────────────────────────────
+    // 图片是**请求级**的（一次请求用一个 `ref_file_ids` 带一批），而网页端对这一批有数量上限。
+    // 群友实测报告（2026-09-19）：最后一次成功是 40 张、第一次失败是 52 张 ⇒ 真值在 (40, 52]。
+    // 超长会话里这个数字会一路涨，且**去重救不了**：`attachmentId` 是内容寻址的，
+    // 重新截图 / 重新渲染的预览图每次内容都变 ⇒ 新 id ⇒ 历史里只增不减。
+    // 越过上限后 `biz_code 10 / too many ref file` 会让**该会话此后每一轮都失败** ——
+    // 图留在历史里，每轮重发都超标，用户只能丢掉整个会话。所以按时间取最近的 N 张。
+    //
+    // ⚠️ 标记必须一起收敛（见 protocol.ts 的 classifyBlockImages）：只截 id 不截标记，
+    // 模型会以为它收到了那些图，转而对着没送出去的图瞎猜。
+    const maxRefImages = deps.config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES
+    const overLimit = maxRefImages > 0 && unique.length > maxRefImages
+    const kept = overLimit ? unique.slice(-maxRefImages) : unique
+    const keptKeys = new Set(kept.map((ref) => String(ref?.attachmentId ?? '')).filter(Boolean))
+    const trimNotice = overLimit ? imageTrimNotice(unique.length - kept.length, kept.length) : undefined
+    if (overLimit) {
+      logger?.info?.(
+        `deepseek-web: 本请求的图片共 ${unique.length} 张，超过上限 ${maxRefImages} ⇒ 只发最近的 ` +
+          `${kept.length} 张（较早的 ${unique.length - kept.length} 张本轮略过）`,
+      )
     }
     uploadCache.prune()
     const ids: string[] = []
     const failures: string[] = []
-    for (const ref of unique) {
+    for (const ref of kept) {
       signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
       const cached = uploadCache.get(key)
@@ -680,7 +715,10 @@ export function createAdapter(deps: AdapterDeps) {
       }
     }
     // 图丢了必须让**用户**看见，不能只写日志（见 imageNotice 的说明）
-    return failures.length > 0 ? { ids, notice: imageNotice(failures.length, failures[0]) } : { ids }
+    const notices: string[] = []
+    if (trimNotice) notices.push(trimNotice)
+    if (failures.length > 0) notices.push(imageNotice(failures.length, failures[0]))
+    return { ids, keptKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
   }
 
   /**
@@ -698,6 +736,24 @@ export function createAdapter(deps: AdapterDeps) {
     // 失败原因可能很长（授权失败那条带整段引导语），截断后再放进正文
     const brief = reason.length > 120 ? `${reason.slice(0, 120)}…` : reason
     return `\n⚠️ [deepseek-web] 有 ${count} 张图片没能传给模型（${brief}），本轮回答只基于文字内容。\n`
+  }
+
+  /**
+   * 「本轮只带了最近 N 张图」的告知语。
+   *
+   * ⚠️ 措辞刻意**不带警告符号、也不用「没能」** —— 这是一次**正常的长度控制**，不是失败。
+   * 用报错的口吻会让人以为出了问题，而在弄清原因之前，他很可能就把一个本可以继续用的会话丢掉了
+   * （这正是 code 10 最恶劣的地方：会话看起来「坏了」，用户唯一出路是丢掉全部上下文）。
+   * 所以这句里明确写了「不是错误」。
+   *
+   * 与上面那条的分工：那条讲「图发失败」（要警惕），这条讲「图按策略没发」（正常）。
+   */
+  function imageTrimNotice(dropped: number, kept: number): string {
+    return (
+      `\n[deepseek-web] 本轮只带了最近的 ${kept} 张图片，更早的 ${dropped} 张没有随请求发送。` +
+      '网页端对一次请求能引用的图片数量有上限（实测 40~52 之间），超了整轮都会被拒，' +
+      '所以按时间留最近的几张 —— 这是正常的长度控制，不是错误。\n'
+    )
   }
 
   /**
@@ -767,6 +823,10 @@ export function createAdapter(deps: AdapterDeps) {
       messages: options?.messages ?? [],
       tools: (options?.tools ?? []) as ToolSchemaLike[],
       maxChars: deps.config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
+      // 只对**首轮**传：它才是真正带 ref_file_ids 的那一次（续写轮 refFileIds 传空）。
+      // 传了之后，被长度控制略过的图会写成 `[earlier image omitted]` 而不是 `[image attached]`
+      // —— 标记与实发必须一致，否则模型会对着没送出去的图瞎猜。
+      keptImageKeys: uploaded.keptKeys,
     })
     const prompt = promptParts.full
 

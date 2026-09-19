@@ -22,6 +22,8 @@ import {
   DEFAULT_LONG_RUN_THRESHOLD,
   MAX_PROMPT_CHARS_BOUNDS,
   DEFAULT_MAX_PROMPT_CHARS,
+  MAX_REF_IMAGES_BOUNDS,
+  DEFAULT_MAX_REF_IMAGES,
   clampMaxPromptChars,
   INTERVAL_PRESETS,
   MAX_INTERVAL_MS,
@@ -301,6 +303,7 @@ export function apply(ctx: any, config: Config = {}): void {
     // 长任务保护：连续 N 次请求后强制长休一次（0 = 关闭）。
     longRunThreshold: savedGate?.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD,
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
+    maxRefImages: savedGate?.maxRefImages ?? config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES,
     longRunBreakMs: savedGate?.longRunBreakMs,
     // ⚠️ 会话清理这几个字段必须**一起传**（2026-09-14 修）：设置页保存时写的是
     // `gate.settings()` 的返回值 —— 没存进闸门的字段会被**静默抹掉**，
@@ -347,6 +350,7 @@ export function apply(ctx: any, config: Config = {}): void {
 
   const adapterConfig: AdapterConfig = {
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
+    maxRefImages: savedGate?.maxRefImages ?? config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
     // 会话复用：默认 20 轮共用一个网页端会话。0 = 关闭（回到每请求一个会话）
@@ -564,6 +568,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 defaultMaxIntervalMs: DEFAULT_MAX_REQUEST_INTERVAL_MS,
                 maxPromptCharsBounds: MAX_PROMPT_CHARS_BOUNDS,
                 maxPromptCharsDefault: DEFAULT_MAX_PROMPT_CHARS,
+                maxRefImagesBounds: MAX_REF_IMAGES_BOUNDS,
+                maxRefImagesDefault: DEFAULT_MAX_REF_IMAGES,
                 cleanup: sessionCleaner.policy(),
                 // 界面的滑块边界/默认值由后端给 —— 免得两边各写一套数字、改了一边忘另一边
                 cleanupBounds: {

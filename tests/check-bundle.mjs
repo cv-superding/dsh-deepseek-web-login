@@ -383,8 +383,12 @@ const checks = {
   'host 图片引用去重 + 失败回传 + 上传可注入（0.1.66）':
     // 去重必须发生在遍历 refs 的循环里（而不是别处的同名字段）
     /for \(const ref of refs\) \{[\s\S]{0,140}?seen\.has\(key\)\) continue;[\s\S]{0,80}?unique\.push\(ref\)/.test(host) &&
-    // 上传失败要随 ids 一起回传原因（否则调用方无从告知）
-    /notice:\s*imageNotice\(failures\.length,\s*failures\[0\]\)/.test(host) &&
+    // 上传失败要随结果一起回传原因（否则调用方无从告知）
+    // 0.1.77：改成先收集进 notices（可能要同时带上「截断了 N 张」那条）再一次性回传，
+    // 所以别断 `notice: imageNotice(...)` 那个旧形态 —— 按意图断两件事：
+    // 失败原因确实进了 notices，且 notices 真的被回传。
+    /notices\.push\(imageNotice\(failures\.length,\s*failures\[0\]\)\)/.test(host) &&
+    /notice:\s*notices\.join\(/.test(host) &&
     // 注入点：缺省才走真实上传（生产调用点必须真的读这个 dep）
     /deps\.uploadImage\s*\?\?\s*uploadImageFile/.test(host),
 
@@ -565,6 +569,20 @@ const checks = {
     /MAX_PROMPT_CHARS_BOUNDS\s*=\s*\{[\s\S]{0,80}?max:\s*(?:15e5|1500000|1_500_000)/.test(host) &&
     // 负向：默认值不能再是那个顶格的 150 万（这正是本版要改掉的形态）
     !/DEFAULT_MAX_PROMPT_CHARS\s*=\s*(?:15e5|1500000|1_500_000)\s*;/.test(host),
+  // ── 0.1.77：一次请求的图片数量上限（群友实测 code 10 / too many ref file）────
+  // 注：`DEFAULT_MAX_REF_IMAGES` 会被打包器**内联**成 24（产物里 0 命中），所以别断常量名。
+  'host 图片上限：按时间取最近的 N 张（切片在、bounds 在）':
+    /MAX_REF_IMAGES_BOUNDS\s*=\s*\{[\s\S]{0,60}?max:\s*100/.test(host) &&
+    /unique\.slice\(-maxRefImages\)/.test(host) &&
+    /maxRefImages \?\? (?:DEFAULT_MAX_REF_IMAGES|24)/.test(host),
+  'host 被略过的图标记同步收敛（不能一律写 [image attached]）':
+    /function blockImageMarks\(/.test(host) &&
+    /\[earlier image omitted\]/.test(host) &&
+    /keptImageKeys/.test(host),
+  'host 截断提示说的是「不是错误」（按用户要求，不是报警口吻）':
+    /imageTrimNotice/.test(host) && host.includes('不是错误'),
+  'client 有「图片上限」滑块（含 0 = 不限制 的说明）':
+    client.includes('图片上限') && client.includes('maxRefImages') && client.includes('不限制'),
 }
 
 let failed = 0

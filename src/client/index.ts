@@ -1519,7 +1519,7 @@ function Panel(): any {
     const paintPromptCap = (): void => {
       const chars = Number(promptRange.value)
       promptValue.textContent = fmtChars(chars)
-      const level = chars >= 1_200_000 ? '偏高' : chars >= 600_000 ? '中等' : '省 token'
+      const level = chars >= 1_200_000 ? '偏高' : chars >= 600_000 ? '中等' : '保守'
       promptHint.textContent =
         `每次请求最多发送 ${fmtChars(chars)}（${level}）。` +
         '网页端是无状态的，每一轮都会把整段对话历史重新发一遍：' +
@@ -1539,6 +1539,38 @@ function Panel(): any {
     promptRange.addEventListener('change', () => {
       paintPromptCap()
       void saveGate({ maxPromptChars: Number(promptRange.value) })
+    })
+
+    // ── 图片数量上限（另一个请求级阀门）──────────────────────────
+    // 为什么需要：图片是**请求级**的（一次请求用一个 ref_file_ids 带一批），网页端对这一批
+    // 有数量上限 —— 群友实测 40 张通过 / 52 张被拒。超了会以 biz_code 10 拒收**整轮**，
+    // 而图还留在历史里 ⇒ **该会话此后每一轮都失败**，用户只能丢掉全部上下文。
+    // 所以按时间只带最近的 N 张，更早的略过。
+    const imgRow = el('div', 'dsw-gate-row')
+    imgRow.append(el('span', 'dsw-gate-label', '图片上限'))
+    const imgRange = el('input', 'dsw-range') as HTMLInputElement
+    imgRange.type = 'range'
+    imgRange.setAttribute('aria-label', '单次请求的图片数量上限')
+    imgRange.title = '一次请求最多带多少张历史图片（0 = 不限制）'
+    const imgValue = el('span', 'dsw-gate-value', '—')
+    imgRow.append(imgRange, imgValue)
+    gateCard.append(imgRow)
+    const imgHint = el('p', 'dsw-hint', '')
+    gateCard.append(imgHint)
+
+    const paintImageCap = (): void => {
+      const count = Number(imgRange.value)
+      imgValue.textContent = count === 0 ? '不限制' : `${count} 张`
+      imgHint.textContent =
+        count === 0
+          ? '不限制（不推荐）：历史里不同图片数超过 40 张左右后，网页端会以 code 10 拒绝整轮，且该会话此后每轮都失败。'
+          : `一次请求最多带最近的 ${count} 张图片，更早的在本次请求里略过 —— 这是正常的长度控制，不是错误。` +
+            '网页端能引用的图片数上限实测在 40~52 之间，默认值留了足够余量。'
+    }
+    imgRange.addEventListener('input', paintImageCap)
+    imgRange.addEventListener('change', () => {
+      paintImageCap()
+      void saveGate({ maxRefImages: Number(imgRange.value) })
     })
 
     const cleanupRow = el('div', 'dsw-gate-row')
@@ -2125,6 +2157,13 @@ function Panel(): any {
       promptRange.step = '20000'
       promptRange.value = String(g.maxPromptChars ?? g.maxPromptCharsDefault ?? capBounds.max)
       paintPromptCap()
+
+      const imgBounds = g.maxRefImagesBounds ?? { min: 0, max: 100 }
+      imgRange.min = String(imgBounds.min)
+      imgRange.max = String(imgBounds.max)
+      imgRange.step = '1'
+      imgRange.value = String(g.maxRefImages ?? g.maxRefImagesDefault ?? 24)
+      paintImageCap()
 
       const mode = g.cleanup?.mode ?? 'deferred'
       for (const key of Object.keys(cleanupBtns)) {

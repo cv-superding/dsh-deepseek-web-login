@@ -199,14 +199,37 @@ function flattenText(blocks: readonly any[] | undefined, out: string[] = []): st
   return out
 }
 
-function countImages(blocks: readonly any[] | undefined): number {
-  let count = 0
-  for (const block of blocks ?? []) {
-    if (!block || typeof block !== 'object') continue
-    if (block.type === 'image') count += 1
-    else if (block.type === 'tool-result' && Array.isArray(block.content)) count += countImages(block.content)
+/**
+ * 逐张产出图片占位标记，**按图片在消息里的实际顺序**。
+ *
+ * 为什么要分「带上」与「略过」（0.1.77，群友实测报告 `code 10 / too many ref file`）：
+ * 图片是**请求级**的（一次请求用 `ref_file_ids` 带一批），而网页端对这一批的数量有上限 ——
+ * 实测最后一次成功是 40 张、第一次失败是 52 张，真值落在 (40, 52]。超长会话里我们只发
+ * 最近的 N 张，更早的会被略过；此时若标记仍一律写 `[image attached]`，模型就会**以为它
+ * 收到了那些图**，然后对着没送出去的图瞎猜。所以分两种标记写。
+ *
+ * ⚠️ **必须按顺序逐个产出，不能写成「N 个 attached 再 M 个 omitted」** ——
+ * 那样标记的先后就不再对应图片的时间先后，模型会搞不清被省略的是哪几张。
+ *
+ * `kept` 为 undefined 时全部算「已发出」（＝ 0.1.77 之前的行为，续写轮与既有单测走这条路）；
+ * 图没有 `attachmentId` 时也算「已发出」—— 那种情况判断不了，保守起见别把真发出去的标成省略。
+ */
+function blockImageMarks(
+  blocks: readonly any[] | undefined,
+  kept: ReadonlySet<string> | undefined,
+): string[] {
+  const marks: string[] = []
+  const walk = (list: readonly any[] | undefined): void => {
+    for (const block of list ?? []) {
+      if (!block || typeof block !== 'object') continue
+      if (block.type === 'image') {
+        const key = String(block.attachment?.attachmentId ?? '')
+        marks.push(!kept || !key || kept.has(key) ? '[image attached]' : '[earlier image omitted]')
+      } else if (block.type === 'tool-result' && Array.isArray(block.content)) walk(block.content)
+    }
   }
-  return count
+  walk(blocks)
+  return marks
 }
 
 /** 按出现顺序收集消息里的图片附件引用（含 tool-result 内嵌图片）。 */
@@ -298,6 +321,16 @@ export interface SerializeOptions {
   messages: readonly any[]
   tools?: readonly ToolSchemaLike[]
   maxChars?: number
+  /**
+   * 本次请求**真正会带上**的图片 key 集合（各图的 `attachmentId`）。
+   *
+   * 给了它就按它区分「这张图在不在本次请求里」，占位标记相应写成
+   * `[image attached]`（带上了）或 `[earlier image omitted]`（被长度控制略过）。
+   *
+   * **不给**（undefined）＝ 一律按「带上了」处理 —— 那是 0.1.77 之前的行为。
+   * 续写轮与既有单测走的就是这条路，prompt 形态必须逐字节不变。
+   */
+  keptImageKeys?: ReadonlySet<string>
 }
 
 /**
@@ -363,11 +396,15 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
     // user 角色：可能是纯文本，也可能携带 tool-result 块
     const toolResults = blocks.filter((block) => block?.type === 'tool-result')
     const text = flattenText(blocks.filter((block) => block?.type !== 'tool-result')).join('')
-    const images = countImages(blocks)
+    const imageMarks = blockImageMarks(blocks, options.keptImageKeys)
+    const images = imageMarks.length
     if (text.trim() || (toolResults.length === 0 && images === 0) || images > 0) {
       // 图片本体由调用方上传后经 ref_file_ids 附在请求上；这里只放可定位的占位标记，
       // 让模型知道「图几」对应哪条消息（顺序与 uploadedImages 收集顺序一致）。
-      const imageNote = images > 0 ? `\n${Array.from({ length: images }, () => '[image attached]').join(' ')}` : ''
+      //
+      // 0.1.77：被长度控制略过的那些**不能也写 `[image attached]`** —— 逐张按实发情况写，
+      // 模型才知道哪些是真有的（见 blockImageMarks 的说明）。
+      const imageNote = imageMarks.length > 0 ? `\n${imageMarks.join(' ')}` : ''
       lines.push(`User: ${text}${imageNote}`)
     }
     for (const result of toolResults) {

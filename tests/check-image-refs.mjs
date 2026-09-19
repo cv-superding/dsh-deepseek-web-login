@@ -64,13 +64,13 @@ const toolResultWithImage = (img) => ({
  * `readImage: null` = 完全不注入（模拟宿主没提供 ctx.attachments）；
  * `uploadImage: null` 同理。返回被捕获的请求参数、上传/读取记录、以及正文。
  */
-async function run({ messages, uploadImage, readImage } = {}) {
+async function run({ messages, uploadImage, readImage, config } = {}) {
   const calls = []
   const uploads = []
   const reads = []
   const adapter = createAdapter({
     getAuth: () => AUTH,
-    config: { logger: undefined },
+    config: { logger: undefined, ...(config ?? {}) },
     ...(readImage === null
       ? {}
       : {
@@ -214,6 +214,83 @@ await test('宿主给的是路径 → 只取基名当文件名', async () => {
   const withPath = { attachmentId: 'sha256:' + 'f'.repeat(64), mediaType: 'image/png', name: 'C:\\tmp\\shot.png' }
   const { uploads } = await run({ messages: [userWithImage(withPath)] })
   assert.equal(uploads[0].name, 'shot.png', `实际 ${JSON.stringify(uploads[0].name)}`)
+})
+
+// ── 3) 图片数量上限（0.1.77，群友实测 code 10 / too many ref file）──────────
+// 图片是**请求级**的（一次请求用一个 ref_file_ids 带一批），网页端对这一批有上限：
+// 群友实测最后一次成功 40 张、第一次失败 52 张。超了会以 biz_code 10 拒收**整轮**，
+// 而图还留在历史里 ⇒ 该会话此后每一轮都失败，用户只能丢掉整个会话。
+// 所以按时间只带最近的 N 张；并且**标记必须跟着收敛**，否则模型会以为它收到了那些图。
+
+/** 造 n 张互不相同的图（id 递增，便于断言"保留的是最后几张"）。 */
+function manyImages(n) {
+  const content = []
+  for (let i = 0; i < n; i += 1) {
+    const attachmentId = `sha256:${String(i).padStart(4, '0')}${'x'.repeat(56)}`
+    content.push({ type: 'image', attachment: { attachmentId, mediaType: 'image/png', name: `shot-${i}.png` } })
+  }
+  return [{ role: 'user', content }]
+}
+
+const countOf = (text, marker) => text.split(marker).length - 1
+
+await test('超过上限 → 只带最近的 N 张（默认 24），保留的确实是最后几张', async () => {
+  const { calls, reads } = await run({ messages: manyImages(60) })
+  assert.equal(calls[0].refFileIds.length, 24, `实际发了 ${calls[0].refFileIds.length} 个 ref`)
+  assert.equal(reads.length, 24, '被略过的图不该去读附件（顺带省掉这部分读盘）')
+  assert.ok(String(reads[0]).startsWith('sha256:0036'), `第一张应是第 37 张，实际 ${reads[0].slice(0, 12)}`)
+  assert.ok(String(reads[23]).startsWith('sha256:0059'), `最后一张应是第 60 张，实际 ${reads[23].slice(0, 12)}`)
+})
+
+await test('标记与实发严格一致，且**按图片顺序**逐张给出', async () => {
+  const { calls } = await run({ messages: manyImages(60) })
+  // ⚠️ 标记写进的是 **prompt**（给模型看的图片定位信息），不是输出正文 —— 别拿 text 去数。
+  const prompt = String(calls[0].prompt ?? '')
+  const attached = countOf(prompt, '[image attached]')
+  const omitted = countOf(prompt, '[earlier image omitted]')
+  assert.equal(attached, calls[0].refFileIds.length, 'attached 必须等于实发张数')
+  assert.equal(omitted, 60 - calls[0].refFileIds.length, 'omitted 必须等于略过张数')
+  assert.equal(attached + omitted, 60, '自证：60 张全都有归属')
+  // 顺序：略过的 36 张排在前面、带上的 24 张排在后面（不能写成一堆 attached 再一堆 omitted）
+  const firstAttached = prompt.indexOf('[image attached]')
+  const lastOmitted = prompt.lastIndexOf('[earlier image omitted]')
+  assert.ok(lastOmitted < firstAttached, 'omitted 必须都在 attached 之前 —— 标记先后要对应图片的时间先后')
+})
+
+await test('截断时给的是「说明」而不是「报错」', async () => {
+  const { text } = await run({ messages: manyImages(60) })
+  assert.ok(text.includes('不是错误'), `要说清这是正常行为，实际尾部：${JSON.stringify(text.slice(-160))}`)
+  assert.ok(text.includes('36 张'), '要说清略过了几张')
+  assert.ok(!text.includes('⚠️ [deepseek-web] 本轮只带了'), '这条提示不该带警告符号')
+})
+
+await test('不超上限 → 行为与改动前一致（标记全是 attached、无提示）', async () => {
+  const { calls, text } = await run({ messages: manyImages(10) })
+  const prompt = String(calls[0].prompt ?? '')
+  assert.equal(calls[0].refFileIds.length, 10)
+  assert.equal(countOf(prompt, '[image attached]'), 10)
+  assert.equal(countOf(prompt, '[earlier image omitted]'), 0)
+  assert.ok(!text.includes('本轮只带了'), '没截断就不该出现这条提示')
+})
+
+await test('恰好等于上限 → 不触发截断（边界不能差一）', async () => {
+  const { calls, text } = await run({ messages: manyImages(24) })
+  const prompt = String(calls[0].prompt ?? '')
+  assert.equal(calls[0].refFileIds.length, 24)
+  assert.equal(countOf(prompt, '[earlier image omitted]'), 0)
+  assert.ok(!text.includes('本轮只带了'))
+})
+
+await test('maxRefImages 可配：给 5 就只发 5 张', async () => {
+  const { calls } = await run({ messages: manyImages(9), config: { maxRefImages: 5 } })
+  const prompt = String(calls[0].prompt ?? '')
+  assert.equal(calls[0].refFileIds.length, 5)
+  assert.equal(countOf(prompt, '[earlier image omitted]'), 4)
+})
+
+await test('maxRefImages: 0 → 不限制（逃生舱；但那正是"别设"的值）', async () => {
+  const { calls } = await run({ messages: manyImages(60), config: { maxRefImages: 0 } })
+  assert.equal(calls[0].refFileIds.length, 60, '0 表示不限制，全部发出去')
 })
 
 console.log(failures.length === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)

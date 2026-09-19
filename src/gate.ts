@@ -80,6 +80,25 @@ export function clampMaxPromptChars(value: number): number {
   return Math.max(MAX_PROMPT_CHARS_BOUNDS.min, Math.min(MAX_PROMPT_CHARS_BOUNDS.max, Math.round(value)))
 }
 
+/**
+ * 一次请求最多带多少张图片（请求体里 `ref_file_ids` 的长度）。
+ *
+ * 为什么默认 24（2026-09-19 群友实测报告）：网页端对这一批引用的数量有上限 ——
+ * 最后一次成功是 40 张、第一次失败是 52 张，真值落在 (40, 52]。越过之后
+ * `biz_code 10 / too many ref file` 会让**该会话此后每一轮都失败**（图还留在历史里，
+ * 每轮重发都超标），用户唯一出路是丢掉整个会话。24 给已知安全线留了 16 张余量。
+ *
+ * `0` ＝ 不限制 —— 留着这个取值只是给"确实需要"的人，但**别设**：那等于把 code 10 放回来。
+ */
+export const MAX_REF_IMAGES_BOUNDS = { min: 0, max: 100 } as const
+export const DEFAULT_MAX_REF_IMAGES = 24
+
+/** 规整图片数量上限：非数 → 默认；越界 → 夹到边界。 */
+export function clampMaxRefImages(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_REF_IMAGES
+  return Math.max(MAX_REF_IMAGES_BOUNDS.min, Math.min(MAX_REF_IMAGES_BOUNDS.max, Math.round(value)))
+}
+
 /** 距上次请求超过这么久就算"歇过了"，连续计数归零。 */
 const LONG_RUN_IDLE_RESET_MS = 120_000
 
@@ -163,6 +182,8 @@ export interface GateSettings {
    * 只是搭同一份设置文件（gate.json）与同一个设置页存储，真正的执行方是 adapter。
    */
   maxPromptChars?: number
+  /** 一次请求最多带多少张图片（`ref_file_ids` 的长度；0 = 不限制）。见 MAX_REF_IMAGES_BOUNDS。 */
+  maxRefImages?: number
 }
 
 /** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
@@ -215,6 +236,9 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     if (Number.isFinite(parsed?.maxPromptChars)) {
       out.maxPromptChars = clampMaxPromptChars(Number(parsed.maxPromptChars))
     }
+    if (Number.isFinite(parsed?.maxRefImages)) {
+      out.maxRefImages = clampMaxRefImages(Number(parsed.maxRefImages))
+    }
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
     return undefined
@@ -249,6 +273,8 @@ export interface RequestGateOptions {
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
   /** prompt 字符上限（本模块不执行，只是存下来以便落盘与回显）。 */
   maxPromptChars?: number
+  /** 一次请求最多带多少张图片（同上，本模块不执行，只是存下来以便落盘与回显）。 */
+  maxRefImages?: number
   /**
    * 会话清理策略（本模块不执行，同样只是存下来以便落盘与回显）。
    *
@@ -417,6 +443,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   /** 会话清理策略不在本模块实现，只借用设置文件存储（由宿主读取后交给 cleaner）。 */
   /** prompt 字符上限（同 cleanupMode：只是存着，执行在 adapter）。 */
   let maxPromptChars = clampMaxPromptChars(options.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS)
+  // 图片数量上限（同 maxPromptChars：只是存着，真正的执行在 adapter 的 uploadRequestImages）。
+  let maxRefImages = clampMaxRefImages(options.maxRefImages ?? DEFAULT_MAX_REF_IMAGES)
   let cleanupMode = options.sessionCleanup
   // 会话清理的三个区间（同样不参与节流逻辑）。存在这里是为了**能落盘**：
   // writeGateSettings 写的是 settings() 的返回值，不存就丢。
@@ -438,6 +466,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       longRunThreshold,
       ...(longRunBreakMs ? { longRunBreakMs } : {}),
       maxPromptChars,
+      maxRefImages,
     }
   }
 
@@ -447,6 +476,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (next.maxRequestIntervalMs !== undefined) maxIntervalMs = clampInterval(Number(next.maxRequestIntervalMs))
     if (next.sessionCleanup !== undefined) cleanupMode = next.sessionCleanup
     if (next.maxPromptChars !== undefined) maxPromptChars = clampMaxPromptChars(Number(next.maxPromptChars))
+    if (next.maxRefImages !== undefined) maxRefImages = clampMaxRefImages(Number(next.maxRefImages))
     // 三个区间：非法的输入直接当"没给"（不报错、也不覆盖已有的有效值）
     if (next.cleanupBatch !== undefined) {
       const value = normalizeCleanupRange(next.cleanupBatch, CLEANUP_BATCH_BOUNDS)
