@@ -583,6 +583,24 @@ const checks = {
     /imageTrimNotice/.test(host) && host.includes('不是错误'),
   'client 有「图片上限」滑块（含 0 = 不限制 的说明）':
     client.includes('图片上限') && client.includes('maxRefImages') && client.includes('不限制'),
+  // ── 0.1.78：图片引用被拒（code 9）的降级重试 ──────────────────────────────
+  // 这组守的是**接线**，不是纯逻辑（纯逻辑在 check-image-ref-reject.mjs）。
+  // 最容易悄悄坏掉的是三件事：包装层没被接上、两个降级标志被改名或丢掉、缓存被改成全清。
+  'host 把「请求侧无效应答」与「上传侧类型不支持」两个 code 9 分得开':
+    host.includes('isInvalidRefFileError') && /ref\s*file/i.test(host),
+  'host 的闸门外壳改走带降级的包装层（gatedStream 不再直接调 streamImpl）':
+    /yield\* streamWithImageFallback\(options\)/.test(host) && !/yield\* streamImpl\(options\)/.test(host),
+  'host 的两级降级标志都在（先重传 __retryImages，再禁图 __skipImages）':
+    host.includes('__retryImages') && host.includes('__skipImages'),
+  // ⚠️ 必须把断言锁进函数体：直接写 `/attempt < 2/` 会被 webapi 里那个**早就存在**的
+  // `for (let attempt = 0; attempt < 2; attempt++)` 蒙混过去 —— 反向验证时它就是这么假绿的
+  // （把上限改成 5，断言照样通过）。
+  'host 的重试有上限（不是无限重发 —— 请求密度同样要被风控看）':
+    /function canRetryImageReject\([^)]*\) \{\s*return [^;]{0,120}attempt < 2;/.test(host),
+  'host 只清被拒的那几条上传缓存（定点 invalidate，而非全清导致所有历史图重传）':
+    /invalidate\(lastImageKeys\)/.test(host),
+  'host 捕获时只留痕不拦截（captureWarning 记事实，不改账号记录的失败标记）':
+    host.includes('captureWarning') && host.includes('captureDefect'),
 }
 
 let failed = 0

@@ -15,7 +15,7 @@
  */
 import { pickCookieMeta, type CookieMeta } from './cookies.ts'
 import { createRequire } from 'node:module'
-import { clearAuth, maskIdentifier, readAuth, unwrapStoredToken, withVerifiedIdentity, type WebAuth } from './auth.ts'
+import { captureDefect, clearAuth, maskIdentifier, readAuth, unwrapStoredToken, withVerifiedIdentity, type WebAuth } from './auth.ts'
 import { commitCapturedAuth } from './account-add.ts'
 import { clearBrowserLoginProfile } from './browser-login.ts'
 import { DS_BASE, DEFAULT_WASM_URL, FALLBACK_UA, validateAuth } from './webapi.ts'
@@ -522,6 +522,10 @@ function tokenCandidates(buffer: CaptureBuffer): string[] {
 }
 
 function buildAuth(buffer: CaptureBuffer, token: string, unverified: boolean): WebAuth {
+  const extraHeaders = Object.keys(buffer.extraHeaders).length > 0 ? buffer.extraHeaders : undefined
+  // 0.1.78：捕获当场检查「信息偏少」并留痕。**只记录、不拦截** —— 见 captureDefect 的说明：
+  // 鉴权只用 token，缺 cookie 是合法的，拿它拦人会把手工粘 token 的正常路径一起误伤。
+  const defect = captureDefect({ token, cookie: buffer.cookie, extraHeaders })
   return {
     token,
     cookie: buffer.cookie,
@@ -530,9 +534,10 @@ function buildAuth(buffer: CaptureBuffer, token: string, unverified: boolean): W
     hifLeim: buffer.hifLeim,
     wasmUrl: buffer.wasmUrl || DEFAULT_WASM_URL,
     userAgent: buffer.userAgent || FALLBACK_UA,
-    ...(Object.keys(buffer.extraHeaders).length > 0 ? { extraHeaders: buffer.extraHeaders } : {}),
+    ...(extraHeaders ? { extraHeaders } : {}),
     capturedAt: new Date().toISOString(),
     ...(unverified ? { unverified: true } : {}),
+    ...(defect ? { captureWarning: defect } : {}),
     ...(Object.keys(buffer.user).length > 0 ? { user: buffer.user } : {}),
   }
 }

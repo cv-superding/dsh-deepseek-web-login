@@ -159,11 +159,42 @@ export class ImageUploadCache {
     return this.entries.size
   }
 
+  /**
+   * 定点删除指定的若干条（用于「这批 file_id 被服务端拒了」时的清理）。
+   *
+   * 为什么不做成全清（`reset()`）：一次请求可能只用到历史里的一小部分图，
+   * 全清会让下一次请求把**所有**历史图重新传一遍 —— 白白多几十次上传请求，
+   * 而上传本身也是要被风控看的。知道是哪几条被拒，就只清那几条。
+   * 返回真正删掉的条数（便于测试与日志）。
+   */
+  invalidate(keys: Iterable<string>): number {
+    let removed = 0
+    for (const key of keys) {
+      if (this.entries.delete(key)) removed += 1
+    }
+    return removed
+  }
+
   /** 清空（测试隔离用）。 */
   reset(): void {
     this.entries.clear()
     this.scope = ''
   }
+}
+
+/**
+ * 这次失败该不该走「重传 → 禁图」的降级重试。抽成纯函数是为了能直接测 ——
+ * 尤其 `yielded` 那一支：用假的流很难构造「内容真的上屏过、然后又出错」的场景
+ * （文本会被过滤器 hold 到轮末，而异常发生在轮末之前），只能这样钉住它。
+ *
+ * 三个条件缺一不可：
+ *  · 错误是**请求侧的图片引用被拒**（上传侧的 code 9 是另一回事，见 isInvalidRefFileError）
+ *  · 这次请求**一个字都还没吐给上层** —— generator 已 yield 的内容撤不回来，
+ *    重试只会让用户看到重复输出
+ *  · 还没用完两次机会
+ */
+export function canRetryImageReject(error: any, yielded: boolean, attempt: number): boolean {
+  return error?.code === 'INVALID_REF_FILE' && !yielded && attempt < 2
 }
 
 export const PROVIDER = 'deepseek-web'
@@ -616,6 +647,13 @@ export function createAdapter(deps: AdapterDeps) {
   const uploadCache = new ImageUploadCache()
 
   /**
+   * 上一次请求**实际引用**了哪几张图（attachmentId 集合）。
+   * 用途只有一个：请求被服务端以 `code 9 / invalid ref file id` 拒掉时，
+   * 知道该清掉缓存里哪几条，好让重试时重新上传（见 streamWithImageFallback）。
+   */
+  let lastImageKeys: Set<string> = new Set()
+
+  /**
    * 把请求里出现的图片全部上传到网页端并返回 file_id 列表。
    * 失败不致命：记日志后跳过该图（prompt 里仍有 [image attached] 标记，模型会知道有图但看不到）。
    * 但**取消**要照常传播 —— 用户点了停止就不该继续传图，也不该把它降级成"纯文本继续跑"。
@@ -757,6 +795,45 @@ export function createAdapter(deps: AdapterDeps) {
   }
 
   /**
+   * 图片引用被服务端拒绝时的降级重试（0.1.78）。
+   *
+   * `code 9 / invalid ref file id` 的恶劣之处是「**带上图就失败**」：图留在 DSH 的消息历史里，
+   * 之后每一轮都会重新收集、重新引用、再撞一次 —— 用户除了丢掉整个会话没有别的出路。
+   * 所以给它两级自救，每级各只做一次：
+   *   ① 丢掉那几条上传缓存 → 重新上传拿新 file_id → 重发
+   *   ② 仍被拒 → **不带任何图片**重发，至少让这一轮继续下去（正文里会告知）
+   *
+   * ⚠️ **只在一次都没吐出内容时才敢重试**：generator 一旦 yield 过，调用方已经收到那部分，
+   * 撤回不了（会变成重复输出）。好在服务端的引用校验发生在生成之前，命中这条错误时
+   * 一定还没有任何输出 —— `yielded` 守卫是第二道保险，不是判据本身。
+   */
+  async function* streamWithImageFallback(options: any): AsyncGenerator<any> {
+    let attempt = 0
+    let current = options
+    while (true) {
+      let yielded = false
+      const inner = streamImpl(current)
+      try {
+        while (true) {
+          const step = await inner.next()
+          if (step.done === true) return
+          yielded = true
+          yield step.value
+        }
+      } catch (error: any) {
+        if (!canRetryImageReject(error, yielded, attempt)) throw error
+        attempt += 1
+        current = attempt === 1 ? { ...options, __retryImages: true } : { ...options, __skipImages: true }
+        logger?.warn?.(
+          attempt === 1
+            ? 'deepseek-web: 图片引用被服务端拒绝（code 9）—— 丢掉那几张的上传缓存，重新上传后重试一次'
+            : 'deepseek-web: 重新上传后图片引用仍被拒（code 9）—— 本轮改为不带图片重发',
+        )
+      }
+    }
+  }
+
+  /**
    * streamImpl 的闸门外壳：拿到许可后才真正开始请求，流结束（含被中断/抛错）才释放。
    *
    * ⚠️ 许可在 generator 体**内部**获取 —— 只有真正开始迭代（第一次 next()）才占位，
@@ -783,7 +860,7 @@ export function createAdapter(deps: AdapterDeps) {
       } catch {}
     }
     try {
-      yield* streamImpl(options)
+      yield* streamWithImageFallback(options)
       // 跑完没抛错 = 这次调用成功。宿主会用这个信号清理"已经过期的受限标记"。
       report({ ok: true })
     } catch (error: any) {
@@ -811,9 +888,24 @@ export function createAdapter(deps: AdapterDeps) {
     const spec = resolveSpec(String(options?.model ?? ''))
     const { thinkingEnabled } = resolveThinking(options, spec)
 
+    // 0.1.78：上一轮的图片引用被服务端拒了 ⇒ 先把缓存里那几条丢掉，本轮重新上传。
+    // 缓存里的 file_id 可能因为凭证变化 / 服务端回收而失效，重传是最可能奏效的一步。
+    if (options?.__retryImages === true && lastImageKeys.size > 0) {
+      const removed = uploadCache.invalidate(lastImageKeys)
+      lastImageKeys = new Set()
+      logger?.warn?.(`deepseek-web: 已丢弃 ${removed} 条上传缓存（它们对应的 file_id 被服务端拒绝过）`)
+    }
+
     // 图片：读取附件 → 上传到网页端 → 用 file_id 随请求引用（网页端看图的实际机制）
     // notice：有图没能送出去时给用户的一句告知（下面会作为正文首段吐出去）
-    const uploaded = await uploadRequestImages(auth, options?.messages, options?.signal)
+    //
+    // `__skipImages`（降级重试的第二级）：连着两次都不被认，就**不带图**再发一次。
+    // 宁可这一轮没有图，也不能让会话卡在"每轮都失败"上 —— 那等于整个会话作废。
+    const uploaded =
+      options?.__skipImages === true
+        ? { ids: [], keptKeys: new Set<string>() }
+        : await uploadRequestImages(auth, options?.messages, options?.signal)
+    lastImageKeys = uploaded.keptKeys
     const refFileIds = uploaded.ids
 
     // 链式投喂需要 prompt 的**结构**（固定头 + 未截断的历史条目）才能算增量，

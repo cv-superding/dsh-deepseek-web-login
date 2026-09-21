@@ -63,6 +63,33 @@ export interface WebAuth {
    * 老记录 / 手动粘 token 的账号没有这个字段（界面会说明"未记录"）。
    */
   cookieMeta?: CookieMeta[]
+  /**
+   * 捕获时发现的「信息偏少」提示（可选；**不落进账号库**，只用于日志与诊断）。
+   *
+   * 存在的意义：把「这条凭证可能不完整」从"事后翻 JSON 才能发现"变成"捕获当场就留了记录"。
+   * ⚠️ **它不是错误，也不代表不可用** —— 实测鉴权只用 token（见上面 cookieMeta 的说明），
+   * 缺 cookie 本身是合法的。所以这里只记事实，**不做拦截、不标红、不改账号记录的标记**。
+   */
+  captureWarning?: string
+}
+
+/**
+ * 捕获到的凭证有没有「信息偏少」的迹象。返回 undefined = 没发现。
+ *
+ * 判据刻意保守：**cookie 与 extraHeaders 同时为空**才算 ——
+ * 不把"cookie 为空"单独当缺陷，因为鉴权只用 token（见 WebAuth.cookieMeta 的实测结论），
+ * 手工粘 token 的账号本来就没有 cookie。两者同时为空，才说明"这次捕获几乎什么都没抄到"。
+ *
+ * 2026-09-21 的现场：`acc_2df7cf2f` 正是 cookie 与 extraHeaders 双空，
+ * 且它 `capturedAt` 刷新后 19 秒就撞了 `code 9 / invalid ref file id`。
+ * ⚠️ 但这只是**时间相关**，不是已证实的因果 —— 所以这里只留痕，不据此阻断。
+ */
+export function captureDefect(auth: Pick<WebAuth, 'token' | 'cookie' | 'extraHeaders'>): string | undefined {
+  if (!String(auth.token ?? '').trim()) return undefined
+  const hasCookie = !!String(auth.cookie ?? '').trim()
+  const hasHeaders = !!auth.extraHeaders && Object.keys(auth.extraHeaders).length > 0
+  if (hasCookie || hasHeaders) return undefined
+  return '本次捕获只拿到 token（cookie 与请求头都为空）—— 若之后出现图片引用被拒（code 9）之类的异常，优先怀疑这份凭证'
 }
 
 /** 当前生效的登录凭证（没有选择账号 → undefined）。 */

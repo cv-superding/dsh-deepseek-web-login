@@ -252,6 +252,20 @@ function bizErrorCode(code: number): string {
   return 'PROVIDER_ERROR'
 }
 
+/**
+ * `code 9` 在本项目里有**两个不同含义**，只能靠 msg 区分 —— 别只看数字：
+ *  · 上传文件时：`unsupported file type`（文件名后缀不被支持）⇒ 换个名字重传即可（见 imageUploadName）
+ *  · 发请求时：`invalid ref file id`（引用了一批服务端不认的文件 id）⇒ 需要降级重试
+ *
+ * 把后者单独识别出来，是为了让适配器能自救。这条错误的特点很恶劣：**带上图就失败**，
+ * 而图留在历史里，之后每一轮重发都会再撞一次 ⇒ 用户除了丢掉整个会话没有别的出路。
+ * 实测触发（2026-09-21）：当前账号 `acc_2df7cf2f` 的凭证残缺（cookie 为空）时，
+ * `new-session` 触发全量重发历史图 ⇒ code 9；而同一操作在另外两个 cookie 完整的账号上正常。
+ */
+export function isInvalidRefFileError(biz: { code: number; msg?: string } | undefined): boolean {
+  return !!biz && biz.code === 9 && /ref\s*file/i.test(String(biz.msg ?? ''))
+}
+
 function bizErrorMessage(code: number, msg: string): string {
   if (code === 40003 || code === 40001) {
     return `DeepSeek 网页授权失败：${msg} —— 登录态已过期或无效，请到「设置 → DeepSeek 网页登录」重新登录`
@@ -2001,7 +2015,13 @@ async function openCompletion(
             : busy
               ? 'DeepSeek 网页端同一账号同时只能生成一条消息（另一个窗口/标签页正在用同一账号生成）。这一步会自动重试；若两个窗口都要用网页模型，建议其中一个换 provider 或换账号。'
               : bizErrorMessage(biz.code, biz.msg),
-          muted || busy ? 'RATE_LIMIT' : isInvalidSessionError(biz) ? 'TRANSPORT' : bizErrorCode(biz.code),
+          muted || busy
+            ? 'RATE_LIMIT'
+            : isInvalidSessionError(biz)
+              ? 'TRANSPORT'
+              : isInvalidRefFileError(biz)
+                ? 'INVALID_REF_FILE'
+                : bizErrorCode(biz.code),
           {
             status: resp.status,
             // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
