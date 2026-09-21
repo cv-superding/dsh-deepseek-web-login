@@ -218,5 +218,70 @@ await test('根本没有 token（不是捕获场景）→ 不判', () => {
   assert.equal(captureDefect({ token: '', cookie: '', extraHeaders: undefined }), undefined)
 })
 
+// ── 5) 截断提示：量词要说对，且不重复刷屏（0.1.79）──────────────────────
+// 现场：19 分钟里同一句提示上屏 52 次，用户反问"为啥每次都这么多提示"；
+// 而且它写"24 张图片"，用户读成"我发了 24 张"。这两件事都要钉住。
+
+const manyImages = (n) => ({
+  role: 'user',
+  content: [
+    { type: 'text', text: '一堆图' },
+    ...Array.from({ length: n }, (_, i) => ({
+      type: 'image',
+      attachment: { attachmentId: `sha256:bulk${i}`, mediaType: 'image/png' },
+    })),
+  ],
+})
+
+/**
+ * 用**同一个 adapter 实例**连续跑多组消息。
+ * 抑制重复靠的是实例内的闭包状态 —— 每组都新建实例就永远测不到它（第一版最容易漏的点）。
+ */
+async function runSets(sets) {
+  let n = 0
+  const adapter = createAdapter({
+    getAuth: () => AUTH,
+    config: { logger: undefined },
+    readImage: async () => ({ data: new Uint8Array([1, 2, 3]), mediaType: 'image/png' }),
+    uploadImage: async () => ({ fileId: `file-${(n += 1)}` }),
+    streamCompletion: () =>
+      (async function* () {
+        yield { kind: 'text', text: '收到。' }
+        yield { kind: 'finish', reason: 'stop' }
+      })(),
+  })
+  const outs = []
+  for (const messages of sets) {
+    const deltas = []
+    for await (const event of adapter.stream({ messages })) {
+      if (event.type === 'text-delta') deltas.push(event.text)
+    }
+    outs.push(deltas.join(''))
+  }
+  return outs
+}
+
+await test('截断提示改说「图片内容条目」，并点明不等于你贴的张数（0.1.79）', async () => {
+  const [first] = await runSets([[manyImages(26)]])
+  assert.ok(first.includes('份图片内容'), `"张"这个量词必须换掉，实际：${JSON.stringify(first.slice(0, 160))}`)
+  assert.ok(first.includes('不是你贴的张数'), '要说清"这是内容条目"，否则用户会以为是自己发的')
+})
+
+await test('同样规模的截断只上屏一次 —— 不再每轮刷屏（0.1.79）', async () => {
+  const outs = await runSets([[manyImages(26)], [manyImages(26)], [manyImages(26)]])
+  const hits = outs.filter((t) => t.includes('份图片内容')).length
+  assert.equal(hits, 1, `3 轮只该提示 1 次，实际 ${hits} 次（旧版实测 19 分钟刷了 52 次）`)
+})
+
+await test('规模变了要再提示一次（说明情况在恶化）', async () => {
+  const outs = await runSets([[manyImages(26)], [manyImages(30)]])
+  assert.equal(outs.filter((t) => t.includes('份图片内容')).length, 2, '数量变了值得再说一次')
+})
+
+await test('没超上限时不提示（自证：上面几条测的确实是截断路径）', async () => {
+  const [text] = await runSets([[manyImages(3)]])
+  assert.equal(text.includes('份图片内容'), false)
+})
+
 console.log(failures.length === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)
 process.exit(failures.length === 0 ? 0 : 1)

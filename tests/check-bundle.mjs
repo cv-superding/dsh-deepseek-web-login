@@ -601,6 +601,13 @@ const checks = {
     /invalidate\(lastImageKeys\)/.test(host),
   'host 捕获时只留痕不拦截（captureWarning 记事实，不改账号记录的失败标记）':
     host.includes('captureWarning') && host.includes('captureDefect'),
+
+  // ── 0.1.79：截断提示的量词与去重 ─────────────────────────────────────────
+  // 现场：19 分钟刷了 52 次，而且它写"24 张图片"，用户读成"我发了 24 张"。
+  'host 的截断提示换了量词（说"份图片内容"、点明不等于用户贴的张数，不再写"最近的 N 张图片"）':
+    host.includes('份图片内容') && host.includes('不是你贴的张数') && !host.includes('本轮只带了最近的'),
+  'host 的截断提示按规模去重（同样规模只上屏一次，不再每轮刷屏）':
+    host.includes('lastTrimSignature') && /trimSignature !== lastTrimSignature/.test(host),
 }
 
 let failed = 0

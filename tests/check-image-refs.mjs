@@ -260,7 +260,10 @@ await test('标记与实发严格一致，且**按图片顺序**逐张给出', a
 await test('截断时给的是「说明」而不是「报错」', async () => {
   const { text } = await run({ messages: manyImages(60) })
   assert.ok(text.includes('不是错误'), `要说清这是正常行为，实际尾部：${JSON.stringify(text.slice(-160))}`)
-  assert.ok(text.includes('36 张'), '要说清略过了几张')
+  // ⚠️ 0.1.79 把量词从「张」换成「份」（那是图片内容条目，不是用户贴的张数）。
+  // 这里按**意图**钉 —— 钉的是"说清了略过几条"，而不是某个具体量词，
+  // 否则下次再调措辞又会假红（这类假红已经出现过五次了）。
+  assert.ok(/更早的 36 (张|份)/.test(text), `要说清略过了几条，实际：${JSON.stringify(text.slice(-200))}`)
   assert.ok(!text.includes('⚠️ [deepseek-web] 本轮只带了'), '这条提示不该带警告符号')
 })
 
