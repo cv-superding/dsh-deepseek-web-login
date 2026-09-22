@@ -57,8 +57,9 @@ function rejectError() {
 /**
  * 跑一次适配器流。`script[i]` 描述第 i 次模型请求的行为：
  * 'ok' 正常 / 'reject' 直接抛引用被拒 / 'reject-after-text' 先吐一段正文再抛 / 'other' 抛别的错。
+ * `uploadScript[i]` 描述第 i 张图片上传的行为：'ok' / 'auth'（授权失效）/ 'server'（上游 5xx）。
  */
-async function run({ script, messages }) {
+async function run({ script, messages, uploadScript } = {}) {
   let n = 0
   const calls = []
   let uploadCount = 0
@@ -67,7 +68,18 @@ async function run({ script, messages }) {
     config: { logger: undefined },
     readImage: async () => ({ data: new Uint8Array([1, 2, 3]), mediaType: 'image/png' }),
     uploadImage: async () => {
+      const index = uploadCount
       uploadCount += 1
+      const step = uploadScript?.[index] ?? 'ok'
+      // 错误码必须跟真实路径一致（webapi.ts 用 httpErrorCode / bizErrorCode 生成）：
+      // 401 ⇒ 'AUTH'，5xx ⇒ 'SERVER'。短路只看 'AUTH'，所以这里钉准了才有意义。
+      if (step === 'auth') {
+        throw new AdapterLlmError(
+          'DeepSeek 图片上传失败 (HTTP 401): {"code":40003,"msg":"Authorization Failed (invalid token)"}',
+          'AUTH',
+        )
+      }
+      if (step === 'server') throw new AdapterLlmError('DeepSeek 图片上传失败 (HTTP 500): boom', 'SERVER')
       return { fileId: `file-${uploadCount}` }
     },
     streamCompletion: (_auth, params) => {
@@ -281,6 +293,49 @@ await test('规模变了要再提示一次（说明情况在恶化）', async ()
 await test('没超上限时不提示（自证：上面几条测的确实是截断路径）', async () => {
   const [text] = await runSets([[manyImages(3)]])
   assert.equal(text.includes('份图片内容'), false)
+})
+
+// ── 6) 授权失效时中止剩余上传（0.1.80）─────────────────────────────────
+// 现场（2026-09-21 22:50）：token 早已失效，14 张图却逐张重试 —— 每张都要先求一次 POW、
+// 再发一次上传，共 28 次注定失败的请求。浪费只是次要的：**这些无效请求同样暴露在风控下**。
+// 授权失效是全局的，第一张被拒后剩下的必然一样，所以停。
+
+await test('🔴 第 2 张上传被拒为授权失效 ⇒ 剩余的不再尝试，且如实告知还剩几张', async () => {
+  const { calls, uploads, text } = await run({
+    script: ['ok'],
+    messages: [manyImages(5)],
+    uploadScript: ['ok', 'auth', 'ok', 'ok', 'ok'],
+  })
+  assert.equal(uploads, 2, `只该尝试前两张，实际 ${uploads} 次（现场是 14 张全试一遍）`)
+  assert.ok(text.includes('没能传给模型'), `自证：失败告知仍要出现，实际 ${JSON.stringify(text.slice(-200))}`)
+  assert.ok(text.includes('剩余 3 张未再尝试'), '必须说清"剩下的根本没试" —— 否则用户以为只丢了一张')
+  assert.equal(calls.length, 1, '只中止上传，请求本身照发：凭证还能不能用由 completion 定论')
+})
+
+await test('只有 1 张图时被拒 ⇒ 不出现「剩余」字样（不该写"剩余 0 张"）', async () => {
+  const { uploads, text } = await run({ script: ['ok'], messages: [manyImages(1)], uploadScript: ['auth'] })
+  assert.equal(uploads, 1)
+  assert.ok(text.includes('没能传给模型'))
+  assert.equal(text.includes('未再尝试'), false)
+})
+
+await test('🔴 网络类失败（5xx）⇒ **不**短路，剩下的照常试（别把偶发故障当成凭证失效）', async () => {
+  const { uploads, text } = await run({
+    script: ['ok'],
+    messages: [manyImages(3)],
+    uploadScript: ['server', 'ok', 'ok'],
+  })
+  assert.equal(uploads, 3, '一次 5xx 不代表剩下的也会失败；短路只看 AUTH')
+  assert.equal(text.includes('未再尝试'), false)
+})
+
+await test('判据：只有 AUTH 值得短路（码认错了会把偶发失败放大成"整批放弃"）', async () => {
+  const auth = new AdapterLlmError('图片上传失败 (HTTP 401)', 'AUTH')
+  const server = new AdapterLlmError('图片上传失败 (HTTP 500)', 'SERVER')
+  const transport = new AdapterLlmError('图片上传失败：fetch failed', 'TRANSPORT')
+  assert.equal(auth.code === 'AUTH', true)
+  assert.equal(server.code === 'AUTH', false)
+  assert.equal(transport.code === 'AUTH', false)
 })
 
 console.log(failures.length === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)

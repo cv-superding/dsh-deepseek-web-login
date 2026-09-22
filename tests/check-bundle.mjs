@@ -387,7 +387,9 @@ const checks = {
     // 0.1.77：改成先收集进 notices（可能要同时带上「截断了 N 张」那条）再一次性回传，
     // 所以别断 `notice: imageNotice(...)` 那个旧形态 —— 按意图断两件事：
     // 失败原因确实进了 notices，且 notices 真的被回传。
-    /notices\.push\(imageNotice\(failures\.length,\s*failures\[0\]\)\)/.test(host) &&
+    // 0.1.80：函数又多了一个参数（skipped 张数）⇒ 这里**别断参数个数**，`[^)]*` 容忍它。
+    // 又栽了一次，病根和前几次一样：把"当时的形态"当成了期望值。
+    /notices\.push\(imageNotice\(failures\.length,\s*failures\[0\][^)]*\)\)/.test(host) &&
     /notice:\s*notices\.join\(/.test(host) &&
     // 注入点：缺省才走真实上传（生产调用点必须真的读这个 dep）
     /deps\.uploadImage\s*\?\?\s*uploadImageFile/.test(host),
@@ -608,6 +610,29 @@ const checks = {
     host.includes('份图片内容') && host.includes('不是你贴的张数') && !host.includes('本轮只带了最近的'),
   'host 的截断提示按规模去重（同样规模只上屏一次，不再每轮刷屏）':
     host.includes('lastTrimSignature') && /trimSignature !== lastTrimSignature/.test(host),
+
+  // ── 0.1.80：已知授权失效的账号不发请求 + 授权失败中止剩余上传 ──────────────
+  // 现场：探活 22:42 就判死了 token，请求路径没人看那块牌子 ⇒ 22:50 白跑 28 次注定失败的请求。
+  // 判据本身早就写好了（lastProbeFailed），缺的只是**在请求前调用它** —— 所以这几条
+  // 断的是"接线"，不是"判据存在"。
+  'host 在发起请求前就拦下已知授权失效的账号（判据接在了请求路径上）':
+    /const stale = staleAuthMessage\(auth\);\s*if \(stale\) \{/.test(host) && host.includes('跳过请求'),
+  'host 拦截时报的是 AUTH 且给出两条出路（重新登录 / 校验全部），不让人卡在"我该点哪个按钮"':
+    /本次请求没有发出/.test(host) && host.includes('重新登录') && host.includes('校验全部'),
+  'host 的失效判据带时间比较（失败晚于成功才算失效，刚验证过的不锁）':
+    /String\(failure\.at \?\? ""\) > String\(record\?\.lastVerifiedAt \?\? ""\)/.test(host),
+  'host 的失效判据是**白名单**（只认授权类字样；网络类必须放行，否则一次断网就锁死健康账号）':
+    /function isAuthFailureMessage\(message\)/.test(host) &&
+    host.includes('authorization failed|invalid token|unauthori[sz]ed') &&
+    // 正向：状态码要带 HTTP 前缀（裸数字会认错）
+    /HTTP\\s\*40\[13\]\\b/.test(host),
+  // ⚠️ 锚点必须锁进唯一表达式 —— 0.1.78 的 `attempt < 2` 就是被无关代码蒙混、改坏了也不报红。
+  'host 图片上传遇授权失败即中止剩余（并算出 skipped 数量，而不是默默少传几张）':
+    /if \(error\?\.code === "AUTH"\) \{\s*skippedByAuth = kept\.length - attempted;/.test(host),
+  'host 把"剩余 N 张未再尝试"说给用户（否则只报 1 张，看着像小事）':
+    /imageNotice\(failures\.length, failures\[0\], skippedByAuth\)/.test(host) && host.includes('未再尝试'),
+  'host 的告知语不再只报失败张数（旧的两参调用形态必须消失）':
+    !/imageNotice\(failures\.length, failures\[0\]\)/.test(host),
 }
 
 let failed = 0

@@ -18,7 +18,7 @@
  * 所以理论上探活**能**提前发现限制（目前尚未接上：限制状态仍由生成失败时的
  * `mute_until` 记入 accounts 的 limit 字段，见 webapi.ts 的 muteUntilMs）。
  */
-import { hasUsableAuth, type WebAuth } from './auth.ts'
+import { hasUsableAuth, staleAuthRecord, type WebAuth } from './auth.ts'
 import { listAccounts, updateAccount } from './accounts.ts'
 import { validateAuth } from './webapi.ts'
 
@@ -151,4 +151,19 @@ export function lastProbeFailed(auth: WebAuth | undefined): boolean {
   const record = listAccounts().find((item) => item.token === auth.token)
   if (!record?.lastVerifyError) return false
   return String(record.lastVerifyError.at) > String(record.lastVerifiedAt ?? '')
+}
+
+/**
+ * 当前凭证是否处于「已知**授权**失效」状态；是则返回那条失败说明。
+ *
+ * 与 `lastProbeFailed` 的分工：那个回答"探活最近是不是失败过"（**只用于展示/日志**），
+ * 这个回答"这份凭证现在还能不能用"（**用于请求前拦截**，见 adapter.ts）。
+ * 差别就在**失败类型**：断网、超时、5xx 也是"探活失败"，但那种情况下凭证是好的，
+ * 拦下来会误伤健康账号。纯判据在 `auth.ts` 的 `staleAuthRecord`（可单测），
+ * 这里只负责按 token 找到对应的账号记录。
+ */
+export function staleAuthMessage(auth: WebAuth | undefined): string | undefined {
+  if (!auth) return undefined
+  const record = listAccounts().find((item) => item.token === auth.token)
+  return staleAuthRecord(record)
 }

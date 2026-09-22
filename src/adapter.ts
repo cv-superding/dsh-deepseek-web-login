@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 import { webLoginDir } from './paths.ts'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
+import { staleAuthMessage } from './probe.ts'
 import { createRequestGate, DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MAX_REF_IMAGES, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
 import {
@@ -738,6 +739,10 @@ export function createAdapter(deps: AdapterDeps) {
     uploadCache.prune()
     const ids: string[] = []
     const failures: string[] = []
+    // 0.1.80：`attempted` 数"真的发起过上传的张数"，`skippedByAuth` 记"因授权失效而放弃的张数"。
+    // 只在授权失败时才有值 —— 那个数字要进用户可见的告知语（否则只报 1 张，看着像小事）。
+    let attempted = 0
+    let skippedByAuth = 0
     for (const ref of kept) {
       signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
@@ -746,6 +751,7 @@ export function createAdapter(deps: AdapterDeps) {
         ids.push(cached)
         continue
       }
+      attempted += 1
       try {
         const stored = await deps.readImage(ref, signal)
         const mediaType = stored.mediaType || String(ref.mediaType ?? 'image/png')
@@ -767,12 +773,23 @@ export function createAdapter(deps: AdapterDeps) {
         const message = String(error?.message ?? error)
         failures.push(message)
         logger?.warn?.(`deepseek-web: 图片上传失败（已降级为纯文本）：${message}`)
+        // 0.1.80：授权失效是**全局**的 —— 同一个 token 上传剩下的图必然同样被拒。
+        // 继续往下试纯粹是白跑请求：每张图都要先求一次 POW、再发一次上传。
+        // 实测（2026-09-21）：14 张图 ⇒ 28 次注定失败的请求，而且这些无效请求
+        // 同样暴露在风控下。第一张撞 AUTH 就停，把结论交给接下来的 completion ——
+        // 它才是判断"这次凭证到底能不能用"的地方（万一只是单张图的问题，
+        // 剩下的图不该被无辜牺牲，所以是 break 而不是 throw）。
+        if (error?.code === 'AUTH') {
+          skippedByAuth = kept.length - attempted
+          logger?.warn?.(`deepseek-web: 图片上传遭遇授权失败，剩余 ${skippedByAuth} 张不再尝试`)
+          break
+        }
       }
     }
     // 图丢了必须让**用户**看见，不能只写日志（见 imageNotice 的说明）
     const notices: string[] = []
     if (trimNotice) notices.push(trimNotice)
-    if (failures.length > 0) notices.push(imageNotice(failures.length, failures[0]))
+    if (failures.length > 0) notices.push(imageNotice(failures.length, failures[0], skippedByAuth))
     return { ids, keptKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
   }
 
@@ -786,11 +803,19 @@ export function createAdapter(deps: AdapterDeps) {
    * 丢了却不告知，等于让用户对着一个「假装收到了」的输入提问。
    *
    * 与 F28 同一个原则：只要是「本该处理、但被丢弃」的输入，就必须显式说出来。
+   *
+   * `skipped`（0.1.80）：授权失效导致中途放弃时，**必须把"剩下的根本没试"说出来**。
+   * 否则文案只报 `count`（实际只有第一张），用户会以为"只丢了一张图"、继续等结果，
+   * 而真实情况是这一轮的图几乎全废了、且凭证已经不能用。
    */
-  function imageNotice(count: number, reason: string): string {
+  function imageNotice(count: number, reason: string, skipped = 0): string {
     // 失败原因可能很长（授权失败那条带整段引导语），截断后再放进正文
     const brief = reason.length > 120 ? `${reason.slice(0, 120)}…` : reason
-    return `\n⚠️ [deepseek-web] 有 ${count} 张图片没能传给模型（${brief}），本轮回答只基于文字内容。\n`
+    const tail =
+      skipped > 0
+        ? `；第一张被拒后即中止，剩余 ${skipped} 张未再尝试（授权失效是全局的，继续重试只是白跑请求）`
+        : ''
+    return `\n⚠️ [deepseek-web] 有 ${count} 张图片没能传给模型（${brief}）${tail}，本轮回答只基于文字内容。\n`
   }
 
   /**
@@ -902,6 +927,26 @@ export function createAdapter(deps: AdapterDeps) {
       throw new AdapterLlmError(
         '尚未登录 DeepSeek 网页版：请在「设置 → DeepSeek 网页登录」里用浏览器窗口登录，或手动粘贴 userToken。',
         'MISSING_CREDENTIAL',
+      )
+    }
+    // 0.1.80：已知**授权失效**的账号，请求根本不发。
+    //
+    // 现场（2026-09-21）：探活在 22:42 就判定了 token 失效并在账号上留了标记，
+    // 但请求路径没人看那块牌子 —— 22:50 仍拿它去跑，14 张图逐个走一次 POW + 一次上传
+    // （28 次注定失败的请求）才撞上 AUTH。更要紧的是：**这些无效请求同样暴露在风控下**。
+    // 判据本身早就写好了（probe.ts 的 lastProbeFailed），只是没人在请求前调用。
+    //
+    // ⚠️ 只拦**授权类**失败（见 auth.ts isAuthFailureMessage）：断网 / 超时 / 5xx 不拦，
+    // 否则一次网络抖动就会把健康账号锁住。误拦的出口是明确的：重新登录，或点一次
+    // 「校验全部」（只读探活，成功即清掉标记）—— 所以错误里要把两句都写上。
+    const stale = staleAuthMessage(auth)
+    if (stale) {
+      logger?.warn?.(`deepseek-web: 跳过请求 —— 该账号登录态已被判定失效（${stale}）`)
+      throw new AdapterLlmError(
+        `这个账号的登录态已失效（${stale}），本次请求没有发出。` +
+          '请在「设置 → DeepSeek 网页登录」用浏览器窗口重新登录该账号；' +
+          '若确认它其实还能用，点账号行上的「校验全部」重新确认一次即可（只读探活，不消耗额度）。',
+        'AUTH',
       )
     }
     const spec = resolveSpec(String(options?.model ?? ''))

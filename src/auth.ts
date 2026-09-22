@@ -183,6 +183,61 @@ export function hasUsableAuth(auth: WebAuth | undefined): auth is WebAuth {
 }
 
 /**
+ * 一条凭证校验失败的说明，是不是**授权类**失败（token 无效 / 过期）。
+ *
+ * 为什么必须分类（0.1.80）：`lastVerifyError` 里既有授权类失败，也有网络抖动
+ * （断网、超时、上游 5xx、429）。只有授权类才意味着"这份凭证真的不能用了" ——
+ * 把网络抖动也当成账号死了，**一次断网就会把健康账号锁住**。
+ * 所以这里用**白名单**：认不出来一律当"不是授权失败"（放行）。
+ * 代价不对等：漏拦只是白跑一轮请求（下面还有 AUTH 兜底），误拦是功能坏了。
+ *
+ * 实测会出现的几种失败串（见 probe.ts / index.ts 的写入点）：
+ *  · `Authorization Failed (invalid token)`（401 响应体）
+ *  · `users/current HTTP 401` / `HTTP 403`
+ *  · `DeepSeek 网页授权失败：… —— 登录态已过期或无效，请…重新登录`
+ * 反例（**必须放行**）：`fetch failed`、`The operation was aborted due to timeout`、
+ * `users/current HTTP 500`、`users/current HTTP 429`。
+ */
+export function isAuthFailureMessage(message: unknown): boolean {
+  const text = String(message ?? '')
+  if (!text) return false
+  if (/authorization failed|invalid token|unauthori[sz]ed/i.test(text)) return true
+  if (/授权失败/.test(text)) return true
+  if (/登录(态|状态)?[^。；;]{0,8}(过期|失效|无效)/.test(text)) return true
+  // 明确的状态码形态：只认 "HTTP 401/403"，不认裸数字（免得把端口号之类认成授权失败）
+  return /HTTP\s*40[13]\b/i.test(text)
+}
+
+/**
+ * 账号此刻是不是处于「已知授权失效」状态；是则返回那条失败说明。
+ *
+ * 判据与探活保持一致（见 probe.ts 的 lastProbeFailed）：**失败时间晚于成功时间**
+ * 才算"当前处于失败态" —— 只看有没有 `lastVerifyError` 会把"失败过、后来成功了"
+ * 的账号误判成死的。
+ *
+ * ⚠️ `lastVerifiedAt` 缺省时用 `''` 参与比较：ISO 串与空串比必然为真（"2" > ""），
+ * 这正是想要的 —— 从没成功过 + 有授权类失败 ⇒ 就是失效。别改成 `?? 'undefined'`，
+ * 那个字符串以 'u' 开头，会把所有比较都判成假（这类比较的经典陷阱）。
+ *
+ * 为什么要做这件事（0.1.80，2026-09-21 现场）：探活在 22:42 就判定了 token 失效，
+ * 但**请求路径没人看这块牌子** ⇒ 22:50 还拿它去跑，14 张图逐个走一次 POW + 一次上传
+ * = 28 次注定失败的请求，直到撞 AUTH 才停。判据本身早就写好了（lastProbeFailed），
+ * 只是没有人调用它。
+ */
+export function staleAuthRecord(
+  record:
+    | { lastVerifyError?: { at?: unknown; message?: unknown } | null; lastVerifiedAt?: unknown }
+    | undefined,
+): string | undefined {
+  const failure = record?.lastVerifyError
+  if (!failure) return undefined
+  if (!(String(failure.at ?? '') > String(record?.lastVerifiedAt ?? ''))) return undefined
+  if (!isAuthFailureMessage(failure.message)) return undefined
+  const message = String(failure.message ?? '').trim()
+  return message || '登录态已失效'
+}
+
+/**
  * 解包页面读回的 token（兼容裸字符串与 AppKit 包装 JSON）。
  *
  * ⚠️ 两个必须守住的边界（都是实测形态）：
