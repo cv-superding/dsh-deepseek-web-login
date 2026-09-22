@@ -608,8 +608,14 @@ const checks = {
   // 现场：19 分钟刷了 52 次，而且它写"24 张图片"，用户读成"我发了 24 张"。
   'host 的截断提示换了量词（说"份图片内容"、点明不等于用户贴的张数，不再写"最近的 N 张图片"）':
     host.includes('份图片内容') && host.includes('不是你贴的张数') && !host.includes('本轮只带了最近的'),
-  'host 的截断提示按规模去重（同样规模只上屏一次，不再每轮刷屏）':
-    host.includes('lastTrimSignature') && /trimSignature !== lastTrimSignature/.test(host),
+  // ⚠️ 0.1.81：0.1.79 那条「按 `总条数:保留数` 精确签名去重」被真实数据证伪了 ——
+  // 签名里含一个**单调增长且变化频繁**的量（模型每 read_image 一次总数就 +1）⇒
+  // 29 份 → 30 份就又上屏一遍（用户截图为证）。改成阶梯，锚点锁进唯一表达式。
+  'host 的截断提示按阶梯抑制（不再用每轮都在变的「总条数:保留数」签名）':
+    /dropped >= nextTrimNoticeThreshold\(lastTrimNotice, kept\.length\)/.test(host) &&
+    !host.includes('lastTrimSignature'),
+  'host 的阶梯：首次必说明，之后 max(下限, 上次的份数 × 2) —— 一条会话里 O(log n) 次而不是 O(n)':
+    /function nextTrimNoticeThreshold\(previous, keptCount\) \{\s*if \(!previous \|\| previous\.kept !== keptCount\) return 1;\s*return Math\.max\(\d+, previous\.dropped \* 2\);/.test(host),
 
   // ── 0.1.80：已知授权失效的账号不发请求 + 授权失败中止剩余上传 ──────────────
   // 现场：探活 22:42 就判死了 token，请求路径没人看那块牌子 ⇒ 22:50 白跑 28 次注定失败的请求。

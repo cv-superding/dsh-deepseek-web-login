@@ -11,7 +11,7 @@
 // 用例里特意把前者钉成 false —— 认错了会把"传文件失败"当成"引用被拒"去重试。
 
 import assert from 'node:assert/strict'
-import { canRetryImageReject, createAdapter, ImageUploadCache } from '../src/adapter.ts'
+import { canRetryImageReject, createAdapter, ImageUploadCache, nextTrimNoticeThreshold } from '../src/adapter.ts'
 import { AdapterLlmError } from '../src/auth.ts'
 import { isInvalidRefFileError } from '../src/webapi.ts'
 import { captureDefect } from '../src/auth.ts'
@@ -285,9 +285,33 @@ await test('同样规模的截断只上屏一次 —— 不再每轮刷屏（0.1
   assert.equal(hits, 1, `3 轮只该提示 1 次，实际 ${hits} 次（旧版实测 19 分钟刷了 52 次）`)
 })
 
-await test('规模变了要再提示一次（说明情况在恶化）', async () => {
-  const outs = await runSets([[manyImages(26)], [manyImages(30)]])
-  assert.equal(outs.filter((t) => t.includes('份图片内容')).length, 2, '数量变了值得再说一次')
+await test('🔴 规模在缓慢增长时也不刷屏（0.1.81 修的真问题）', async () => {
+  // 现场：0.1.79 用的签名是「总条数:保留数」，而模型每 read_image 一次总条数就 +1 ⇒
+  // 29 份 → 30 份就又提示一遍（用户截图为证，说"频率还是有点高"）。
+  const outs = await runSets([[manyImages(26)], [manyImages(27)], [manyImages(28)], [manyImages(29)]])
+  const hits = outs.filter((t) => t.includes('份图片内容')).length
+  assert.equal(hits, 1, `4 轮缓慢增长只该提示 1 次（首轮），实际 ${hits} 次`)
+})
+
+await test('被略过的份数明显变大（≥ 下限）才再说一次', async () => {
+  // 26 → 被略过 2；40 → 被略过 16，越过 floor(10)
+  const outs = await runSets([[manyImages(26)], [manyImages(40)]])
+  assert.equal(outs.filter((t) => t.includes('份图片内容')).length, 2, '情况确实恶化了，值得再说一次')
+})
+
+await test('阶梯逐级抬升：说了 40 之后，下次要到被略过 32 份以上', async () => {
+  // 40 → dropped 16 ⇒ 下一档 max(10, 32) = 32 ⇒ 56 份（dropped 32）才再提示
+  const outs = await runSets([[manyImages(26)], [manyImages(40)], [manyImages(50)], [manyImages(56)]])
+  const hits = outs.filter((t) => t.includes('份图片内容')).length
+  assert.equal(hits, 3, `应为 首轮 + 40 + 56 共 3 次，实际 ${hits} 次`)
+})
+
+await test('判据：阶梯门槛（首次 / 保留数变了 / 翻倍且不低于下限）', () => {
+  assert.equal(nextTrimNoticeThreshold(undefined, 24), 1, '首次必说明')
+  assert.equal(nextTrimNoticeThreshold({ kept: 24, dropped: 2 }, 24), 10, '小值时受下限保护，不按翻倍算')
+  assert.equal(nextTrimNoticeThreshold({ kept: 24, dropped: 20 }, 24), 40, '翻倍')
+  assert.equal(nextTrimNoticeThreshold({ kept: 24, dropped: 40 }, 24), 80, '继续翻倍')
+  assert.equal(nextTrimNoticeThreshold({ kept: 24, dropped: 16 }, 12), 1, '保留数变了（改了上限）⇒ 重新说明一次')
 })
 
 await test('没超上限时不提示（自证：上面几条测的确实是截断路径）', async () => {

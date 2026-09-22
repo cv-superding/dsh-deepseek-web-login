@@ -198,6 +198,33 @@ export function canRetryImageReject(error: any, yielded: boolean, attempt: numbe
   return error?.code === 'INVALID_REF_FILE' && !yielded && attempt < 2
 }
 
+/**
+ * 被略过的图片份数至少要再多这么多，才值得再上屏一次截断提示。
+ *
+ * 为什么需要一个下限：首次提示时被略过的往往只有 1~2 份，若下一档就是"翻倍"，门槛会落在
+ * 2→4 这种量级 ⇒ 每多读一两张图就又提示一次，等于没抑制。
+ */
+export const TRIM_NOTICE_FLOOR = 10
+
+/**
+ * 下一条截断提示的触发门槛（纯函数，可单测）。
+ *
+ * 语义（0.1.81）：**首次必说明；之后只有情况明显恶化才再说一次。**
+ *  · 没提示过，或保留份数变了（用户改了 `maxRefImages`）⇒ 门槛 1（下一次就说明）
+ *  · 否则 ⇒ `max(FLOOR, 上次的份数 × 2)`，即**翻倍**、且至少再多 `TRIM_NOTICE_FLOOR` 份
+ *
+ * 为什么不再用「总条数:保留数」那种精确签名（0.1.79 → 0.1.81 的修正）：
+ * 「总条数」几乎每轮都在涨（模型每 `read_image` 一次就多一条内容）⇒ 签名天天变 ⇒
+ * 提示照旧每轮上屏。**判据里只要含一个"单调增长且变化频繁"的量，抑制就等于没做。**
+ */
+export function nextTrimNoticeThreshold(
+  previous: { kept: number; dropped: number } | undefined,
+  keptCount: number,
+): number {
+  if (!previous || previous.kept !== keptCount) return 1
+  return Math.max(TRIM_NOTICE_FLOOR, previous.dropped * 2)
+}
+
 export const PROVIDER = 'deepseek-web'
 
 export interface ModelSpec {
@@ -655,14 +682,20 @@ export function createAdapter(deps: AdapterDeps) {
   let lastImageKeys: Set<string> = new Set()
 
   /**
-   * 上一次**已经上屏过**的截断规模（`总条数:保留数`）。
+   * 上一次**已经上屏过**的截断规模（保留数 + 当时被略过的份数）。
    *
-   * 为什么需要它：只要历史里的图片内容超过上限，`uploadRequestImages` 每轮都会算出同一条提示 ——
+   * 为什么要它：只要历史里的图片内容超过上限，`uploadRequestImages` 每轮都会算出同一条提示 ——
    * 实测 19 分钟里连着上屏 **52 次**（2026-09-21 那个 drawio 配图会话），用户直接问
-   * "为啥每次都这么多提示"。同一件事说一遍就够了，重复的只写日志；
-   * 数量**变了**才再提示一次 —— 那说明情况在恶化，值得说。
+   * "为啥每次都这么多提示"。同一件事说一遍就够了，重复的只写日志。
+   *
+   * 🔴 0.1.81 修正了抑制的粒度。0.1.79 用的是 `总条数:保留数` 这个**精确签名**，
+   * 而"总条数"几乎每轮都在涨 —— 模型每 `read_image` 一次就多一条内容 ⇒ 签名变了 ⇒
+   * 提示照旧每轮上屏（2026-09-22 现场：29 份 → 30 份又来一遍，用户说"频率还是有点高"）。
+   * 改成**阶梯**：首次必说明；之后只有"被略过的份数"比上次翻倍（且至少再多 `TRIM_NOTICE_FLOOR`
+   * 份）才再说一次。这样一条会话里它是 O(log n) 次，而不是 O(n) 次。
+   * 保留数变了（用户改了 `maxRefImages`）⇒ 情况本身变了，重新说明一次。
    */
-  let lastTrimSignature = ''
+  let lastTrimNotice: { kept: number; dropped: number } | undefined
 
   /**
    * 把请求里出现的图片全部上传到网页端并返回 file_id 列表。
@@ -722,14 +755,14 @@ export function createAdapter(deps: AdapterDeps) {
     const overLimit = maxRefImages > 0 && unique.length > maxRefImages
     const kept = overLimit ? unique.slice(-maxRefImages) : unique
     const keptKeys = new Set(kept.map((ref) => String(ref?.attachmentId ?? '')).filter(Boolean))
-    // 同一条提示只上屏一次：规模没变就只写日志（否则每轮都会刷一遍 —— 实测 19 分钟刷了 52 次）。
-    // 日志照记不误，排查时仍能看到每一轮的截断情况。
-    const trimSignature = overLimit ? `${unique.length}:${kept.length}` : ''
+    // 提示按**阶梯**上屏（见 nextTrimNoticeThreshold）：首次必说明，之后只有被略过的份数
+    // 翻倍（且至少再多 TRIM_NOTICE_FLOOR 份）才再说一次。日志照记不误，每轮的截断都能查。
+    const dropped = unique.length - kept.length
     const trimNotice =
-      overLimit && trimSignature !== lastTrimSignature
-        ? imageTrimNotice(unique.length, unique.length - kept.length, kept.length)
+      overLimit && dropped >= nextTrimNoticeThreshold(lastTrimNotice, kept.length)
+        ? imageTrimNotice(unique.length, dropped, kept.length)
         : undefined
-    lastTrimSignature = trimSignature
+    if (trimNotice) lastTrimNotice = { kept: kept.length, dropped }
     if (overLimit) {
       logger?.info?.(
         `deepseek-web: 本请求的图片共 ${unique.length} 张，超过上限 ${maxRefImages} ⇒ 只发最近的 ` +
@@ -831,10 +864,9 @@ export function createAdapter(deps: AdapterDeps) {
   function imageTrimNotice(total: number, dropped: number, kept: number): string {
     return (
       `\n[deepseek-web] 本轮只带了最近 ${kept} 份图片内容，更早的 ${dropped} 份未随请求发送` +
-      `（历史累计 ${total} 份）。这个数字指的是**图片内容条目**、不是你贴的张数：` +
-      '模型每读一次图、或同一张图被重新渲染/裁剪出新内容，都会多算一条，' +
-      '所以它通常远多于你亲手贴的张数。网页端对单次请求能引用的图片数有上限，' +
-      '超了整轮都会被拒，因此按时间留最近的这些 —— 正常的内容控制，不是错误。\n'
+      `（历史累计 ${total} 份）。这里的「份」是**图片内容条目**、不是你贴的张数 ——` +
+      '模型每读一次图就会多算一条，所以它远多于你亲手贴的张数。网页端对单次请求能引用的图片数有上限，' +
+      '超了整轮都会被拒，因此按时间留最近的这些。正常的内容控制，不是错误。\n'
     )
   }
 
