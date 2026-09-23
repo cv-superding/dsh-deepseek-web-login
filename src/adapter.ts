@@ -129,9 +129,13 @@ export class ImageUploadCache {
   }
 
   /** 命中且未过期才返回；顺手清掉这一条过期项。 */
-  get(key: string, now: number = Date.now()): string | undefined {
+  get(key: string, now: number = Date.now(), expectScope?: string): string | undefined {
     const hit = this.entries.get(key)
     if (!hit) return undefined
+    // ⚠️ 0.1.82：与 `set` 的 `expectScope` 对称 —— 作用域不符一律当未命中。
+    // 少了这一步，并发（allowConcurrent）时 B 账号上传的 file_id 会被 A 账号的请求
+    // 拿去引用，正是 F06 要防的"两个号的引用串了"。
+    if (expectScope !== undefined && expectScope !== this.scope) return undefined
     if (now - hit.at >= this.ttlMs) {
       this.entries.delete(key)
       return undefined
@@ -754,7 +758,10 @@ export function createAdapter(deps: AdapterDeps) {
     const maxRefImages = deps.config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES
     const overLimit = maxRefImages > 0 && unique.length > maxRefImages
     const kept = overLimit ? unique.slice(-maxRefImages) : unique
-    const keptKeys = new Set(kept.map((ref) => String(ref?.attachmentId ?? '')).filter(Boolean))
+    // ⚠️ 0.1.82：keptKeys **不再**预先按裁剪结果算 —— 它会被当成"本轮真的带上的图"
+    // 传给 `serializePromptParts`（后者据此写 `[image attached]` / `[earlier image omitted]`），
+    // 而**上传失败**的图并没有进 `ref_file_ids` ⇒ 模型以为收到了，转而对着没送出去的图瞎猜。
+    // 改成在上传循环里按"成功（含缓存命中）"累计，见下面的 sentKeys。
     // 提示按**阶梯**上屏（见 nextTrimNoticeThreshold）：首次必说明，之后只有被略过的份数
     // 翻倍（且至少再多 TRIM_NOTICE_FLOOR 份）才再说一次。日志照记不误，每轮的截断都能查。
     const dropped = unique.length - kept.length
@@ -776,12 +783,15 @@ export function createAdapter(deps: AdapterDeps) {
     // 只在授权失败时才有值 —— 那个数字要进用户可见的告知语（否则只报 1 张，看着像小事）。
     let attempted = 0
     let skippedByAuth = 0
+    /** 真的进了 `ref_file_ids` 的那些 key —— 提示里的 `[image attached]` 只能写在这些图上。 */
+    const sentKeys = new Set<string>()
     for (const ref of kept) {
       signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
-      const cached = uploadCache.get(key)
+      const cached = uploadCache.get(key, Date.now(), scope)
       if (cached) {
         ids.push(cached)
+        sentKeys.add(key)
         continue
       }
       attempted += 1
@@ -801,6 +811,7 @@ export function createAdapter(deps: AdapterDeps) {
         )
         uploadCache.set(key, uploadedFile.fileId, Date.now(), scope)
         ids.push(uploadedFile.fileId)
+        sentKeys.add(key)
       } catch (error: any) {
         if (signal?.aborted) throw error
         const message = String(error?.message ?? error)
@@ -823,7 +834,8 @@ export function createAdapter(deps: AdapterDeps) {
     const notices: string[] = []
     if (trimNotice) notices.push(trimNotice)
     if (failures.length > 0) notices.push(imageNotice(failures.length, failures[0], skippedByAuth))
-    return { ids, keptKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
+    // 这里回传的是**真的带上了**的集合（不是"打算带"的），调用方据此写提示标记
+    return { ids, keptKeys: sentKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
   }
 
   /**
@@ -999,9 +1011,12 @@ export function createAdapter(deps: AdapterDeps) {
     // 宁可这一轮没有图，也不能让会话卡在"每轮都失败"上 —— 那等于整个会话作废。
     const uploaded =
       options?.__skipImages === true
-        ? { ids: [], keptKeys: new Set<string>() }
+        ? { ids: [], keptKeys: undefined }
         : await uploadRequestImages(auth, options?.messages, options?.signal)
-    lastImageKeys = uploaded.keptKeys
+    // ⚠️ 0.1.82：`__skipImages`（不带图重发）**绝不能**更新 lastImageKeys ——
+    // 它记的是"上一轮那批 key 的 file_id 被服务端拒过"，抹成空集就等于下一轮
+    // 又从中毒缓存出发，重演"2 次注定被拒 + 1 次无图"。
+    if (uploaded.keptKeys) lastImageKeys = uploaded.keptKeys
     const refFileIds = uploaded.ids
 
     // 链式投喂需要 prompt 的**结构**（固定头 + 未截断的历史条目）才能算增量，

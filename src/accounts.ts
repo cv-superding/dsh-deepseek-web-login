@@ -219,7 +219,15 @@ export function listAccounts(): AccountRecord[] {
   const records: AccountRecord[] = []
   for (const name of names) {
     const id = name.replace(/\.json$/, '')
-    const record = normalizeRecord(readJson(accountFilePath(id)), id)
+    // ⚠️ 0.1.82：`accountFilePath` 对空串 / `..` 这类非法 id 会直接抛（防路径穿越）。
+    // 目录里一旦出现 `.json`、`..json` 这种文件名，不逐个兜住就会**整个账号库读不出来**
+    // （列表空 + 路由 500），而原因只是一个无关文件。
+    let record: AccountRecord | undefined
+    try {
+      record = normalizeRecord(readJson(accountFilePath(id)), id)
+    } catch {
+      continue
+    }
     if (record) records.push(record)
   }
   records.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt)))
@@ -312,7 +320,12 @@ export function upsertAccount(auth: WebAuth, patch: Partial<AccountRecord> = {})
   const serverId = patch.serverId ?? incoming.serverId
 
   const all = listAccounts()
+  // ⚠️ 0.1.82：调用方显式给了 `patch.id` 就**优先认它**。重登路径（`commitCapturedAuth`）
+  // 只传 `{ id: target }`，而重登**必然换 token**、捕获又常不带身份 ⇒ 下面两条都匹配不上、
+  // 最后那条 token 匹配也落空 ⇒ `existing` 恒为 undefined ⇒ carried 白名单**全部落空**：
+  // 备注名 / 分组 / serverId / 显示名被静默清空（每一次重登都会发生）。
   const existing =
+    (patch.id ? all.find((item) => item.id === patch.id) : undefined) ??
     (serverId ? all.find((item) => item.serverId && item.serverId === serverId) : undefined) ??
     // 兼容旧记录（审计 F04）：`serverId` 是后加的字段，老库里可能只存了 `user.id`。
     // 只认**没有 serverId** 的记录，免得跟上面那条抢匹配（那条才是权威身份键）。

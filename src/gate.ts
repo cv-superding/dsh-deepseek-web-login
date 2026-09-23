@@ -321,7 +321,24 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   if (maxIntervalMs < minIntervalMs) maxIntervalMs = minIntervalMs
   const random = options.random ?? Math.random
   const now = options.now ?? (() => Date.now())
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  /**
+   * 默认等待：把定时器**挂在 promise 上**，好让 `waitOrAbort` 在取消/结算时把它清掉。
+   *
+   * ⚠️ 0.1.82 的教训：这里**不能**用 `timer.unref()` 来"让进程不被拖住" ——
+   * 被 `await` 的 promise 一旦失去 ref，事件循环可能直接空转退出，
+   * 表现为进程/用例挂在 `await` 上**永不结算**（实测两个用例当场挂死）。
+   * 长休确实不该拖住宿主关停，但正确做法是"取消时 clearTimeout"，不是 unref。
+   */
+  const sleep =
+    options.sleep ??
+    ((ms: number) => {
+      let timer: ReturnType<typeof setTimeout>
+      const promise = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms)
+      }) as Promise<void> & { timer?: ReturnType<typeof setTimeout> }
+      promise.timer = timer!
+      return promise
+    })
   const logger = options.logger
 
   /** 队尾：每个调用完成后才 resolve，保证 FIFO 且「上一个没结束就不放行下一个」。 */
@@ -347,17 +364,28 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     }
     /** 让等待可被中断：abort 时立刻 reject，不等定时器/前序请求。 */
     const waitOrAbort = (inner: Promise<unknown>): Promise<void> => {
+      // 取消或结算之后，别再让那个定时器继续跑（长休最长 180s，会拖住宿主关停）。
+      // 注入的 sleep（单测用）没有 `.timer`，这里自然是个空操作。
+      const clearInnerTimer = (): void => {
+        const timer = (inner as { timer?: ReturnType<typeof setTimeout> })?.timer
+        if (timer) clearTimeout(timer)
+      }
       if (!signal) return inner.then(() => undefined)
-      if (signal.aborted) return Promise.reject(aborted())
+      if (signal.aborted) {
+        clearInnerTimer()
+        return Promise.reject(aborted())
+      }
       return new Promise<void>((resolve, reject) => {
         const onAbort = () => {
           signal.removeEventListener('abort', onAbort)
+          clearInnerTimer()
           reject(aborted())
         }
         signal.addEventListener('abort', onAbort, { once: true })
         inner.then(
           () => {
             signal.removeEventListener('abort', onAbort)
+            clearInnerTimer()
             resolve()
           },
           (error) => {

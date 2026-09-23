@@ -639,6 +639,59 @@ const checks = {
     /imageNotice\(failures\.length, failures\[0\], skippedByAuth\)/.test(host) && host.includes('未再尝试'),
   'host 的告知语不再只报失败张数（旧的两参调用形态必须消失）':
     !/imageNotice\(failures\.length, failures\[0\]\)/.test(host),
+
+  // ── 0.1.82：全库审查确认的缺陷（每条都断"接线"，不断"函数存在"）────────────
+  // P0-1：图片上限此前只接了显示层 —— 前端 POST 这个字段、宿主白名单不认 ⇒ 必然 400
+  'host 的 /gate 白名单认 maxRefImages（否则设置页滑块必然 400「没有可更新的字段」）':
+    host.includes('body.maxRefImages !== void 0') && /patch\.maxRefImages = clampMaxRefImages\(count\)/.test(host),
+  'host 把 maxRefImages 同步进 adapterConfig（否则"存了但要等重启"）':
+    /adapterConfig\.maxRefImages = applied\.maxRefImages/.test(host),
+  // P0-2：重登的继承源 —— 此前 `existing` 靠 serverId / token 解析，而重登换了 token ⇒ 恒 undefined
+  'host 的 upsertAccount 优先认 patch.id（重登路径唯一的继承来源）':
+    /item\.id === patch\.id/.test(host),
+  // P0-3：重登意图必须在其他登录入口被清掉（endRelogin 原生只有 1 个调用点）
+  'host 的 /login/add 会清掉残留的重登意图':
+    /route === "\/login\/add"[\s\S]{0,140}?endRelogin\(\)/.test(host),
+  'host 的 /accounts/switch 与 /logout 也会清重登意图':
+    /route === "\/accounts\/switch"[\s\S]{0,220}?endRelogin\(\)/.test(host) &&
+    /route === "\/logout"[\s\S]{0,220}?endRelogin\(\)/.test(host),
+  'host 的重登分支会一并消费掉添加模式':
+    /endAddAccount\(\);\s*return \{\s*mode: "relogin"/.test(host),
+  // P1-1：CDP 路径必须先校验身份再落库（此前先 commit ⇒ 每次登录都新增一条、serverId 永远补不上）
+  'host 的浏览器登录改为「先校验身份、再落库」':
+    /commitCapturedAuth\(verified \? withVerifiedIdentity\(outcome\.auth, check\?\.user\)/.test(host) &&
+    !/const commit = commitCapturedAuth\(outcome\.auth\)/.test(host),
+  'host 的身份回写带上 serverId（它是后续的去重键）':
+    /verifiedId \? \{ serverId: verifiedId \}/.test(host),
+  // P1-2：诊断不能"顺手把传输层退回 Node"
+  'host 的网络诊断按「进来时那一个」还原传输层（不再无参退回 Node fetch）':
+    /if \(transportBefore === "injected"\) setFetchImpl\(netFetch\)/.test(host),
+  // P1-3：提示标记必须与"真的发出去了"一致
+  'host 的图片标记按「真的进了 ref_file_ids」算（keptKeys: sentKeys）':
+    /keptKeys: sentKeys/.test(host) && !/const keptKeys = new Set\(kept\.map/.test(host),
+  // P1-4：不带图重发时不能把"这批被拒过"的知识抹掉
+  'host 的 __skipImages 不再清空 lastImageKeys（否则下轮又从中毒缓存出发）':
+    /if \(uploaded\.keptKeys\) lastImageKeys = uploaded\.keptKeys/.test(host),
+  // R1：缓存 get 与 set 的作用域守卫要对称
+  'host 的上传缓存 get 带作用域校验（与 set 对称）':
+    /get\(key, now = Date\.now\(\), expectScope\)/.test(host),
+  // P2-1：XML 捕获态下"调用之后的正文"不许凭空消失
+  'host 的 flush 会把调用块之后的正文回吐（xmlToolCallTail）':
+    /xmlToolCallTail\(captured\.buffer\)/.test(host),
+  // P2-2：sink 未定时不能丢字
+  'host 的 appendSink 补了 else 兜底（sink 未定时按正文发射，不再静默丢字）':
+    /else if \(sink === "fragments"\) appendToLastFragment\(text, out\);\s*else \{/.test(host),
+  // P2-9：批量删除的失败要分三态
+  'host 的批量删除按三态分流（5xx/429 不再永久关掉批量）':
+    /classifyDeleteResp/.test(host) && /verdict === "unsupported"/.test(host),
+  // P2-7：等待计时器改成"可取消"，不是 unref（unref 会让被 await 的 promise 永不结算）
+  'host 的闸门等待把定时器挂在 promise 上并可取消（不是 unref）':
+    /promise\.timer = timer/.test(host) && host.includes('clearInnerTimer'),
+  // 前端两处接线
+  'client 的登录按钮在轮询期间保持禁用（dataset.busy）':
+    client.includes('dataset.busy'),
+  'client 把台账的失败时段传给迷你图（此前恒传空集、标红从未生效）':
+    client.includes('hourlyFailed'),
 }
 
 let failed = 0

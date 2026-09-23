@@ -224,8 +224,19 @@ export async function runNetFetchDiagnostics(auth: WebAuth | undefined, mode: Ne
         error: error?.message ?? String(error),
       })
     } finally {
-      setFetchImpl()
-      results.push({ step: '传输层已还原', ok: true, was: transportBefore, now: fetchImplKind() })
+      // ⚠️ 0.1.82：必须还原成**进来时那一个**，不能无参调用 ——
+      // `setFetchImpl()` 的语义是"还原为 Node 全局 fetch"，而默认配置是 Chromium 网络栈，
+      // 于是跑一次诊断就把指纹能力悄悄关掉（设置页仍显示 chromium），直到重启才恢复。
+      if (transportBefore === 'injected') setFetchImpl(netFetch)
+      else setFetchImpl()
+      const now = fetchImplKind()
+      results.push({
+        step: '传输层已还原',
+        ok: now === transportBefore,
+        was: transportBefore,
+        now,
+        ...(now === transportBefore ? {} : { error: '还原后与诊断前不一致，请重启 DSH' }),
+      })
     }
   }
 

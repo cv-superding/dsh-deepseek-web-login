@@ -148,6 +148,41 @@ await test('deferred：等满延迟也会清理（哪怕没攒够）', async () 
   assert.deepEqual(f.calls[0].body, { chat_session_id: 'S1' })
 })
 
+await test('批量删遇到 5xx（瞬时）→ **不**永久关闭批量，下一批仍先试批量', async () => {
+  // 0.1.82：旧实现把 5xx/429/网关 HTML 都算成"服务端不支持批量" ⇒ 一次抖动之后
+  // 此后每批都退化成 N 个请求（等于自己把请求密度抬上去，而密度正是被风控看的那个量）。
+  const f = fakeFetch((body, nth) => {
+    if (body.chat_session_ids) {
+      return nth === 1 ? { ok: false, status: 503, text: 'upstream down' } : { ok: true, text: '{"code":0,"data":{}}' }
+    }
+    return { ok: true, text: '{"code":0,"data":{}}' }
+  })
+  const t = fakeTimers()
+  const cleaner = createSessionCleaner({
+    policy: { mode: 'deferred', delayMs: 90_000, batchSize: 2 },
+    fetchImpl: f,
+    setTimeoutImpl: t.set,
+    clearTimeoutImpl: t.clear,
+  })
+
+  cleaner.schedule(AUTH, 'S1')
+  cleaner.schedule(AUTH, 'S2')
+  await tick()
+  await tick()
+  assert.ok(f.calls[0].body.chat_session_ids, '自证：第一批先试了批量')
+
+  const before = f.calls.length
+  cleaner.schedule(AUTH, 'S3')
+  cleaner.schedule(AUTH, 'S4')
+  await tick()
+  await tick()
+  assert.ok(
+    f.calls[before]?.body?.chat_session_ids,
+    `5xx 是瞬时问题 ⇒ 下一批仍应先试批量（旧实现会永久退化成逐个删，实际：${JSON.stringify(f.calls[before]?.body)}）`,
+  )
+  assert.equal(f.calls.length, before + 1, '第二批应只花 1 个请求（批量成功）')
+})
+
 await test('批量删被服务端拒绝（业务错误）→ 回退逐个删，且此后不再尝试批量', async () => {
   const f = fakeFetch((body) => {
     if (body.chat_session_ids) return { ok: true, text: JSON.stringify({ code: 1, msg: 'unknown field' }) }

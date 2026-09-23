@@ -54,6 +54,8 @@ export interface LedgerSummary {
   gaps: { samples: number; min: number; p50: number; p90: number; max: number } | null
   /** 按小时分桶的调用数（长度 = hours，最后一个桶是最近一小时）。 */
   hourly: number[]
+  /** 按小时分桶的**失败**数（与 `hourly` 同长同序），给界面把失败时段标出来。 */
+  hourlyFailed: number[]
   /** 台账目录占用（便于发现异常膨胀）。 */
   footprint: { files: number; bytes: number }
 }
@@ -175,12 +177,16 @@ export function summarizeLedger(input = 24): LedgerSummary {
 
   const failures: Record<string, number> = {}
   const hourly = new Array<number>(hours).fill(0)
+  const hourlyFailed = new Array<number>(hours).fill(0)
   let succeeded = 0
   const groups = new Map<string, LedgerEntry[]>()
 
   for (const entry of entries) {
     const bucket = Math.floor((now - entry.at) / 3_600_000)
-    if (bucket >= 0 && bucket < hours) hourly[hours - 1 - bucket] += 1
+    if (bucket >= 0 && bucket < hours) {
+      hourly[hours - 1 - bucket] += 1
+      if (!entry.ok) hourlyFailed[hours - 1 - bucket] += 1
+    }
     if (entry.ok) succeeded += 1
     else {
       const key = failureBucket(entry)
@@ -220,6 +226,7 @@ export function summarizeLedger(input = 24): LedgerSummary {
     succeeded,
     failed: entries.length - succeeded,
     failures,
+    hourlyFailed,
     gaps:
       gaps.length > 0
         ? {

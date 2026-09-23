@@ -453,6 +453,7 @@ node tests/check-context-feed.mjs    # 上下文投喂判据（增量/回退的�
 node tests/check-context-chain.mjs   # 链式投喂接线与生命周期（假 transport + 假 SSE）
 node tests/check-image-refs.mjs       # 图片引用组装（同一张图去重 + 图丢了要写进回答）
 node tests/check-image-ref-reject.mjs # 图片引用被拒（code 9）→ 识别 + 两级降级重试；授权失败则中止剩余上传
+node tests/check-bugfix-0182.mjs      # 全库审查确认的缺陷（图片上限落盘 / 重登保元数据 / 重登意图等）
 node tests/check-stale-auth.mjs       # 已知授权失效的账号不许发请求（含行为侧：请求到底发没发）
 node tests/count-session-images.mjs # 某个会话里累积了多少「图片内容条目」（回答"我没发这么多图"的质疑）
 node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响上传（需要已登录凭证）

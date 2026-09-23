@@ -9,7 +9,7 @@
  * 设计约束：宿主自包含打包（除 node: 与 electron 外全部 bundle），
  * 不依赖 DSH 内部包的可解析性 —— 任何装配路径（注入 / bundle / patch）都能加载。
  */
-import { maskIdentifier, readAuth, refreshVerifiedIdentity, writeAuth, type WebAuth } from './auth.ts'
+import { maskIdentifier, readAuth, refreshVerifiedIdentity, withVerifiedIdentity, writeAuth, type WebAuth } from './auth.ts'
 import { createRequire } from 'node:module'
 import { readFileSync, statSync } from 'node:fs'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
@@ -34,11 +34,12 @@ import {
   DEFAULT_CLEANUP_DELAY_MS,
   DEFAULT_CLEANUP_GAP_MS,
   normalizeCleanupRange,
+  clampMaxRefImages,
   type GateSettings,
 } from './gate.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
-import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount } from './account-add.ts'
+import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount, endRelogin } from './account-add.ts'
 import {
   validateAuth,
   createSessionCleaner,
@@ -637,6 +638,17 @@ export function apply(ctx: any, config: Config = {}): void {
                 }
                 patch[field] = range
               }
+              // 0.1.82：图片上限也是「界面 → 路由 → 落盘」的一段，此前只接了显示层 ——
+              // 前端确实 POST 这个字段，而白名单里没有它 ⇒ patch 为空 ⇒ 直接 400「没有可更新的字段」，
+              // 滑块拖完弹回默认值（0.1.77 起一直如此，测试断的是字符串出现与否，守不住接线）。
+              if (body.maxRefImages !== undefined) {
+                const count = Number(body.maxRefImages)
+                if (!Number.isFinite(count)) {
+                  sendJson(res, 400, { ok: false, error: 'maxRefImages 必须是数字' })
+                  return
+                }
+                patch.maxRefImages = clampMaxRefImages(count)
+              }
               if (Object.keys(patch).length === 0) {
                 sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
                 return
@@ -644,6 +656,8 @@ export function apply(ctx: any, config: Config = {}): void {
               const applied = gate.configure(patch)
               // prompt 上限是 adapter 每次调用现读的 → 改这里即时生效，不必重启
               if (applied.maxPromptChars !== undefined) adapterConfig.maxPromptChars = applied.maxPromptChars
+              // 图片上限同样是 adapter 每轮现读的 ⇒ 必须一起同步，否则保存成功但要等重启
+              if (applied.maxRefImages !== undefined) adapterConfig.maxRefImages = applied.maxRefImages
               // 清理策略由 cleaner 执行 → 同步生效
               if (patch.sessionCleanup) sessionCleaner.configure({ mode: patch.sessionCleanup })
               // 三个区间即时作用到清理器（它会用新区间重新随机取值）
@@ -660,7 +674,9 @@ export function apply(ctx: any, config: Config = {}): void {
                 sendJson(res, 200, { ok: true, ...applied, persisted: false, warning: '已即时生效，但写入 gate.json 失败，重启后会回到旧值' })
                 return
               }
-              sendJson(res, 200, { ok: true, ...applied, persisted: true })
+              // ⚠️ `cleanup` 必须一起返回：前端保存后立刻重画界面，读不到就回落成默认的
+              // 「延迟」档（GET /status 里是有的，两边形状必须一致）。
+              sendJson(res, 200, { ok: true, ...applied, persisted: true, cleanup: sessionCleaner.policy() })
               return
             }
             // 本地调用台账：请求密度 + 失败分类（用来判断节流到底有没有效）
@@ -726,6 +742,7 @@ export function apply(ctx: any, config: Config = {}): void {
               const body = await readJsonBody(req)
               const id = String(body?.id ?? '')
               endAddAccount()
+              endRelogin()
               // 0.1.61：切号前先对目标账号做一次零额度探活（只读 users/current）。
               // 死号当场拦下 —— 否则用户切过去、发消息、看到 AUTH 才知道，白折腾一轮
               // （实测 2026-09-14：切到一个一天多没用过的号，凭证早已过期）。
@@ -1107,6 +1124,9 @@ export function apply(ctx: any, config: Config = {}): void {
             // 的会话，不清的话新窗口一打开就是旧账号，抓回来还是它（等于没加）。
             // 注意这里**不动账号库里的任何账号** —— 与 /logout 的区别就在这。
             if (req.method === 'POST' && route === '/login/add') {
+              // ⚠️ 必须同时清掉「重登意图」：它在 commitCapturedAuth 里**优先于**添加模式，
+              // 残留期 60 分钟 ⇒ 这段时间内登另一个号会被写进上次那条旧记录（0.1.82 修）。
+              endRelogin()
               beginAddAccount()
               const { profileCleared, partitionCleared } = await clearLoginState()
               logger.info?.(
@@ -1200,10 +1220,15 @@ export function apply(ctx: any, config: Config = {}): void {
                 signal: undefined,
               })
               if (outcome.ok && outcome.auth) {
-                // 添加模式下只入库（见 account-add.ts）；默认仍是"写入并设为当前"
-                const commit = commitCapturedAuth(outcome.auth)
+                // 0.1.82：**先校验拿到身份，再落库**。此前是先 commit 再 validate ——
+                // 而捕获出来的凭证不带身份（unverified），只能按 token 去重、而重登必然换 token
+                // ⇒ 每次都新增一条账号记录，`serverId` 这条去重键也永远补不上。
                 const check = await validateAuth(outcome.auth).catch(() => undefined)
                 const verified = !!check?.ok
+                // 校验通过才敢把 unverified 摘掉（没通过时 withVerifiedIdentity 会误清该标记）
+                const commitAuth = verified ? withVerifiedIdentity(outcome.auth, check?.user) : outcome.auth
+                // 添加模式下只入库（见 account-add.ts）；默认仍是"写入并设为当前"
+                const commit = commitCapturedAuth(commitAuth)
                 // 把这个账号的身份写回记录。
                 // 为什么必须在这里补：捕获本身只拿到 token/cookie，**不含账号名**；
                 // 不补的话列表只能显示内部 id（`acc_xxxxxxxx`），要等下一次探活（最长 30 分钟）
@@ -1211,8 +1236,11 @@ export function apply(ctx: any, config: Config = {}): void {
                 // 身份来自刚才这次零额度的只读校验，顺手就拿到了。
                 if (verified && check?.user && commit.recordId) {
                   const record = listAccounts().find((item) => item.id === commit.recordId)
+                  const verifiedId = typeof (check.user as { id?: unknown }).id === 'string' ? String((check.user as { id?: unknown }).id) : ''
                   updateAccount(commit.recordId, {
                     user: { ...(record?.user ?? {}), ...check.user },
+                    // ⚠️ `serverId` 是**去重键**：只回写 user 而不写它，下次同一个号还会被当成新账号
+                    ...(verifiedId ? { serverId: verifiedId } : {}),
                     lastVerifiedAt: new Date().toISOString(),
                     lastVerifyError: undefined,
                   } as any)
@@ -1274,6 +1302,7 @@ export function apply(ctx: any, config: Config = {}): void {
               // 退出/换号是明确的"改当前账号"动作 —— 顺手清掉添加模式，
               // 免得它一直挂着、影响后面某次无关的捕获。
               endAddAccount()
+              endRelogin()
               // await：面板会在退出后立刻打开登录窗口（换号），必须等分区清理完成
               const cleared = await logout()
               sendJson(res, 200, { ok: true, partitionCleared: cleared })

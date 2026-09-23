@@ -145,6 +145,9 @@ export function commitCapturedAuth(auth: WebAuth, now: number = Date.now()): Com
         //    这里用 updateAccount 而不是 upsertAccount —— 后者的 carried 逻辑用 `??`，传 undefined 清不掉。
         //    真有问题的话，30 分钟内的探活会重新把它标红。
         updateAccount(target, { lastVerifyError: undefined })
+        // 0.1.82：重登意图被消费的同时，**添加模式也必须一起消费** ——
+        // 否则它会残留到下一次无关的捕获，把新号当"添加"处理。
+        endAddAccount()
         return { mode: 'relogin', created: false, recordId: record.id }
       }
       // 认得出"这是另一个号"（或那条记录已被移除）→ 放行成普通捕获，别覆盖别人的记录

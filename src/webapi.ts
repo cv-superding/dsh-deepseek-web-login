@@ -804,6 +804,27 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
    * 网页端会在 HTTP 200 上裹一层 `{code, msg, data:{biz_code,biz_msg}}` ——
    * 只看 `resp.ok` 会把"其实没删掉"当成成功（F07 踩过这个坑）。
    */
+  /**
+   * 批量删除的响应该怎么定性（0.1.82）。
+   *
+   * 三态而不是两态，因为"失败"里混着两类完全不同的东西：
+   *  · `unsupported` —— 服务端**听懂了但拒绝**（4xx，或 HTTP 200 里裹业务错误信封，F07 形态）
+   *    ⇒ 可以永久关掉批量，之后逐个删；
+   *  · `transient` —— 5xx / 429 / 网关 HTML（非 JSON 正文）⇒ **瞬时**问题，
+   *    据此永久关掉批量就会让此后每批退化成 N 个请求（自己把请求密度抬上去）。
+   */
+  async function classifyDeleteResp(resp: Response): Promise<'ok' | 'unsupported' | 'transient'> {
+    if (!resp.ok) return resp.status >= 500 || resp.status === 429 ? 'transient' : 'unsupported'
+    const text = await resp.text().catch(() => '')
+    try {
+      const json = text ? JSON.parse(text) : undefined
+      if (json && envelopeError(json)) return 'unsupported'
+      return 'ok'
+    } catch {
+      return 'transient'
+    }
+  }
+
   async function respLooksOk(resp: Response): Promise<boolean> {
     let ok = resp.ok
     if (ok) {
@@ -858,16 +879,23 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
           body: JSON.stringify({ chat_session_ids: batch.map((b) => b.sessionId) }),
           signal: AbortSignal.timeout(15_000),
         })
-        const ok = await respLooksOk(resp)
-        if (ok) {
+        const verdict = await classifyDeleteResp(resp)
+        if (verdict === 'ok') {
           // 批量删只发一个请求，服务端接受即认为这一批都删掉了（它不逐个回报）。
           // 所以只对"同账号 + 无业务错误"的批次这样处理 —— 见上面的 F07 说明。
           for (const item of batch) emitSessionLifecycle({ kind: 'deleted', sessionId: item.sessionId })
           logger?.debug?.(`deepseek-web: 已批量清理 ${batch.length} 个临时会话（只用了 1 个请求）`)
           return
         }
-        batchUnsupported = true
-        logger?.debug?.('deepseek-web: 服务端不接受批量删除会话，之后改为逐个删除')
+        // ⚠️ 0.1.82：只有"服务端明确说不行"才能永久关掉批量 ——
+        // 5xx / 429 / 网关 HTML / 非 JSON 正文都是**瞬时**问题，按旧写法一次抖动就
+        // 让此后每批退化成 N 个请求（等于自己把请求密度抬上去）。
+        if (verdict === 'unsupported') {
+          batchUnsupported = true
+          logger?.debug?.('deepseek-web: 服务端不接受批量删除会话，之后改为逐个删除')
+        } else {
+          logger?.debug?.(`deepseek-web: 批量删除本次失败（HTTP ${resp.status}），按瞬时问题处理，下次仍试批量`)
+        }
       } catch {
         // 网络异常 ≠ 不支持，下次仍可尝试
       }
@@ -1409,6 +1437,12 @@ export function createSseState(options: SseStateOptions = {}) {
       emitText(out, text)
     } else if (sink === 'fragments') {
       appendToLastFragment(text, out)
+    } else {
+      // 0.1.82：`sink` 还没定（快照整帧丢失 / `fragments` 为空）时**不能丢字** ——
+      // 与 `appendToLastFragment` 的兜底对齐。按本文件自己的纪律：
+      // 两种错法代价不对等（当正文吐出去最多是难看，丢掉就是正文缺一段）。
+      directText += text
+      emitText(out, text)
     }
   }
 

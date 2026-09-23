@@ -1374,9 +1374,9 @@ function Panel(): any {
       if (status.fingerprint?.pageWebdriver !== undefined) {
         rows.push(['webdriver', status.fingerprint.pageWebdriver ? '⚠️ true（自动化痕迹）' : '✅ false'])
       }
-      renderKv(rows)
-
-      browserBtn.disabled = false
+      // ⚠️ 0.1.82：这一段必须在 renderKv 之前 —— 此前 `renderKv(rows)` 在它上面，
+      // 「宿主进程」这一行 push 进去时表格已经画完了 ⇒ **那行永远不显示**，
+      // 而"窗口打不开"时它恰恰是唯一能说明原因的证据。
       // 登录能力自检（2026-09-11 事故：DSH 把插件宿主挪到 utility 进程后，窗口 API 没了）
       const capability = status.loginCapability
       if (capability) {
@@ -1386,6 +1386,11 @@ function Panel(): any {
             ? `无窗口 API（${capability.processType} 进程）→ 用真实浏览器`
             : `无窗口 API（${capability.processType} 进程）且未找到 Edge/Chrome`
         rows.push(['宿主进程', `${capability.processType} · ${mode}`])
+      }
+      renderKv(rows)
+
+      if (!browserBtn.dataset.busy) browserBtn.disabled = false
+      if (capability) {
         browserBtn.textContent = capability.canOpenWindow ? '浏览器窗口登录' : capability.browser ? `用 ${capability.browser} 登录` : '浏览器窗口登录'
         browserBtn.disabled = !capability.canOpenWindow && !capability.browser
         browserBtn.title = capability.canOpenWindow
@@ -1775,7 +1780,13 @@ function Panel(): any {
       )
       push('台账占用', `${data.footprint?.files ?? 0} 个文件 · ${Math.round((data.footprint?.bytes ?? 0) / 1024)} KB`)
       const hourly: number[] = Array.isArray(data.hourly) ? data.hourly : []
-      ledgerSparkBox.innerHTML = sparkSvg(hourly, new Set())
+      // 0.1.82：失败时段此前恒传空集 ⇒ `.bad` 是死样式、"标红"从未生效
+      const failedHours = new Set<number>()
+      const hourlyFailed: number[] = Array.isArray(data.hourlyFailed) ? data.hourlyFailed : []
+      hourlyFailed.forEach((count, index) => {
+        if (count > 0) failedHours.add(index)
+      })
+      ledgerSparkBox.innerHTML = sparkSvg(hourly, failedHours)
       ledgerSparkBox.append(el('p', 'dsw-hint', `每小时调用量（最近 1 小时在最右，峰值 ${Math.max(0, ...hourly)} 次）`))
     }
 
@@ -2196,6 +2207,7 @@ function Panel(): any {
       maxRequestIntervalMs?: number
       sessionCleanup?: string
       maxPromptChars?: number
+      maxRefImages?: number
       cleanupBatch?: { min: number; max: number }
       cleanupDelayMs?: { min: number; max: number }
       cleanupGapMs?: { min: number; max: number }
@@ -2292,6 +2304,9 @@ function Panel(): any {
     browserBtn.addEventListener('click', () => {
       void (async () => {
         browserBtn.disabled = true
+        // 轮询（2 秒一次）会无条件把它设回可用 ⇒ 用标记让 applyStatus 跳过重算，
+        // 否则用户在等待期间再点一下就会开第二个登录窗口（并发提交凭证）。
+        browserBtn.dataset.busy = '1'
         showMessage(
           '正在启动浏览器……会先清掉上次的登录状态，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。',
         )
@@ -2320,6 +2335,7 @@ function Panel(): any {
         } catch (error: any) {
           showMessage(`打开登录窗口失败：${error?.message ?? error}`, 'err')
         }
+        delete browserBtn.dataset.busy
         boostUntil = Date.now() + 5 * 60_000
         await refresh(false)
       })()

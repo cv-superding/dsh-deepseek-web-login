@@ -936,6 +936,24 @@ function parseParameterValue(raw: string): unknown {
  * 支持：`<tool_calls>`/`<function_calls>` 包裹、裸 `<invoke>`、`|DSML|` 前缀、
  * CDATA 值、属性任意顺序、围栏包裹。
  */
+/**
+ * XML 家族里**最后一个闭合调用块之后**的正文。
+ *
+ * 为什么需要它（0.1.82）：XML 捕获态是一直吃到轮末的（`flush` 才结算）。收不到包裹收尾时，
+ * 整段——包括调用块**之后的正文**——都留在 buffer 里；而 `flush` 只回吐 `calls`，
+ * 那段正文既不回吐也不计入 rejected ⇒ 回答"凭空中断"，且日志里零线索。
+ * 这里只负责定位"最后一个 `</invoke>` 家族收尾之后"的部分，交给 flush 剥残片后透出。
+ * 找不到收尾标签（抢救解析路径）时返回空串 —— 保持旧行为，不猜。
+ */
+export function xmlToolCallTail(block: string): string {
+  const text = normalizeDsml(block).replace(FENCE_HEAD_RE, '').replace(/```\s*$/, '')
+  const closeRe = new RegExp(`${TAG_CLOSE_PREFIX}invoke\\s*>`, 'gi')
+  let end = -1
+  let match: RegExpExecArray | null
+  while ((match = closeRe.exec(text)) !== null) end = match.index + match[0].length
+  return end >= 0 ? text.slice(end) : ''
+}
+
 export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
   const text = normalizeDsml(block).replace(FENCE_HEAD_RE, '').replace(/```\s*$/, '')
   const invokeRe = new RegExp(`${TAG_OPEN_PREFIX}invoke\\b([^>]*)>([\\s\\S]*?)${TAG_CLOSE_PREFIX}invoke\\s*>`, 'gi')
@@ -1262,8 +1280,11 @@ export class ToolCallStreamFilter {
       const captured = this.capture
       const calls =
         captured.mode === 'xml' ? parseXmlToolCalls(captured.buffer) : parseSalvagedToolCallJson(captured.buffer)
-      if (calls) out.calls.push(...calls)
-      else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
+      if (calls) {
+        out.calls.push(...calls)
+        // 0.1.82：调用块**之后**的正文不能跟着一起消失 —— 见 xmlToolCallTail 的说明。
+        if (captured.mode === 'xml') out.text += stripStrayToolMarkup(xmlToolCallTail(captured.buffer))
+      } else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
         this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
       // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，
       // ⚠️ 但必须先剥残片：实测过 `<|DSML|calls>` + 闭合标签这种退化块会从这里漏到正文（2026-09-12）。
