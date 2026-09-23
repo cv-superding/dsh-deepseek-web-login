@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/hero.svg" alt="dsh-deepseek-web-login — 用 chat.deepseek.com 网页版登录态驱动 DSH agent" width="900">
+<img src="docs/assets/banner-dsh-deepseek-web-login.jpg" alt="dsh-deepseek-web-login — 用 chat.deepseek.com 网页版登录态驱动 DSH agent" width="900">
 
 [**中文**](README.md) · [English](README.en.md)
 
