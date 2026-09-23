@@ -427,7 +427,7 @@ cipher 列表哈希与 Chrome 逐字节一致 —— 且**零新依赖**（不�
 - **工具目录有预算上限**：DSH 下发的工具定义会尽量全部写进 prompt（0.1.33 前只有 2.4 万字符预算，实测 61 个工具时静默砍掉了 26 个）。工具特别多或描述特别长时仍可能装不下，此时会把**没描述到的工具名列出来**，让模型向用户确认参数，而不是默默砍掉
 - **单次请求 60s 上限**（`completion_request_timeout_ms`）：网页端靠 `sse_auto_resume` 续接，**本插件不实现续接**；流在没有 `FINISHED` 标记的情况下结束时报 `max-tokens`，而不是假装正常完成
 - **思考模式的推理过程不进上下文**：历史序列化只回放正文与工具调用/结果，以省 token
-- **图片**：走上传通道（`/api/v0/file/upload_file` → `ref_file_ids`）。上传失败时降级为 `[image attached]` 文本标记，**并在回答开头明确告知**「有 N 张图片没能传给模型（原因）」 —— 图丢了不会再无声无息（0.1.66 前只写日志，界面上看不出来）。同一张图在历史里出现多次（用户消息 + `read_image` 工具结果内嵌）时 `ref_file_ids` **自动去重**：服务端不接受重复 id（`biz_code 9 / invalid ref file id`），被拒后整条会话后续每轮都会失败。**上传时文件名必须带受支持的图片后缀**（png / jpg / jpeg / webp / gif）：服务端是按**文件名后缀**判类型的，multipart 里的 `content-type` 说了不算 —— 而宿主给 `read_image` 这类工具结果的 `name` 是**纯 sha256、没有后缀**。0.1.68 起由 `imageUploadName()` 统一归一回 `image.<ext>`（0.1.67 及以前：凡是经工具返回的图，一律传不上去）
+- **图片**：走上传通道（`/api/v0/file/upload_file` → `ref_file_ids`）。上传失败时降级为 `[image attached]` 文本标记，**并在回答开头明确告知**「有 N 张图片没能传给模型（原因）」 —— 图丢了不会再无声无息（0.1.66 前只写日志，界面上看不出来）。同一张图在历史里出现多次（用户消息 + `read_image` 工具结果内嵌）时 `ref_file_ids` **自动去重**：服务端不接受重复 id（`biz_code 9 / invalid ref file id`），被拒后整条会话后续每轮都会失败。**上传时文件名必须带受支持的图片后缀**（png / jpg / jpeg / webp / gif）：服务端是按**文件名后缀**判类型的，multipart 里的 `content-type` 说了不算 —— 而宿主给 `read_image` 这类工具结果的 `name` 是**纯 sha256、没有后缀**。0.1.68 起由 `imageUploadName()` 统一归一回 `image.<ext>`（0.1.67 及以前：凡是经工具返回的图，一律传不上去）。**0.1.83 起链式投喂的后续轮不再重复引用历史图片**：服务端按 `parentMessageId` 链回溯时，历史消息的附件本来就在它的上下文里（真机实测：两张不同布局的图、第二轮都不带 `ref_file_ids`，仍都答对四个角），所以旧行为「每轮把最近 24 张重挂一遍」纯属冗余 —— 那会让网页端每条新消息下都挂一批同样的图、会话内的图片引用越积越多。现在只有**全量重发**（新会话 / 换号 / 系统提示变了）或**这一轮确实新贴了图**时才发送引用
 - **DSH 渲染层把单个 `$` 当行内公式（不是本插件的行为）**：DSH 前端的 markdown 默认开 `singleDollarTextMath`，所以含 `$` 的文本会被渲染成公式 —— 现象是 **`$` 消失、`-` 变成 `−`(U+2212)、`|` 变成 `∣`(U+2223)，字母被逐个拆行而数字串（如 `256`）仍连在一起**。PowerShell / bash 命令首当其冲，看起来极像「模型输出了乱码」。判据：**原文能完整复原 ⇒ 不是模型退化**（退化会丢信息，编码/渲染错只是把信息换了个样子）。规避：讨论命令时套围栏代码块或行内反引号 —— 代码构造里不跑数学扩展。
 - `temperature` / `stop` / `max_tokens` 网页端无对应字段，会被忽略；usage 为**估算值**（网页端不返回 token 计数）
 - 免费额度有频控；`429` 会带上 `providerRetryAfterMs` 交给 DSH 的重试策略
@@ -453,6 +453,7 @@ node tests/check-context-feed.mjs    # 上下文投喂判据（增量/回退的�
 node tests/check-context-chain.mjs   # 链式投喂接线与生命周期（假 transport + 假 SSE）
 node tests/check-image-refs.mjs       # 图片引用组装（同一张图去重 + 图丢了要写进回答）
 node tests/check-image-ref-reject.mjs # 图片引用被拒（code 9）→ 识别 + 两级降级重试；授权失败则中止剩余上传
+node tests/check-image-chain-send.mjs # 链式投喂只发「服务端还没见过的」图（新贴的图不能丢）
 node tests/check-bugfix-0182.mjs      # 全库审查确认的缺陷（图片上限落盘 / 重登保元数据 / 重登意图等）
 node tests/check-stale-auth.mjs       # 已知授权失效的账号不许发请求（含行为侧：请求到底发没发）
 node tests/count-session-images.mjs # 某个会话里累积了多少「图片内容条目」（回答"我没发这么多图"的质疑）

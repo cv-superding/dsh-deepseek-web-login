@@ -692,6 +692,27 @@ const checks = {
     client.includes('dataset.busy'),
   'client 把台账的失败时段传给迷你图（此前恒传空集、标红从未生效）':
     client.includes('hourlyFailed'),
+
+  // ── 0.1.83：链式投喂只发"服务端还没见过的"图片 ──────────────────────────
+  // 判据必须落在**决策点**（decideFeed 之后），而不是用"上一轮是什么"去预测
+  'host 的图片分流在 decideFeed 之后按 parentMessageId 判定（有父链才谈得上"服务端已有"）':
+    /const refIdsToSend = feed\.parentMessageId !== null \? askedRefIds\.filter\(\(id\) => !sentRefIds\.has\(id\)\) : askedRefIds;/.test(host),
+  // 守"省"真的接上了：请求体用的是分流结果，而不是原始入参（旧形态必须消失）
+  'host 的请求体用的是分流结果（旧形态 ref_file_ids: params.refFileIds 已消失）':
+    /ref_file_ids: refIdsToSend/.test(host) && !/ref_file_ids: params\.refFileIds/.test(host),
+  // ⚠️ 守"新贴的图不能丢"：分流是**差集**，绝不能退化成"chained 就清空"
+  'host 的分流是差集而非清空（否则本轮新贴的图会丢）':
+    /\.filter\(\(id\) => !sentRefIds\.has\(id\)\)/.test(host),
+  'host 只在请求被服务端接受后才记账（失败不算，免得下轮误以为它已经拿到了）':
+    // ⚠️ 别写 `return { sessionId, resp, feed };` —— 打包器会把这个对象**折成多行**，
+    // 那种断言会假红（第一版就栽在这）。用 `return \{` 收尾即可。
+    /for \(const id of refIdsToSend\) sentRefIds\.add\(id\);[\s\S]{0,60}?return \{/.test(host),
+  'host 的"服务端已知"集合按会话归属（会话换了就整批作废）':
+    /if \(sentRefIdsSession !== sessionId\) \{[\s\S]{0,90}?sentRefIdsSession = sessionId;/.test(host),
+  // ⚠️ 只断 disposeSessionReuse：`resetSessionReuse` 是测试专用、没有生产调用点，
+  // 会被打包器 tree-shake 掉（产物里 0 次命中）—— 拿它写断言必然假红。
+  'host 的会话退役会清掉"服务端已知"集合（否则新会话会误以为图已经发过）':
+    /function disposeSessionReuse\(\) \{[\s\S]{0,200}?sentRefIds = /.test(host),
 }
 
 let failed = 0

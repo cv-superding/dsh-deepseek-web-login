@@ -1750,6 +1750,18 @@ let reuseSlot: { key: string; sessionId: string; turns: number; cleanup?: (id: s
 let contextChain: ChainState | undefined
 
 /**
+ * 服务端**已知**的图片 file_id（0.1.83）：本会话内已经随请求发出去过的那批。
+ *
+ * 只用于链式投喂：走 `chained`（有父链）时服务端会回溯历史、那张图已经在它的上下文里，
+ * 于是每轮重带整批是纯冗余 —— 真机实测见 tests/probe-image-chain.mjs（两张不同布局的图、
+ * 第二轮都不带 `ref_file_ids`，仍都答对四个角）。
+ * 会话换掉就整批作废：新会话没有那份历史。
+ */
+let sentRefIds = new Set<string>()
+/** `sentRefIds` 归属的会话 id（见上）。 */
+let sentRefIdsSession: string | undefined
+
+/**
  * 上一次上报过的决策原因（0.1.63）。链式投喂的决策每轮都在做，
  * 但"原因"通常连续几百轮都不变 —— 只在**变化时**上报，日志才不会被刷满，
  * 同时"哪一轮开始退回全量、为什么"又一定能看见。
@@ -1849,6 +1861,9 @@ export function retireSession(sessionId?: string): void {
 export function disposeSessionReuse(): string | undefined {
   const slot = reuseSlot
   contextChain = undefined
+  // 0.1.83：图片的"服务端已知"集合同样归会话所有，会话退役就作废
+  sentRefIds = new Set()
+  sentRefIdsSession = undefined
   if (!slot) return undefined
   reuseSlot = undefined
   try {
@@ -1865,6 +1880,9 @@ export function resetSessionReuse(): void {
   contextChain = undefined
   // 决策回执的状态也是模块级的（见 lastFeedReason），一并清掉，测试之间才互不干扰
   lastFeedReason = undefined
+  // 0.1.83：图片的"服务端已知"集合也是模块级的，一并清掉
+  sentRefIds = new Set()
+  sentRefIdsSession = undefined
 }
 
 /** 链式投喂的决策回执（见 CompletionParams.onContextFeed）。 */
@@ -1971,6 +1989,23 @@ async function openCompletion(
         promptChars: feed.prompt.length,
       })
     }
+    // ── 0.1.83：图片只发"服务端还没见过的" ────────────────────────────────
+    // 旧行为每轮都带整批：`adapter.ts` 的 `refFileIds: rounds === 0 ? refFileIds : []`
+    // 本是给「自动续写」用的判据（第 2 轮不重带），而**链式投喂每轮都是新的 streamImpl 调用**
+    // ⇒ `rounds` 恒为 0 ⇒ 顺带每轮都重挂一遍（网页端每条新消息下都挂一批图、会话内引用单调累积）。
+    //
+    // 判据放在**决策点**（`decideFeed` 之后），而不是用"上一轮是什么"去预测：
+    //   · 有父链 ⇒ 服务端手里已有 ⇒ 只发新增的那几张（多数轮是 0 张）
+    //   · 全量重发（restart / 新会话 / 切号 / head 变了）⇒ 服务端手里没有 ⇒ 发全部
+    // ⚠️ 不能写成"chained 就完全不带"：用户**这一轮新贴**的图只存在于增量里，漏了就是功能坏。
+    if (sentRefIdsSession !== sessionId) {
+      sentRefIds = new Set()
+      sentRefIdsSession = sessionId
+    }
+    const askedRefIds = params.refFileIds ?? []
+    const refIdsToSend =
+      feed.parentMessageId !== null ? askedRefIds.filter((id) => !sentRefIds.has(id)) : askedRefIds
+
     let resp: Response
     try {
       resp = await activeFetch(`${DS_BASE}/api/v0/chat/completion`, {
@@ -1985,7 +2020,7 @@ async function openCompletion(
           // 链式投喂时是上一条 assistant 的 message_id；全量模式恒为 null（根消息、无父链）。
           parent_message_id: feed.parentMessageId,
           prompt: feed.prompt,
-          ref_file_ids: params.refFileIds ?? [],
+          ref_file_ids: refIdsToSend,
           thinking_enabled: params.thinkingEnabled,
           search_enabled: params.searchEnabled ?? false,
           model_type: params.modelType,
@@ -2031,7 +2066,12 @@ async function openCompletion(
 
     // HTTP 200 也可能是「业务错误信封」或 HTML 挑战页 —— 非 SSE 一律先当错误处理
     const contentType = String(resp.headers.get('content-type') ?? '')
-    if (contentType.includes('text/event-stream')) return { sessionId, resp, feed }
+    if (contentType.includes('text/event-stream')) {
+      // 请求已被服务端接受 ⇒ 这批 file_id 进了它的上下文（下一轮起不必再带）。
+      // ⚠️ 只在**接受之后**记：失败/被拒的请求不算，免得下一轮误以为服务端已经拿到了。
+      for (const id of refIdsToSend) sentRefIds.add(id)
+      return { sessionId, resp, feed }
+    }
 
     const text = await resp.text().catch(() => '')
     let parsed: any
