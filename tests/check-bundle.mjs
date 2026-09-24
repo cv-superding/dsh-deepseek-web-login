@@ -655,8 +655,10 @@ const checks = {
   'host 的 /accounts/switch 与 /logout 也会清重登意图':
     /route === "\/accounts\/switch"[\s\S]{0,220}?endRelogin\(\)/.test(host) &&
     /route === "\/logout"[\s\S]{0,220}?endRelogin\(\)/.test(host),
-  'host 的重登分支会一并消费掉添加模式':
-    /endAddAccount\(\);\s*return \{\s*mode: "relogin"/.test(host),
+  // 0.1.84：endAddAccount 挪进了 finally（落库抛错也不再泄漏添加模式）——
+  // 按**意图**断：两个模式都在 finally 里被消费，而不是断"在 return 之前"那个旧位置。
+  'host 的重登分支会一并消费掉添加模式（finally 里，落库抛错也不泄漏）':
+    /finally \{\s*endAddAccount\(\);\s*endRelogin\(\);/.test(host),
   // P1-1：CDP 路径必须先校验身份再落库（此前先 commit ⇒ 每次登录都新增一条、serverId 永远补不上）
   'host 的浏览器登录改为「先校验身份、再落库」':
     /commitCapturedAuth\(verified \? withVerifiedIdentity\(outcome\.auth, check\?\.user\)/.test(host) &&
@@ -713,6 +715,22 @@ const checks = {
   // 会被打包器 tree-shake 掉（产物里 0 次命中）—— 拿它写断言必然假红。
   'host 的会话退役会清掉"服务端已知"集合（否则新会话会误以为图已经发过）':
     /function disposeSessionReuse\(\) \{[\s\S]{0,200}?sentRefIds = /.test(host),
+
+  // ── 0.1.84：0.2.0-a 修复批（R3 看门狗 / R7 浏览器清理 / relogin 泄漏 / R8 fail-closed）──
+  'host 的闸门许可带看门狗（被丢弃的许可超阈值强制回收 + 告警，只在串行模式）':
+    /now\(\) - leasedAt > leaseWatchdogMs/.test(host) &&
+    host.includes('强制释放') &&
+    /!allowConcurrent && running > 0/.test(host),
+  'host 的浏览器登录主循环看子进程退出码（关掉浏览器不再空转到 deadline）':
+    /reason: "browser-closed"/.test(host),
+  'host 清 profile 失败会先杀残留浏览器进程重试（不再静默吞 EBUSY）':
+    /lastSpawnedChild\?\.kill\(\)/.test(host),
+  'host 的 logout 不再用 || 掩盖 profile 清理失败（分区维度按环境能力考核）':
+    // ⚠️ 打包器把 partitionCleared 变量内联进了表达式 —— 按产物真实形态断。
+    /const partitionOK = await clearLoginPartition\(\)\.catch\(\(\) => false\) \|\| !electronAvailable\(\)/.test(host) &&
+    /browserProfileCleared && partitionOK/.test(host),
+  'host 的手动粘贴 token 对「包装 JSON 解出空」fail-closed（不再把 JSON 当 token 落盘）':
+    /raw\.startsWith\("\{"\) && !unwrapStoredToken\(token\)/.test(host),
 }
 
 let failed = 0

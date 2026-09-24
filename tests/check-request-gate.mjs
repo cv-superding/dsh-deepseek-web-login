@@ -737,6 +737,65 @@ await test('prompt 上限：能落盘并读回（别只存内存）', () => {
   }
 })
 
+console.log('\n许可看门狗（R3，0.1.84）：')
+
+await test('许可被丢弃（拿到不调 release）：超过阈值后，下一个 acquire 强制回收 + 告警', async () => {
+  const clock = fakeClock()
+  const warns = []
+  const gate = createRequestGate({
+    allowConcurrent: false,
+    minIntervalMs: 0,
+    leaseWatchdogMs: 1_000,
+    now: clock.api.now,
+    sleep: clock.api.sleep,
+    logger: { warn: (m) => warns.push(m) },
+  })
+  await gate.acquire('chat') // 故意不 release —— 模拟宿主丢弃 generator
+  clock.advance(2_000) // 拨过看门狗阈值
+  const r2 = await gate.acquire('chat')
+  assert.ok(typeof r2 === 'function', '第二个 acquire 应当成功 —— 看门狗必须强制回收被丢弃的许可，否则这里会永久卡住')
+  assert.ok(warns.some((m) => m.includes('强制释放')), `应当有强制释放告警，实际 warns=${JSON.stringify(warns)}`)
+  r2()
+})
+
+await test('正常释放的许可不会被看门狗误判', async () => {
+  const clock = fakeClock()
+  const warns = []
+  const gate = createRequestGate({
+    allowConcurrent: false,
+    minIntervalMs: 0,
+    leaseWatchdogMs: 1_000,
+    now: clock.api.now,
+    sleep: clock.api.sleep,
+    logger: { warn: (m) => warns.push(m) },
+  })
+  const r1 = await gate.acquire('chat')
+  r1() // 正常释放
+  clock.advance(60_000)
+  const r2 = await gate.acquire('chat')
+  assert.equal(warns.length, 0, `正常释放不应触发告警，实际 warns=${JSON.stringify(warns)}`)
+  r2()
+})
+
+await test('并发模式不看门狗（避免误杀同时活着的合法许可）', async () => {
+  const clock = fakeClock()
+  const warns = []
+  const gate = createRequestGate({
+    allowConcurrent: true,
+    minIntervalMs: 0,
+    leaseWatchdogMs: 1_000,
+    now: clock.api.now,
+    sleep: clock.api.sleep,
+    logger: { warn: (m) => warns.push(m) },
+  })
+  const r1 = await gate.acquire('a')
+  clock.advance(60_000) // 远超阈值 —— 但并发模式下看门狗必须不管
+  const r2 = await gate.acquire('b')
+  assert.equal(warns.length, 0, `并发模式不应触发看门狗（同时活着的许可可能不止一个，全局跟踪会误杀），实际 warns=${JSON.stringify(warns)}`)
+  r1()
+  r2()
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const f of failures) console.log('  ' + f)

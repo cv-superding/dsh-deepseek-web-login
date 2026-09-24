@@ -269,7 +269,9 @@ export function getLastLoginResult(): { ok: boolean; message: string; at: string
  */
 export function canOpenElectronWindow(): boolean {
   return canOpenElectronWindowWith({
-    versions: process.versions,
+    // @types/node 的 ProcessVersions **不含** electron 字段（Electron 运行时注入）——
+    // 进程边界上做一次断言，类型上承认"这里有个未知的 electron 版本位"。
+    versions: process.versions as unknown as { electron?: string },
     processType: (process as any).type,
     loadElectron: () => createRequire(import.meta.url)('electron'),
   })
@@ -814,7 +816,17 @@ export async function loginWithToken(
   cookie?: string,
   logger?: { info?: (m: string) => void },
 ): Promise<{ ok: boolean; error?: string; display?: string }> {
-  const trimmed = unwrapStoredToken(token) || String(token ?? '').trim()
+  // R8（0.1.84）fail-closed：输入是包装 JSON（localStorage 原文）但 unwrap 解出空 ——
+  // value 为 null / 坏 JSON。绝不能把整段 JSON 当 token 落盘（旧写法 `unwrap(...) || 原始串` 会 fail-open，
+  // 一个 >8 字符的 JSON 文本就过了长度检查，垃圾凭证入库）。
+  const raw = String(token ?? '').trim()
+  if (raw.startsWith('{') && !unwrapStoredToken(token)) {
+    return {
+      ok: false,
+      error: '粘贴的内容像 localStorage 包装 JSON，但解不出 token（value 为空或已损坏）——请只复制其中的字符串值，或直接粘贴裸 token',
+    }
+  }
+  const trimmed = unwrapStoredToken(token) || raw
   if (trimmed.length < 8) return { ok: false, error: 'token 太短，请确认复制的是 chat.deepseek.com 的登录 token' }
   const auth: WebAuth = {
     token: trimmed,
@@ -918,12 +930,18 @@ export async function logout(): Promise<boolean> {
   // ⚠️ 必须 await：调用方（面板的「退出并登录其它账号」）紧接着就会打开登录窗口，
   // 分区没清完的话新窗口会带着旧账号的 cookie 打开 → 又登录回同一个账号。
   const partitionCleared = await clearLoginPartition().catch(() => false)
-  const cleared = partitionCleared || browserProfileCleared
+  // 0.1.84（R7）：不能用 || 掩盖 —— profile 没清 = 浏览器里还留着登录态，下次「浏览器窗口登录」
+  // 会直接复用旧登录态（等于没退出，上面注释自己写了这个后果）。
+  // 分区维度只在「环境真有 Electron」时才考核：桌面外环境没有分区可清，不该拖后腿。
+  const partitionOK = partitionCleared || !electronAvailable()
+  const cleared = browserProfileCleared && partitionOK
   lastResult = {
     ok: true,
     message: cleared
       ? '已退出登录：本地凭证与浏览器登录态都已清除'
-      : '已退出登录：本地凭证已清除（浏览器登录态未能清理——非主进程环境或清理失败，登录窗口可能仍是旧账号，请手动退出网页端）',
+      : !browserProfileCleared
+        ? '已退出登录：本地凭证已清除，但**浏览器登录态未清掉**（浏览器窗口还开着或进程残留）——下次「浏览器窗口登录」会直接复用旧登录态，相当于没退出；请关掉浏览器后重试'
+        : '已退出登录：本地凭证已清除（浏览器分区清理失败，登录窗口可能仍是旧账号，请手动退出网页端）',
     at: new Date().toISOString(),
   }
   return cleared

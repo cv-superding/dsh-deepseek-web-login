@@ -17,6 +17,7 @@ import { accountsSignature, shouldSyncAccounts } from '../account-sync.ts'
 
 type ClientContext = {
   slots: any
+  effect: any
 }
 
 export const inject = ['slots']

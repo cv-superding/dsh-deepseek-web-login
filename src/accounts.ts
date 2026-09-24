@@ -169,7 +169,7 @@ function readIndex(): AccountsIndex {
   }
 }
 
-function writeIndex(index: AccountsIndex): void {
+function writeIndex(index: Pick<AccountsIndex, 'activeId'>): void {
   writeJsonAtomic(accountsIndexPath(), { version: INDEX_VERSION, ...(index.activeId ? { activeId: index.activeId } : {}) })
 }
 

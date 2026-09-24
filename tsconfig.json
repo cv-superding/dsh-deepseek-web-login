@@ -3,8 +3,13 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023", "DOM"],
-    "types": ["node"],
+    "lib": [
+      "ES2023",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": false,
     "noImplicitAny": false,
     "skipLibCheck": true,
@@ -13,7 +18,10 @@
     "resolveJsonModule": true,
     "verbatimModuleSyntax": false,
     "outDir": "lib",
-    "rootDir": "src"
+    "rootDir": "src",
+    "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

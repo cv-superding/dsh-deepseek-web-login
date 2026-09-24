@@ -39,6 +39,13 @@ export const DEFAULT_MAX_REQUEST_INTERVAL_MS = 4_000
  * 当天该账号两次被临时限制（第二次长达 3 天）。
  */
 export const DEFAULT_LONG_RUN_THRESHOLD = 15
+/**
+ * 许可看门狗阈值（R3）：宿主丢弃 generator（不再驱动也不 return）时，许可的 release 永远不会被调，
+ * tail 永久卡死 —— 串行模式下此后所有请求排队不响应，只能重启 DSH。
+ * 持有超过这个时长仍未释放的许可，会在下一次 acquire 时被强制收回并告警。
+ * 15 分钟 >> 合法的长 turn（批量上传 90 张图约 7 分钟 + 生成几分钟），不会误杀。
+ */
+export const DEFAULT_LEASE_WATCHDOG_MS = 15 * 60_000
 /** 长休时长区间（1~3 分钟）。 */
 export const DEFAULT_LONG_RUN_BREAK_MS: CleanupRange = { min: 60_000, max: 180_000 }
 /** 长休区间的合法范围（30 秒 ~ 10 分钟）。 */
@@ -270,6 +277,11 @@ export interface RequestGateOptions {
   longRunBreakMs?: CleanupRange
   /** 随机源（单测注入用）。 */
   random?: () => number
+  /**
+   * 许可看门狗阈值（毫秒，R3）。缺省 DEFAULT_LEASE_WATCHDOG_MS。
+   * 单测注入小值即可确定性触发强制回收。
+   */
+  leaseWatchdogMs?: number
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void }
   /** prompt 字符上限（本模块不执行，只是存下来以便落盘与回显）。 */
   maxPromptChars?: number
@@ -321,6 +333,10 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   if (maxIntervalMs < minIntervalMs) maxIntervalMs = minIntervalMs
   const random = options.random ?? Math.random
   const now = options.now ?? (() => Date.now())
+  // R3 看门狗：最近一次许可的发放时刻与它的 release 回调（仅串行模式跟踪）。
+  const leaseWatchdogMs = options.leaseWatchdogMs ?? DEFAULT_LEASE_WATCHDOG_MS
+  let leasedAt = 0
+  let activeRelease: (() => void) | undefined
   /**
    * 默认等待：把定时器**挂在 promise 上**，好让 `waitOrAbort` 在取消/结算时把它清掉。
    *
@@ -396,6 +412,20 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       })
     }
 
+    // R3 看门狗（0.1.84）：宿主丢弃 generator（不再驱动也不 return）时，许可的 release 永远不会被调，
+    // tail 永久卡死。检查点放在每次 acquire 进入时 —— 不需要定时器（本项目 unref 有前科），
+    // 锁死后用户的下一条消息自然会走到这里解锁。
+    // ⚠️ 只在串行模式生效：并发模式不排队（tail 不被 await），且同时活着的许可可能不止一个，
+    //    全局跟踪会把刚发的合法许可误判成泄漏。
+    if (!allowConcurrent && running > 0 && activeRelease && now() - leasedAt > leaseWatchdogMs) {
+      const heldMin = Math.round((now() - leasedAt) / 60000)
+      logger?.warn?.(
+        `deepseek-web: 闸门许可已持有 ${heldMin} 分钟未释放 —— 通常是宿主丢弃了进行中的流。` +
+          '强制释放，以免后续请求永久排队。',
+      )
+      activeRelease()
+    }
+
     waiting += 1
     try {
       if (signal?.aborted) throw aborted()
@@ -451,15 +481,21 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
 
     running += 1
     let released = false
-    return () => {
+    const release = () => {
       if (released) return
       released = true
+      leasedAt = 0
+      activeRelease = undefined
       running -= 1
       lastFinishedAt = now()
       hasFinished = true
       consecutive += 1
       releaseMine()
     }
+    // R3：记录租约起始，供看门狗检查。
+    leasedAt = now()
+    activeRelease = release
+    return release
   }
 
   /** 本次实际使用的间隔：区间内随机；上下限相等则固定。 */

@@ -1256,7 +1256,7 @@ export function stripStrayToolMarkup(text: string): string {
 export class ToolCallStreamFilter {
   private pending = ''
   private capture: { mode: 'json' | 'xml'; buffer: string } | null = null
-  private abandoned: { raw: string; mode: 'json' | 'xml' } | null = null
+  private abandoned: { raw: string; mode: 'json' | 'xml'; reason?: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' } | null = null
   private readonly knownTools?: ReadonlySet<string>
 
   constructor(knownTools?: ReadonlySet<string>) {

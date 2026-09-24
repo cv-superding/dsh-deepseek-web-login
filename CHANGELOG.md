@@ -2,6 +2,39 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.1.84 — 2026-09-24
+
+**0.2.0-a 修复批**（依据 `BUG-审查-2026-09-23.md` 第六节 R2~R9 逐行复核结论）+ 全库首次接入类型检查。
+
+修复
+- **R3 闸门看门狗（中高）**：宿主丢弃 generator（不再驱动也不 return）时许可永不释放，
+  tail 永久卡死、此后所有请求排队不响应，只能重启 DSH。现在许可持有超 15 分钟（可配），
+  下一次 acquire 会强制回收 + 告警日志。检查点放在 acquire 进入时（无需定时器）；
+  **只在串行模式生效** —— 并发模式同时活着的许可可能不止一个，全局跟踪会误杀。
+- **R7 Windows「先清登录态」静默失效**：浏览器进程还占着 profile 目录时 rmSync 必 EBUSY，
+  旧实现吞掉后又被 `partitionCleared || browserProfileCleared` 掩盖成"已清"。
+  现在：清 profile 失败先杀残留浏览器进程重试；logout 的判定从 `||` 改为分区维度按环境能力考核
+  （桌面外环境没有分区可清，不该拖后腿），profile 没清就如实说"相当于没退出"。
+- **R7 登录主循环**：只看 `signal.aborted` 不看子进程退出码 —— 用户关掉浏览器后空转到超时。
+  现在看 `child.exitCode` 提前退出并提示。
+- **relogin 分支添加模式泄漏**：`endAddAccount()` 在落库之后，落库抛错会泄漏到下一次无关捕获。
+  挪进 finally（F08 同款保护，relogin 分支此前漏了）。
+- **R8 手动粘贴 token fail-open**：粘贴 localStorage 包装 JSON（value 为 null / 坏 JSON）时，
+  旧写法把整段 JSON 当 token 落盘。现在解出空 ⇒ 明确拒绝并提示怎么改；裸 token 行为不变。
+
+工程
+- **CI 接入 `tsc --noEmit`**：tsdown 只转译不查类型（0.1.82 的 P0-1 就是这么漏的）。
+  全库 2026-09-24 首次清零（71 个存量错误：59 个 `.ts` 导入扩展名由 tsconfig 开关统一解决，
+  12 个真错误逐个修：writeIndex 参数、浏览器 reason 联合类型、ClientContext、
+  writable 断言、process.versions 边界、abandoned 类型、@types/react）。
+
+验证
+- 新增看门狗行为用例 3 条（强制回收+告警 / 正常释放不误判 / 并发模式不误杀）、
+  R8 用例 4 条（check-login-token.mjs，全部零网络）
+- 反向验证 8/8 精确命中（S1/S2 改坏后表现为「下一个 acquire 永久挂起」的 unsettled 警告 ——
+  这正是 R3 锁死症状的直接复现）
+- tsc --noEmit = 0 错误；全量离线回归 49/49
+
 ## 0.1.83 — 2026-09-23
 
 **修**：链式投喂的后续轮不再重复引用历史图片（此前每轮都把最近 24 张重挂一遍）。

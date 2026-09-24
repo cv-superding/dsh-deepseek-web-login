@@ -257,7 +257,16 @@ export interface BrowserLoginOutcome {
   auth?: WebAuth
   message: string
   /** 失败分类，便于面板给出针对性提示。 */
-  reason?: 'no-browser' | 'spawn-failed' | 'no-debug-port' | 'no-page' | 'cdp-failed' | 'timeout' | 'aborted' | 'no-token'
+  reason?:
+    | 'no-browser'
+    | 'spawn-failed'
+    | 'no-debug-port'
+    | 'no-page'
+    | 'cdp-failed'
+    | 'timeout'
+    | 'aborted'
+    | 'no-token'
+    | 'browser-closed'
   /** 浏览器窗口是否仍然开着（超时时保留，用户可继续登录后重试）。 */
   browserLeftOpen?: boolean
 }
@@ -302,6 +311,9 @@ async function cdpJson(port: number, endpoint: '/json/version' | '/json/list', s
  * 用 `origin` **严格相等**，不用 `includes`（审计 F15）：`includes('deepseek.com')` 会命中
  * `chat.deepseek.com.evil.example` 这类域名，也会命中深链页/其它子域，可能选错 target。
  */
+/** R7：本插件最近一次拉起的浏览器子进程（clearBrowserLoginProfile 清理失败时杀它重试）。 */
+let lastSpawnedChild: ChildProcess | undefined
+
 export function isDeepSeekPage(target: any): boolean {
   try {
     return target?.type === 'page' && new URL(String(target.url)).origin === DS_BASE
@@ -382,6 +394,8 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
       stdio: 'ignore',
       detached: false,
     })
+    // R7：模块级留一份引用 —— clearBrowserLoginProfile（模块级函数）清理失败时要能杀掉它重试。
+    lastSpawnedChild = child
   } catch (error: any) {
     return { ok: false, reason: 'spawn-failed', message: `启动 ${browser.name} 失败：${error?.message ?? error}` }
   }
@@ -467,6 +481,12 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
         cleanupBrowser()
         return { ok: false, reason: 'aborted', message: '已取消登录。' }
       }
+      // R7（0.1.84）：用户关掉浏览器后，CDP 调用会一直抛错被内层 catch 吞掉，
+      // 循环要空转到 deadline 才退。看子进程退出码，提前结束。
+      if (child.exitCode !== null || child.killed) {
+        cleanupBrowser()
+        return { ok: false, reason: 'browser-closed', message: '浏览器已关闭，登录已取消。需要的话再点一次「浏览器窗口登录」即可。' }
+      }
       let token = ''
       let pageUserAgent = ''
       try {
@@ -536,6 +556,19 @@ export function clearBrowserLoginProfile(profileDir = DEFAULT_PROFILE_DIR): bool
     rmSync(profileDir, { recursive: true, force: true })
     return true
   } catch {
-    return false
+    // R7（0.1.84）：Windows 上浏览器进程还占着 profile 目录的文件锁 ⇒ rmSync 必 EBUSY。
+    // 旧实现直接吞掉返回 false，调用方再用 || 掩盖 ⇒ 「先清登录态」静默失效。
+    // 先杀掉本插件拉起的残留浏览器再试一次；还不行就返回 false 让调用方如实上报。
+    try {
+      lastSpawnedChild?.kill()
+    } catch {
+      /* 没有可杀的进程就算了 */
+    }
+    try {
+      rmSync(profileDir, { recursive: true, force: true })
+      return true
+    } catch {
+      return false
+    }
   }
 }

@@ -115,7 +115,7 @@ export async function saveWithPicker(
       types: [{ description: 'JSON 备份', accept: { 'application/json': ['.json'] } }],
     })
     const text = await produce()
-    writable = await handle.createWritable()
+    writable = (await handle.createWritable()) as NonNullable<typeof writable>
     await writable.write(new Blob([text], { type: 'application/json' }))
     await writable.close()
     writable = undefined

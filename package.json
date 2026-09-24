@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-web-login",
-  "version": "0.1.83",
+  "version": "0.1.84",
   "description": "Unofficial DSH plugin: use chat.deepseek.com web models as a DSH LLM provider (browser login capture + PoW solving + SSE streaming + prompting-based tool calls), provider route deepseek-web",
   "private": true,
   "type": "module",
@@ -61,6 +61,7 @@
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "@types/react": "19.3.0",
     "tsdown": "0.22.14",
     "typescript": "5.9.3"
   }
