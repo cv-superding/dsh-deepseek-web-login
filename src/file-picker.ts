@@ -145,9 +145,13 @@ export function pickJsonFile(doc: Document = document): Promise<File | undefined
     input.accept = '.json,application/json'
     input.style.display = 'none'
     let settled = false
+    // R9（0.2.0）：兜底超时 —— 没有 cancel 事件的旧环境里，用户关掉选择框后 promise
+    // 会永远挂着（旧注释自己承认"靠它挂着"）。10 分钟足够任何合理操作，超时按取消处理。
+    const timer = setTimeout(() => finish(undefined), 10 * 60_000)
     const finish = (file: File | undefined) => {
       if (settled) return
       settled = true
+      clearTimeout(timer)
       input.remove()
       resolve(file)
     }

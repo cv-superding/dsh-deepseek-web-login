@@ -307,7 +307,10 @@ const checks = {
   // ③ 切号前先探活，失败带 needsRelogin 拦下（别让用户白切一轮）。
   'host 账号登录态可见性三处接线（0.1.61）':
     /lastVerifiedAt:\s*at[\s\S]{0,80}?unverified:\s*false/.test(host) &&
-    /info\.code\s*===\s*["']AUTH["'][\s\S]{0,240}?lastVerifyError:\s*\{/.test(host) &&
+    // 0.2.0（F2）：AUTH 不再直接写 lastVerifyError —— 先 validateAuth 复核，
+    // 确认失效的回调里才落。守"复核在前、落盘在后"这个顺序。
+    /info\.code\s*===\s*["']AUTH["'][\s\S]{0,240}?validateAuth\(/.test(host) &&
+    /info\.code\s*===\s*["']AUTH["'][\s\S]{0,1200}?lastVerifyError:\s*\{/.test(host) &&
     /probeOnce\(target[\s\S]{0,700}?needsRelogin/.test(host),
 
   // 0.1.62（2026-09-14）：链式投喂 —— 这四条都是**接线**，纯函数测试守不住。
@@ -324,7 +327,25 @@ const checks = {
     /sentFeed\?\.next && complete && !poisoned[\s\S]{0,160}?contextChain = \{[\s\S]{0,80}?parentId: responseMessageId/.test(host) &&
     host.includes('context-feed.json'),
 
-  // 0.1.62：设置开关要真的接上（宿主路由 + 客户端按钮都在），否则用户点不到。
+  // ── 0.2.0 ────────────────────────────────────────────────
+  'host 的探活解析 users/current 的限流状态（chat.is_muted / mute_until，F1）':
+    /chat\?\.mute_until \?\? payload\?\.mute_until/.test(host) &&
+    /is_muted === true/.test(host),
+  'host 的探活把限流状态写回账号记录（is_muted=false 时清标记）':
+    /outcome\.limit\.muted && outcome\.limit\.untilMs[\s\S]{0,80}?observedAt: at/.test(host),
+  'host 的 AUTH 复核：探活通过则不标记（端点级误判有出口）':
+    /verdict\.ok[\s\S]{0,200}?按端点级误判处理，不标记失效/.test(host),
+  'host 的 busy 判据不再误吃英文限流文案（R6，"try again later" 已剔除）':
+    /being generated\|请稍后再试\|稍后再试\|正在生成/.test(host) &&
+    !/being generated\|try again later/.test(host),
+  'host 的图片引用按内容 key 记账（refKeys 与 refFileIds 平行，sentRefIds 不再认 fileId）':
+    /key: params\.refKeys\?\.\[index\] \?\? id/.test(host) &&
+    /refKeys: rounds === 0 \? uploaded\.keys : \[\]/.test(host),
+  'client 的台账卡片渲染按账号用量（F3，byAccount + 账号名映射）':
+    client.includes('byAccount') && client.includes('按账号') && client.includes('nameOf'),
+
+
+  // 客户端：（宿主路由 + 客户端按钮都在），否则用户点不到。
   'client/host 上下文投喂设置可切换（0.1.62）':
     /route === ["']\/context-mode["']/.test(host) &&
     /writeContextModeSetting\(wanted\)/.test(host) &&
@@ -698,17 +719,17 @@ const checks = {
   // ── 0.1.83：链式投喂只发"服务端还没见过的"图片 ──────────────────────────
   // 判据必须落在**决策点**（decideFeed 之后），而不是用"上一轮是什么"去预测
   'host 的图片分流在 decideFeed 之后按 parentMessageId 判定（有父链才谈得上"服务端已有"）':
-    /const refIdsToSend = feed\.parentMessageId !== null \? askedRefIds\.filter\(\(id\) => !sentRefIds\.has\(id\)\) : askedRefIds;/.test(host),
+    /const refItemsToSend =\s*feed\.parentMessageId !== null \? askedRefItems\.filter\(\(item\) => !sentRefIds\.has\(item\.key\)\) : askedRefItems/.test(host),
   // 守"省"真的接上了：请求体用的是分流结果，而不是原始入参（旧形态必须消失）
   'host 的请求体用的是分流结果（旧形态 ref_file_ids: params.refFileIds 已消失）':
     /ref_file_ids: refIdsToSend/.test(host) && !/ref_file_ids: params\.refFileIds/.test(host),
   // ⚠️ 守"新贴的图不能丢"：分流是**差集**，绝不能退化成"chained 就清空"
   'host 的分流是差集而非清空（否则本轮新贴的图会丢）':
-    /\.filter\(\(id\) => !sentRefIds\.has\(id\)\)/.test(host),
+    /\.filter\(\(item\) => !sentRefIds\.has\(item\.key\)\)/.test(host),
   'host 只在请求被服务端接受后才记账（失败不算，免得下轮误以为它已经拿到了）':
     // ⚠️ 别写 `return { sessionId, resp, feed };` —— 打包器会把这个对象**折成多行**，
     // 那种断言会假红（第一版就栽在这）。用 `return \{` 收尾即可。
-    /for \(const id of refIdsToSend\) sentRefIds\.add\(id\);[\s\S]{0,60}?return \{/.test(host),
+    /for \(const item of refItemsToSend\) sentRefIds\.add\(item\.key\);[\s\S]{0,60}?return \{/.test(host),
   'host 的"服务端已知"集合按会话归属（会话换了就整批作废）':
     /if \(sentRefIdsSession !== sessionId\) \{[\s\S]{0,90}?sentRefIdsSession = sessionId;/.test(host),
   // ⚠️ 只断 disposeSessionReuse：`resetSessionReuse` 是测试专用、没有生产调用点，

@@ -28,6 +28,8 @@ export interface ProbeOutcome {
   error?: string
   /** 探活成功时顺带带回来的账号身份（用来补全显示名，见下面的写回）。 */
   user?: { id?: string; display?: string }
+  /** F1（0.2.0）：顺带带回来的限流状态（users/current 的 chat.is_muted / mute_until）。 */
+  limit?: { muted: boolean; untilMs?: number }
 }
 
 interface ProbeLogger {
@@ -50,7 +52,12 @@ export async function probeOnce(auth: WebAuth | undefined, logger?: ProbeLogger)
   try {
     const result = await validateAuth(auth, AbortSignal.timeout(20_000))
     outcome = result.ok
-      ? { ok: true, at, ...(result.user ? { user: result.user } : {}) }
+      ? {
+          ok: true,
+          at,
+          ...(result.user ? { user: result.user } : {}),
+          ...(result.limit ? { limit: result.limit } : {}),
+        }
       : { ok: false, at, error: result.error ?? '校验未通过' }
   } catch (error: any) {
     outcome = { ok: false, at, error: error?.message ?? String(error) }
@@ -73,6 +80,15 @@ export async function probeOnce(auth: WebAuth | undefined, logger?: ProbeLogger)
         lastVerifiedAt: at,
         lastVerifyError: undefined,
         unverified: false,
+      }
+      // F1（0.2.0）：探活顺手把限流状态写回 —— 「被限到 X」提前出现在账号徽章上，
+      // 而不是等生成请求撞 muted 才知道；is_muted=false 时**清掉**旧标记（提前看见解除）。
+      // muted=true 但服务端没给解除时间时不写：没有可展示的，写成 untilMs:0 徽章也不亮。
+      if (outcome.limit) {
+        patch.limit =
+          outcome.limit.muted && outcome.limit.untilMs
+            ? { untilMs: outcome.limit.untilMs, observedAt: at }
+            : undefined
       }
       if (outcome.user) {
         patch.user = { ...(target.user ?? {}), ...outcome.user }

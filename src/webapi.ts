@@ -146,7 +146,11 @@ function mutedMessage(untilMs: number | undefined): string {
  * 归为可重试的 RATE_LIMIT，交由 dsh-llm-retry 稍后自动重发，而不是让整轮直接失败。
  */
 export function isBusyGenerating(message: string): boolean {
-  return /being generated|try again later|请稍后再试|稍后再试|正在生成/i.test(String(message ?? ''))
+  // R6（0.2.0）：剔除英文裸短语 "try again later" —— 它是**限流**文案的常见尾巴
+  // （"too many requests, please try again later"），留着会把限流误判成"并发生成"，
+  // 退避从 20s 渐长退化成 5s 固定，撞得更频。实测过的 busy 文案
+  // （"A message is being generated, please try again later."）含 being generated，剔除安全。
+  return /being generated|请稍后再试|稍后再试|正在生成/i.test(String(message ?? ''))
 }
 
 /**
@@ -1094,7 +1098,13 @@ export function classifyAuthEnvelope(json: unknown): { ok: true } | { ok: false;
 export async function validateAuth(
   auth: WebAuth,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; user?: { id?: string; display?: string }; error?: string }> {
+): Promise<{
+  ok: boolean
+  user?: { id?: string; display?: string }
+  /** F1（0.2.0）：users/current 自带的限流状态（chat.is_muted / mute_until），探活顺手带回。 */
+  limit?: { muted: boolean; untilMs?: number }
+  error?: string
+}> {
   try {
     const resp = await activeFetch(`${DS_BASE}/api/v0/users/current`, { headers: buildDsHeaders(auth), signal })
     if (resp.ok) {
@@ -1110,8 +1120,18 @@ export async function validateAuth(
       const payload = json?.data?.biz_data ?? json?.data
       const user = payload?.user ?? payload ?? {}
       const display = pickUserDisplay(user)
+      // F1（0.2.0）：限流状态本来就躺在 users/current 的响应体里（2026-09-12 实测：
+      // 受限期间 chat.is_muted / mute_until 有效）——顺手解析，探活就能"提前看见被限"，
+      // 而不是等生成请求撞 muted 才知道。chat 字段缺失时**不带** limit（不猜）。
+      const chat = payload?.chat
+      const untilRaw = chat?.mute_until ?? payload?.mute_until
+      const untilSec = typeof untilRaw === 'number' ? untilRaw : Number(untilRaw)
+      const untilMs = Number.isFinite(untilSec) && untilSec > 0 ? Math.round(untilSec * 1000) : undefined
       return {
         ok: true,
+        ...(chat && typeof chat.is_muted === 'boolean'
+          ? { limit: { muted: chat.is_muted === true, ...(untilMs ? { untilMs } : {}) } }
+          : {}),
         user: {
           ...(user?.id !== undefined ? { id: String(user.id) } : {}),
           ...(display ? { display } : {}),
@@ -1914,6 +1934,10 @@ export interface CompletionParams {
   modelType: 'default' | 'expert' | 'vision'
   /** 已上传文件的 file_id（图片输入：随请求引用，模型据此看图）。 */
   refFileIds?: readonly string[]
+  /** 与 refFileIds **一一对应**的内容寻址 key（attachmentId，sha256:…）。
+   * 0.2.0：sentRefIds 改按 key 记账 —— uploadCache 驱逐重传会换 fileId，
+   * 按 id 记账会把同一张图记成"两张"，重新打开每轮重发的口子。 */
+  refKeys?: readonly string[]
   signal?: AbortSignal
   idleTimeoutMs?: number
   /**
@@ -2002,9 +2026,16 @@ async function openCompletion(
       sentRefIds = new Set()
       sentRefIdsSession = sessionId
     }
-    const askedRefIds = params.refFileIds ?? []
-    const refIdsToSend =
-      feed.parentMessageId !== null ? askedRefIds.filter((id) => !sentRefIds.has(id)) : askedRefIds
+    // 0.2.0：每项携带着与 id 一一对应的 key（缺省退回 id 本身，向后兼容）。
+    // sentRefIds 按 **key** 记账：fileId 会随 uploadCache 驱逐重传而变，
+    // key 是内容寻址的稳定身份 —— "服务端见没见过这张图"不该取决于这一次用哪个 fileId 引用。
+    const askedRefItems = (params.refFileIds ?? []).map((id, index) => ({
+      id,
+      key: params.refKeys?.[index] ?? id,
+    }))
+    const refItemsToSend =
+      feed.parentMessageId !== null ? askedRefItems.filter((item) => !sentRefIds.has(item.key)) : askedRefItems
+    const refIdsToSend = refItemsToSend.map((item) => item.id)
 
     let resp: Response
     try {
@@ -2069,7 +2100,7 @@ async function openCompletion(
     if (contentType.includes('text/event-stream')) {
       // 请求已被服务端接受 ⇒ 这批 file_id 进了它的上下文（下一轮起不必再带）。
       // ⚠️ 只在**接受之后**记：失败/被拒的请求不算，免得下一轮误以为服务端已经拿到了。
-      for (const id of refIdsToSend) sentRefIds.add(id)
+      for (const item of refItemsToSend) sentRefIds.add(item.key)
       return { sessionId, resp, feed }
     }
 

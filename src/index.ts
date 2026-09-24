@@ -477,15 +477,41 @@ export function apply(ctx: any, config: Config = {}): void {
       // 用户只看到一条报错，不知道是哪个账号的登录态死了（实测 2026-09-14 切号后的空窗）。
       // 回写之后账号库会立刻出现红标「需要重新登录」。
       if (!info.ok && info.code === 'AUTH' && accountId) {
-        updateAccount(accountId, {
-          lastVerifyError: {
-            at: new Date().toISOString(),
-            message: String(info.message ?? '登录态无效，请重新登录'),
-          },
-        })
-        logger.warn?.(
-          `deepseek-web: 账号 ${accountId} 登录态无效（${info.message ?? 'AUTH'}），已标记为「需要重新登录」`,
-        )
+        // F2（0.2.0）：AUTH 不再一票制标记 —— 0.1.80 的请求前拦截只看这个标记，
+        // 一次端点级误判就会把健康账号锁死（实测 2026-09-22：94ms 被拒，而同 token
+        // 2 秒前刚成功跑完一轮）。先用**同一份凭证**做只读探活复核：
+        //   复核也失败 ⇒ 确认失效，照旧标记；
+        //   复核通过 ⇒ 不标记（账号保持可用，本轮仍按失败计、用户重发即可），日志留痕；
+        //   复核自身失败（网络）⇒ 无法定论，不标记 —— 误标（功能锁死）代价远大于漏标（白跑一轮）。
+        const record = listAccounts().find((item) => item.id === accountId)
+        if (record) {
+          validateAuth(record, AbortSignal.timeout(20_000))
+            .then((verdict) => {
+              if (verdict.ok) {
+                // 复核通过 ⇒ 顺手清掉上一次的失败标记：端点级误判之后，如果更早之前
+                // 被标过失效，这次复核证明账号活着，应当解锁（与 probeOnce 成功清标记同一语义）。
+                updateAccount(accountId, { lastVerifyError: undefined })
+                logger.info?.(
+                  `deepseek-web: 账号 ${accountId} 请求被判 AUTH，但只读探活通过 —— 按端点级误判处理，不标记失效（本轮仍按失败计，重发即可）`,
+                )
+                return
+              }
+              updateAccount(accountId, {
+                lastVerifyError: {
+                  at: new Date().toISOString(),
+                  message: String(info.message ?? '登录态无效，请重新登录'),
+                },
+              })
+              logger.warn?.(
+                `deepseek-web: 账号 ${accountId} AUTH 复核确认失效（${verdict.error ?? '探活未通过'}），已标记为「需要重新登录」`,
+              )
+            })
+            .catch((error) => {
+              logger.warn?.(
+                `deepseek-web: 账号 ${accountId} AUTH 复核未完成（${String((error as Error)?.message ?? error)}），暂不标记`,
+              )
+            })
+        }
       }
       if (info.ok && accountId) {
         const record = listAccounts().find((item) => item.id === accountId)

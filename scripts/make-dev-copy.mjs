@@ -19,16 +19,20 @@ const suffix = process.argv[2] || `dev${Date.now().toString(36).slice(-4)}`
 const name = `${base.name}-${suffix}`
 const target = resolve(ROOT, '..', name)
 
+// R9（0.2.0）：先**校验全部源产物**再动旧目录 —— 旧写法"先删后校"，
+// 产物缺失时旧副本已经被删了才报错，留下"想回退也没得回退"的窗口。
+for (const file of ['lib/index.js', 'lib/client.js']) {
+  if (!existsSync(join(ROOT, file))) {
+    console.error(`[dev-copy] 缺少构建产物 ${file} —— 先跑构建（旧副本未动）`)
+    process.exit(1)
+  }
+}
+
 if (existsSync(target)) rmSync(target, { recursive: true, force: true })
 mkdirSync(join(target, 'lib'), { recursive: true })
 
 for (const file of ['lib/index.js', 'lib/client.js']) {
-  const source = join(ROOT, file)
-  if (!existsSync(source)) {
-    console.error(`[dev-copy] 缺少构建产物 ${file} —— 先跑构建`)
-    process.exit(1)
-  }
-  copyFileSync(source, join(target, file))
+  copyFileSync(join(ROOT, file), join(target, file))
 }
 copyFileSync(join(ROOT, 'cordis.patch.yml'), join(target, 'cordis.patch.yml'))
 

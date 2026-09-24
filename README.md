@@ -457,6 +457,7 @@ node tests/check-image-chain-send.mjs # 链式投喂只发「服务端还没见�
 node tests/check-bugfix-0182.mjs      # 全库审查确认的缺陷（图片上限落盘 / 重登保元数据 / 重登意图等）
 node tests/check-stale-auth.mjs       # 已知授权失效的账号不许发请求（含行为侧：请求到底发没发）
 node tests/check-login-token.mjs       # 手动粘贴 token：包装 JSON 解出空 ⇒ fail-closed（不把 JSON 当 token）
+node tests/check-auth-recheck.mjs      # F1 探活带回限流状态 + F2 AUTH 先复核再标记（apply 级行为）       # 手动粘贴 token：包装 JSON 解出空 ⇒ fail-closed（不把 JSON 当 token）
 node tests/count-session-images.mjs # 某个会话里累积了多少「图片内容条目」（回答"我没发这么多图"的质疑）
 node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响上传（需要已登录凭证）
 node tests/check-account-sync.mjs    # 账号库自动同步（重读节拍 + 内容签名：变了才重建列表）

@@ -1780,6 +1780,22 @@ function Panel(): any {
         Object.keys(failures).length ? Object.entries(failures).map(([key, count]) => `${key} ${count}`).join(' · ') : '无',
       )
       push('台账占用', `${data.footprint?.files ?? 0} 个文件 · ${Math.round((data.footprint?.bytes ?? 0) / 1024)} KB`)
+      // F3（0.2.0）：按账号用量 —— 多账号场景"哪个号在烧钱/在被限"一目了然。
+      const byAccount: any[] = Array.isArray(data.byAccount) ? data.byAccount : []
+      if (byAccount.length > 0) {
+        const nameOf = (id: string): string => {
+          const items: any[] = Array.isArray(lastAccountsPayload?.accounts) ? lastAccountsPayload.accounts : []
+          const hit = items.find((item) => item.id === id)
+          return hit ? String(hit.label || hit.display || hit.id) : id
+        }
+        push(
+          '按账号',
+          byAccount
+            .sort((a, b) => (Number(b?.calls) || 0) - (Number(a?.calls) || 0))
+            .map((row) => `${nameOf(row.accountId)} ${row.calls} 次（失败 ${row.failed}）`)
+            .join(' · '),
+        )
+      }
       const hourly: number[] = Array.isArray(data.hourly) ? data.hourly : []
       // 0.1.82：失败时段此前恒传空集 ⇒ `.bad` 是死样式、"标红"从未生效
       const failedHours = new Set<number>()

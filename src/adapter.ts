@@ -710,12 +710,12 @@ export function createAdapter(deps: AdapterDeps) {
     auth: WebAuth,
     messages: readonly any[] | undefined,
     signal?: AbortSignal,
-  ): Promise<{ ids: string[]; keptKeys: Set<string>; notice?: string }> {
+  ): Promise<{ ids: string[]; keys: string[]; keptKeys: Set<string>; notice?: string }> {
     signal?.throwIfAborted()
     uploadCache.useScope(auth.token)
     const scope = uploadCache.currentScope()
     const refs = collectImageRefs(messages)
-    if (refs.length === 0) return { ids: [], keptKeys: new Set() }
+    if (refs.length === 0) return { ids: [], keys: [], keptKeys: new Set() }
     // 去重（0.1.66）：同一张图可能在同一份历史里出现多次 —— 用户消息里一次、
     // `read_image` 的工具结果里又一次（工具结果内嵌图片本体），甚至模型对同一个文件
     // 连调两次 read_image。实测本机会话 `install-plugin/session-c1fb8208-*` 里就有
@@ -736,11 +736,12 @@ export function createAdapter(deps: AdapterDeps) {
       seen.add(key)
       unique.push(ref)
     }
-    if (unique.length === 0) return { ids: [], keptKeys: new Set() }
+    if (unique.length === 0) return { ids: [], keys: [], keptKeys: new Set() }
     if (!deps.readImage) {
       logger?.warn?.('deepseek-web: 收到图片但附件服务不可用（ctx.attachments），图片被忽略')
       return {
         ids: [],
+        keys: [],
         keptKeys: new Set(),
         notice: imageNotice(unique.length, '宿主没有提供附件读取能力（ctx.attachments）'),
       }
@@ -785,6 +786,8 @@ export function createAdapter(deps: AdapterDeps) {
     let skippedByAuth = 0
     /** 真的进了 `ref_file_ids` 的那些 key —— 提示里的 `[image attached]` 只能写在这些图上。 */
     const sentKeys = new Set<string>()
+    /** 与 `ids` **同序平行**的 key 数组 —— webapi 的 sentRefIds 按 key 记账需要这个对应关系。 */
+    const sentKeyList: string[] = []
     for (const ref of kept) {
       signal?.throwIfAborted()
       const key = String(ref?.attachmentId ?? '')
@@ -792,6 +795,7 @@ export function createAdapter(deps: AdapterDeps) {
       if (cached) {
         ids.push(cached)
         sentKeys.add(key)
+        sentKeyList.push(key)
         continue
       }
       attempted += 1
@@ -812,6 +816,7 @@ export function createAdapter(deps: AdapterDeps) {
         uploadCache.set(key, uploadedFile.fileId, Date.now(), scope)
         ids.push(uploadedFile.fileId)
         sentKeys.add(key)
+        sentKeyList.push(key)
       } catch (error: any) {
         if (signal?.aborted) throw error
         const message = String(error?.message ?? error)
@@ -835,7 +840,7 @@ export function createAdapter(deps: AdapterDeps) {
     if (trimNotice) notices.push(trimNotice)
     if (failures.length > 0) notices.push(imageNotice(failures.length, failures[0], skippedByAuth))
     // 这里回传的是**真的带上了**的集合（不是"打算带"的），调用方据此写提示标记
-    return { ids, keptKeys: sentKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
+    return { ids, keys: sentKeyList, keptKeys: sentKeys, ...(notices.length > 0 ? { notice: notices.join('') } : {}) }
   }
 
   /**
@@ -1011,7 +1016,7 @@ export function createAdapter(deps: AdapterDeps) {
     // 宁可这一轮没有图，也不能让会话卡在"每轮都失败"上 —— 那等于整个会话作废。
     const uploaded =
       options?.__skipImages === true
-        ? { ids: [], keptKeys: undefined }
+        ? { ids: [], keys: undefined, keptKeys: undefined, notice: undefined }
         : await uploadRequestImages(auth, options?.messages, options?.signal)
     // ⚠️ 0.1.82：`__skipImages`（不带图重发）**绝不能**更新 lastImageKeys ——
     // 它记的是"上一轮那批 key 的 file_id 被服务端拒过"，抹成空集就等于下一轮
@@ -1139,6 +1144,7 @@ export function createAdapter(deps: AdapterDeps) {
         thinkingEnabled,
         modelType: spec.modelType,
         refFileIds: rounds === 0 ? refFileIds : [],
+        refKeys: rounds === 0 ? uploaded.keys : [],
         signal: options?.signal,
         idleTimeoutMs: deps.config.idleTimeoutMs ?? 120_000,
         // 会话复用：同一账号连续多个回合共用一个网页端会话（见 webapi.ts 的实测判定）

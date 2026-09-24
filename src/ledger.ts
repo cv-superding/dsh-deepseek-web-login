@@ -56,6 +56,8 @@ export interface LedgerSummary {
   hourly: number[]
   /** 按小时分桶的**失败**数（与 `hourly` 同长同序），给界面把失败时段标出来。 */
   hourlyFailed: number[]
+  /** F3（0.2.0）：按账号聚合的用量（仅 chat 类调用；账号名由界面用 /accounts 数据映射）。 */
+  byAccount: { accountId: string; calls: number; succeeded: number; failed: number }[]
   /** 台账目录占用（便于发现异常膨胀）。 */
   footprint: { files: number; bytes: number }
 }
@@ -239,6 +241,14 @@ export function summarizeLedger(input = 24): LedgerSummary {
         : null,
     hourly,
     footprint: { files, bytes },
+    // F3（0.2.0）：按账号聚合（groups 本来就为 gap 计算而建，顺手返回 ——
+    // 多账号场景"哪个号在烧钱/在被限"一目了然）。
+    byAccount: Array.from(groups.entries()).map(([accountId, list]) => ({
+      accountId,
+      calls: list.length,
+      succeeded: list.filter((entry) => entry.ok).length,
+      failed: list.filter((entry) => !entry.ok).length,
+    })),
   }
 }
 
