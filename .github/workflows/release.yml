@@ -1,7 +1,12 @@
 name: Release
 
-# 打 tag 即发布：由仓库自带的 GITHUB_TOKEN 创建 Release 并附上 tgz。
-# 这样维护者不需要在本地持有个人 token。
+# 打 tag 即发布，一个 job 里做两件事，顺序固定：
+#   1) npm publish —— 走 Trusted Publishing (OIDC)，仓库里没有任何长期 token
+#   2) GitHub Release（附 tgz）
+# 先 npm 后 Release 是故意的：反过来的话 npm 失败会留下「Release 有、npm 没有」的错位
+# （0.2.0 就是这么错位的）。
+#
+# 两个步骤都写成幂等的：该版本已存在就跳过 / 覆盖上传，所以 workflow_dispatch 可以放心重跑。
 on:
   push:
     tags: ['v*']
@@ -13,19 +18,31 @@ on:
 
 permissions:
   contents: write
+  # Trusted Publishing 必需：GitHub 用它为这个 job 签发短期 OIDC token，
+  # npm 端凭「仓库 + 工作流文件名」核验身份。少了这一行就在 npm publish 处失败。
+  id-token: write
 
 jobs:
   release:
+    # 必须 GitHub 托管 runner —— npm 不支持自托管 runner 走 OIDC。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       # 与 CI 同一套固定版本：发布产物必须由**确定的工具链**构建出来。
       # 缓存开启的前提是仓库里有 package-lock.json（现在已提交）。
+      #
+      # 注意：这里**不要**加 registry-url。setup-node 见到它就会往环境里写一个占位的
+      # NODE_AUTH_TOKEN，npm CLI 见到该变量会直接走 token 认证，OIDC 交换根本不会发生，
+      # 表现为莫名其妙的 401/404 —— 这是配 trusted publishing 最常见的翻车点。
       - uses: actions/setup-node@v4
         with:
           node-version: '24.21.0'
           cache: npm
+
+      # OIDC 支持需要 npm >= 11.5.1（Node 22.14 起）。显式升一次，别赌 runner 自带的版本。
+      - name: 升级 npm（OIDC 需要 >= 11.5.1）
+        run: npm install -g 'npm@^11.5.1' && npm --version
 
       # 审计 F20：以前这里直接用环境里的全局工具，且只跑 2 个测试；
       # 现在走同一套安装入口 + 显式构建 + 全量离线用例（发出去的包必须与 CI 同源）。
@@ -37,6 +54,33 @@ jobs:
 
       - name: 发布前跑全量离线用例
         run: node scripts/test-offline.mjs
+
+      # tag 与 package.json 的 version 必须一致：否则会发出一个「npm 上叫 A、git 里标 B」的包，
+      # 而且 npm 不允许覆盖，错了只能发新版本。
+      - name: 校验 tag 与 package.json 版本一致
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          WANT="${TAG#v}"
+          GOT="$(node -p "require('./package.json').version")"
+          echo "tag=$WANT package.json=$GOT"
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::tag($WANT) 与 package.json($GOT) 不一致，拒绝发布"
+            exit 1
+          fi
+
+      - name: 发布到 npm（Trusted Publishing / OIDC）
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if npm view "dsh-deepseek-web-login@$VERSION" version >/dev/null 2>&1; then
+            echo "npm 上已有 $VERSION，跳过发布（重跑安全）"
+            exit 0
+          fi
+          # 不加 --provenance：OIDC + 公共仓库会自动生成 provenance 证明，无需手动开。
+          # 不加 NODE_AUTH_TOKEN：npm CLI 自动检测 OIDC 环境。
+          npm publish --access public
 
       - name: 打包
         run: npm pack
@@ -53,7 +97,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          gh release create "$TAG" ./*.tgz \
-            --title "$TAG" \
-            --notes-file notes.md \
-            --verify-tag
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为覆盖上传 tgz（重跑安全）"
+            gh release upload "$TAG" ./*.tgz --clobber
+          else
+            gh release create "$TAG" ./*.tgz \
+              --title "$TAG" \
+              --notes-file notes.md \
+              --verify-tag
+          fi
