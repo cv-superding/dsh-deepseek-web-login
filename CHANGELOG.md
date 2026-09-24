@@ -2,6 +2,26 @@
 
 本项目遵循大致语义化版本；日期为本地时间。
 
+## 0.2.1 — 2026-09-24
+
+> 工程版本，无功能改动。用途是把包发到 npm、并把发布流程从「本机手动」换成
+> 「打 tag 全自动」，为随后的版本腾出干净的发布链路。
+
+### 工程
+
+- **发布到 npm**：`dsh-deepseek-web-login` 已可在 registry.npmjs.org 上获取
+  （`npm install dsh-deepseek-web-login`）。插件市场（`awesome-dsh-plugin`）对 npm 的探测
+  会在次日自动生效并切到 npm 安装路径 —— 此前只能走 `github:` 前缀，而 git 路径失败时
+  市场无法表达「更新前精确提交」，回滚不可用。
+- **打 tag 即全自动发布**：`release.yml` 改用 **Trusted Publishing (OIDC)** —— 仓库里不存
+  任何长期 token，也不再需要每次手动输一次性验证码；每个 tag 由 GitHub Actions 直接发布，
+  并自动附带 provenance 来源证明。
+- **发布流程幂等**：npm 上已有该版本则跳过发布、GitHub Release 已存在则覆盖上传 tgz，
+  所以重跑（含 `workflow_dispatch`）是安全的。0.2.0 曾出现「GitHub 有 Release、npm 没有」
+  的错位，本版把两件事合并进同一个 job 并固定顺序解决。
+- **新增 tag 与 `package.json` 版本一致性校验**：不一致直接让 workflow 失败 —— 否则会发出
+  一个「npm 上叫 A、git 里标 B」且 npm 不允许覆盖的包。
+
 ## 0.2.0 — 2026-09-24
 
 > 定位（见 `0.2.0-规划.md`）：账号健康与可用性 —— 让多账号「看得见（限流/用量）、信得过
