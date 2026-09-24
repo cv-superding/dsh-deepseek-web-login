@@ -116,6 +116,23 @@ const styles = `
 --warn:var(--dsw-alias-state-warn-label,#9a6a00);
 --err:var(--dsw-alias-state-error-primary,#d93025);
 --mono:var(--dsw-alias-font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
+/* ── 尺度层 ──────────────────────────────────────────────────────────
+   改造前的问题：fontSize 有 5 档（11/12/12.5/13/14）、圆角 6 档（6/8/10/12/999）、
+   间距散落 7 种值（2/4/6/8/9/10/12）。同一个界面里数字一多，眼睛就觉得"乱"却
+   说不出哪乱 —— 所以先把尺度收敛，下面所有组件只能引用这里的变量。 */
+--r-lg:12px;   /* 卡片等容器 */
+--r-md:8px;    /* 按钮 / 输入框 */
+--r-sm:6px;    /* 小组件（备注输入、归组下拉） */
+--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;
+
+/* 状态底色：从语义色现算，不再写死 rgba。
+   写死的 rgba 只对其中一档主题成立 —— 按浅色底调出来的那组绿/橙/红贴到深色底上会发脏。 */
+--ok-weak:color-mix(in srgb,var(--ok) 15%,transparent);
+--warn-weak:color-mix(in srgb,var(--warn) 16%,transparent);
+--err-weak:color-mix(in srgb,var(--err) 14%,transparent);
+--accent-weak:color-mix(in srgb,var(--accent) 12%,transparent);
+--accent-hover:color-mix(in srgb,var(--accent) 88%,var(--fg));
+
 font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
 font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12px;
 -webkit-font-smoothing:antialiased;
@@ -125,133 +142,166 @@ font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12p
 --fb-bg1:#212121;--fb-bg2:#2a2a2a;--fb-bd:#333333;--fb-bd2:#3d3d3d;
 --fb-hover:#ffffff14;--fb-code:#1c1c1c}
 }
-.dsw-title{margin:0 0 3px;font-size:14px;font-weight:500;color:var(--fg)}
-.dsw-sub{margin:0 0 14px;font-size:12px;line-height:1.55;color:var(--fg3)}
+/* 页面标题：整页唯一的 display 级文字。字重 600 + 轻微负字距 ——
+   原来是 14px/500，跟 13px 的正文只差 1px，整页因此没有"起点"。 */
+.dsw-title{margin:0 0 4px;font-size:15px;font-weight:600;line-height:1.4;letter-spacing:-.01em;color:var(--fg)}
+.dsw-sub{margin:0 0 var(--sp-5);font-size:12px;line-height:1.65;color:var(--fg2);max-width:64ch}
 /* provider 名带连字符，万一折行会断成 deepseek- / web（看着像故障）—— 整词不拆 */
 .dsw-nobreak{white-space:nowrap}
-.dsw-card{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px 16px;margin-bottom:10px}
-.dsw-cardhead{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
-.dsw-card > .name{margin:0 0 8px;font-size:13px;font-weight:500;color:var(--fg)}
-.dsw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.dsw-badge{font-size:11px;font-weight:500;line-height:1.7;padding:1px 9px;border-radius:999px;white-space:nowrap}
-.dsw-badge.on{color:var(--ok);background:rgba(26,159,90,.15)}
-.dsw-badge.off{color:var(--warn);background:rgba(200,140,20,.16)}
-.dsw-badge.err{color:var(--err);background:rgba(217,48,37,.15)}
-.dsw-btn{font:inherit;font-size:12px;font-weight:500;line-height:1.5;padding:6px 13px;border-radius:8px;
-border:1px solid transparent;background:var(--accent);color:var(--on-accent);cursor:pointer;
-transition:background-color .15s ease,border-color .15s ease,opacity .15s ease}
-.dsw-btn:hover:not(:disabled){opacity:.88}
-.dsw-btn:active:not(:disabled){opacity:.72}
-.dsw-btn:disabled{opacity:.4;cursor:not-allowed}
+/* 卡片：内边距与卡片间距都大一档。面板本身信息密度就高，卡片再贴在一起就糊成一整块。 */
+.dsw-card{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r-lg);
+  padding:var(--sp-4);margin-bottom:var(--sp-3)}
+/* 卡片头：字重 600。改造前它和正文同为 13px/500 —— 标题只能靠"位置"辨认，不靠视觉。 */
+.dsw-cardhead{display:flex;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-3);
+  font-size:13px;font-weight:600;letter-spacing:-.005em;color:var(--fg)}
+.dsw-card > .name{margin:0 0 var(--sp-3);font-size:13px;font-weight:600;color:var(--fg)}
+.dsw-row{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+.dsw-badge{font-size:11px;font-weight:500;line-height:1.7;padding:1px 9px;border-radius:999px;
+  white-space:nowrap;font-variant-numeric:tabular-nums}
+.dsw-badge.on{color:var(--ok);background:rgba(26,159,90,.15);background:var(--ok-weak)}
+.dsw-badge.off{color:var(--warn);background:rgba(200,140,20,.16);background:var(--warn-weak)}
+.dsw-badge.err{color:var(--err);background:rgba(217,48,37,.15);background:var(--err-weak)}
+/* 按钮：hover 不再整体调 opacity —— 那会把文字一起变淡，看着像被禁用了。
+   改成背景微调 + 按下时 1px 位移（物理感）；focus-visible 补上键盘可达性。 */
+.dsw-btn{font:inherit;font-size:12px;font-weight:500;line-height:1.5;padding:6px 13px;
+border-radius:var(--r-md);border:1px solid transparent;background:var(--accent);color:var(--on-accent);
+cursor:pointer;transition:background-color .15s ease,border-color .15s ease,transform .1s ease}
+.dsw-btn:hover:not(:disabled){background:var(--accent-hover)}
+.dsw-btn:active:not(:disabled){transform:translateY(1px)}
+.dsw-btn:disabled{opacity:.45;cursor:not-allowed}
+.dsw-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .dsw-btn.ghost{background:transparent;border-color:var(--bd2);color:var(--fg)}
-.dsw-btn.ghost:hover:not(:disabled){background:var(--hover);opacity:1}
+.dsw-btn.ghost:hover:not(:disabled){background:var(--hover);border-color:var(--bd)}
 .dsw-btn.danger{background:transparent;border-color:var(--bd2);color:var(--err)}
-.dsw-btn.danger:hover:not(:disabled){background:rgba(217,48,37,.1);border-color:var(--err);opacity:1}
-.dsw-btn.armed{background:var(--err);border-color:var(--err);color:#ffffff}
-.dsw-btn.armed:hover:not(:disabled){opacity:.9}
+.dsw-btn.danger:hover:not(:disabled){background:var(--err-weak);border-color:var(--err)}
+.dsw-btn.armed{background:var(--err);border-color:var(--err);color:var(--on-accent)}
+.dsw-btn.armed:hover:not(:disabled){background:color-mix(in srgb,var(--err) 88%,var(--fg))}
 .dsw-input,.dsw-area{width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;
-background:var(--bg1);color:var(--fg);border:1px solid var(--bd2);border-radius:8px;padding:7px 10px;
+background:var(--bg1);color:var(--fg);border:1px solid var(--bd2);border-radius:var(--r-md);padding:7px 10px;
 outline:none;transition:border-color .15s ease,box-shadow .15s ease}
-.dsw-input:focus,.dsw-area:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--hover)}
+.dsw-input:focus,.dsw-area:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-weak)}
 .dsw-area{min-height:68px;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.5}
-.dsw-kv{display:grid;grid-template-columns:auto 1fr;gap:0 12px;margin:2px 0 0;align-items:baseline}
-.dsw-kv > *{padding:5px 0;border-top:1px solid var(--bd);min-width:0}
-.dsw-kv > :nth-child(1),.dsw-kv > :nth-child(2){border-top:none}
-.dsw-kv .k{color:var(--fg3);font-size:12px;white-space:nowrap}
+/* 键值表：标签提一档到次级色 —— 原来用三级色，深色主题下几乎读不出来。
+   行距 5→6px；分隔线只做分组暗示，不做表格线。 */
+.dsw-kv{display:grid;grid-template-columns:auto 1fr;gap:0 var(--sp-3);margin:0;align-items:baseline}
+.dsw-kv > *{padding:6px 0;border-top:1px solid var(--bd);min-width:0}
+.dsw-kv > :nth-child(1),.dsw-kv > :nth-child(2){border-top:none;padding-top:2px}
+.dsw-kv .k{color:var(--fg2);font-size:12px;white-space:nowrap}
 .dsw-kv > *:not(.k){color:var(--fg);word-break:break-word}
-.dsw-msg{margin-top:10px;padding:9px 12px;border-radius:8px;background:var(--bg1);border:1px solid var(--bd);
-border-left:3px solid var(--fg3);white-space:pre-wrap;max-height:240px;overflow:auto;
-font-size:12px;line-height:1.6;color:var(--fg)}
-.dsw-msg.err{border-left-color:var(--err);color:var(--err)}
+.dsw-msg{margin-top:var(--sp-3);padding:10px 12px;border-radius:var(--r-md);background:var(--bg1);
+border:1px solid var(--bd);border-left:3px solid var(--fg3);white-space:pre-wrap;max-height:240px;
+overflow:auto;font-size:12px;line-height:1.6;color:var(--fg)}
+.dsw-msg.err{border-left-color:var(--err);color:color-mix(in srgb,var(--err) 78%,var(--fg))}
 .dsw-msg.ok{border-left-color:var(--ok)}
-.dsw-models{list-style:none;margin:2px 0 0;padding:0}
-.dsw-models li{padding:9px 0;border-top:1px solid var(--bd)}
+.dsw-models{list-style:none;margin:0;padding:0}
+.dsw-models li{padding:10px 0;border-top:1px solid var(--bd)}
 .dsw-models li:first-child{border-top:none;padding-top:2px}
 .dsw-models .name{font-size:13px;font-weight:500;color:var(--fg)}
-.dsw-models .id{color:var(--fg3);font-size:12px;margin-top:1px;word-break:break-word}
-.dsw-hint{color:var(--fg3);font-size:12px;line-height:1.6;margin:8px 0 0}
-.dsw-gate-row{display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap}
-.dsw-gate-label{color:var(--fg3);font-size:12px;min-width:52px;flex:0 0 auto}
+.dsw-models .id{color:var(--fg3);font-size:12px;margin-top:2px;word-break:break-word}
+/* 说明文字：限宽 64ch —— 满宽的一行小字读起来很累，且会拖长整张卡。 */
+.dsw-hint{color:var(--fg3);font-size:12px;line-height:1.7;margin:var(--sp-3) 0 0;max-width:64ch}
+.dsw-gate-row{display:flex;align-items:center;gap:10px;margin:var(--sp-3) 0;flex-wrap:wrap}
+.dsw-gate-label{color:var(--fg2);font-size:12px;min-width:52px;flex:0 0 auto}
 .dsw-gate-value{font-size:12px;color:var(--fg);min-width:56px;text-align:right;font-variant-numeric:tabular-nums}
 /* 「上下限」成对的一行：两个滑块并排，右边一个合成值（如「6~10 个」）。
    —— 比"每个边界各占一行"省一半高度，而且两个边界的相对位置一眼能比出来。 */
-.dsw-range-pair{flex:1 1 240px;display:flex;gap:8px;align-items:center;min-width:190px}
+.dsw-range-pair{flex:1 1 240px;display:flex;gap:var(--sp-2);align-items:center;min-width:190px}
 .dsw-gate-pair-value{font-size:12px;color:var(--fg);min-width:78px;text-align:right;font-variant-numeric:tabular-nums}
 .dsw-switch{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:var(--fg);cursor:pointer;user-select:none}
 .dsw-switch input{position:absolute;opacity:0;width:0;height:0}
-.dsw-switch-track{width:34px;height:20px;border-radius:999px;background:var(--bd2);position:relative;transition:background-color .15s ease;flex:0 0 auto}
-.dsw-switch-track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s ease}
-.dsw-switch input:checked + .dsw-switch-track{background:var(--err)}
+.dsw-switch-track{width:34px;height:20px;border-radius:999px;background:var(--bd2);position:relative;transition:background-color .18s ease;flex:0 0 auto}
+.dsw-switch-track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.28);transition:transform .18s ease}
+/* 打开态用主色 —— 改造前是 --err（红）。开关的"开"表达的是**状态**不是危险，
+   整排红色开关看着像报错。危险色留给真正会造成破坏的动作（armed 按钮）。 */
+.dsw-switch input:checked + .dsw-switch-track{background:var(--accent)}
 .dsw-switch input:checked + .dsw-switch-track::after{transform:translateX(14px)}
+.dsw-switch input:focus-visible + .dsw-switch-track{outline:2px solid var(--accent);outline-offset:2px}
 .dsw-range{-webkit-appearance:none;appearance:none;flex:1 1 160px;height:4px;border-radius:999px;background:var(--bd2);outline:none;cursor:pointer}
-.dsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
+.dsw-range:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.dsw-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .dsw-preset{padding:4px 10px;font-size:12px}
 .dsw-preset.active{background:var(--accent);border-color:transparent;color:var(--on-accent)}
-.dsw-gate-msg{color:var(--fg3);min-height:1.6em}
-.dsw-code{display:block;margin:6px 0;padding:7px 10px;background:var(--code-bg);border:1px solid var(--bd);
-border-radius:8px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);
+.dsw-preset.active:hover{background:var(--accent-hover)}
+.dsw-gate-msg{color:var(--fg3);font-size:12px;min-height:1.6em;margin:var(--sp-3) 0 0}
+.dsw-code{display:block;margin:var(--sp-2) 0;padding:8px 10px;background:var(--code-bg);border:1px solid var(--bd);
+border-radius:var(--r-sm);font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--fg);
 overflow-x:auto;white-space:pre}
 .dsw-msg::-webkit-scrollbar,.dsw-code::-webkit-scrollbar,.dsw-area::-webkit-scrollbar{width:8px;height:8px}
 .dsw-msg::-webkit-scrollbar-thumb,.dsw-code::-webkit-scrollbar-thumb,.dsw-area::-webkit-scrollbar-thumb{
 background:var(--bd2);border-radius:4px}
 /* ── 标签页：把原来一页到底的 7 张卡拆成 4 页 ────────────────────────
-   标签栏做成带边框的圆角容器；未选中 70% 透明度 + 下划线指示当前页。
-   颜色全部走设计令牌，浅色/深色自动跟随，不用写第二份。 */
-.dsw-tabs{display:inline-flex;gap:4px;border:1px solid var(--bd);border-radius:8px;
-padding:0 10px;margin:4px 0 14px;background:var(--bg1)}
+   标签栏做成带边框的圆角容器。未选中态改用**颜色**表达（原来是 opacity .7 —— 
+   透明度既压暗了文字又让 hover 没有明确的落点），当前页用下划线。 */
+.dsw-tabs{display:inline-flex;gap:2px;border:1px solid var(--bd);border-radius:var(--r-md);
+padding:0 var(--sp-2);margin:var(--sp-1) 0 var(--sp-4);background:var(--bg1)}
 .dsw-tab{appearance:none;background:transparent;border:none;border-bottom:2px solid transparent;
-padding:8px 14px;font:inherit;font-size:13px;color:var(--fg2);opacity:.7;cursor:pointer;
-transition:opacity .15s ease,border-color .15s ease}
-.dsw-tab:hover{opacity:1}
-.dsw-tab.active{opacity:1;color:var(--fg);border-bottom-color:var(--fg)}
+padding:8px 14px;font:inherit;font-size:13px;color:var(--fg2);cursor:pointer;
+transition:color .15s ease,border-color .15s ease}
+.dsw-tab:hover{color:var(--fg)}
+.dsw-tab.active{color:var(--fg);font-weight:500;border-bottom-color:var(--fg)}
+.dsw-tab:focus-visible{outline:2px solid var(--accent);outline-offset:-3px;border-radius:4px}
 .dsw-pane[hidden]{display:none}
 /* 二级（子页面）标签：**分段胶囊**。
    刻意和一级标签长得不一样（一级是"下划线 + 大字号"），这样一眼能看出自己在第几层；
    否则两层长得一样、用户会以为回到了同一层。 */
-.dsw-subtabs{display:inline-flex;gap:2px;padding:3px;margin:0 0 14px;border-radius:999px;
+.dsw-subtabs{display:inline-flex;gap:2px;padding:3px;margin:0 0 var(--sp-4);border-radius:999px;
   background:var(--bg1);border:1px solid var(--bd)}
 .dsw-subtab{appearance:none;border:0;background:transparent;font:inherit;font-size:12px;
   font-weight:500;color:var(--fg2);padding:4px 14px;border-radius:999px;cursor:pointer;
   transition:color .15s ease,background-color .15s ease}
 .dsw-subtab:hover{color:var(--fg)}
+.dsw-subtab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 /* 选中态：底色用 bg2 铺在 bg1 上，深色主题里这两档只差一点点，
    所以必须再加一圈描边（bd2 比 bd 明显）才立得住 —— 实测深色下不加就跟没选中一样。 */
 .dsw-subtab.active{background:var(--bg2);color:var(--fg);font-weight:600;
   box-shadow:inset 0 0 0 1px var(--bd2)}
 /* 调用台账 */
-.dsw-spark{display:block;width:100%;height:40px;margin:8px 0 2px}
+.dsw-spark{display:block;width:100%;height:40px;margin:var(--sp-2) 0 2px}
 .dsw-spark rect{fill:var(--bd2)}
 .dsw-spark rect.on{fill:var(--accent)}
 .dsw-spark rect.bad{fill:var(--err)}
 .dsw-path{font-family:var(--mono);font-size:11px;color:var(--fg2);word-break:break-all}
 /* 账号库 */
-.dsw-accounts{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.dsw-accounts{list-style:none;margin:var(--sp-2) 0 0;padding:0;display:flex;flex-direction:column;gap:var(--sp-2)}
+/* 账号行是可交互的整块 —— 必须给 hover 反馈。改造前它完全静态，鼠标扫过去没有任何回应。
+   当前账号再叠一层主色淡底，跟"只是鼠标划过"区分开。 */
 .dsw-account{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--bd);
-border-radius:10px;padding:9px 11px;background:var(--bg1)}
-.dsw-account.active{border-color:var(--accent)}
+border-radius:var(--r-md);padding:10px 12px;background:var(--bg1);
+transition:background-color .15s ease,border-color .15s ease}
+.dsw-account:hover{background:var(--hover)}
+.dsw-account.active{border-color:var(--accent);background:var(--accent-weak)}
+.dsw-account.active:hover{background:color-mix(in srgb,var(--accent) 16%,transparent)}
 .dsw-account-main{flex:1 1 200px;min-width:0}
 .dsw-account-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;font-weight:500}
-.dsw-account-meta{font-size:11px;color:var(--fg3);margin-top:3px;word-break:break-all}
-.dsw-account-fix{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.dsw-account-meta{font-size:11px;color:var(--fg3);margin-top:3px;word-break:break-all;font-variant-numeric:tabular-nums}
+.dsw-account-fix{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap;margin-top:6px}
 .dsw-account-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.dsw-labelinput{font:inherit;font-size:12px;padding:3px 7px;border-radius:6px;border:1px solid var(--bd2);
+.dsw-labelinput{font:inherit;font-size:12px;padding:3px 7px;border-radius:var(--r-sm);border:1px solid var(--bd2);
 background:var(--bg2);color:var(--fg);width:150px;margin-top:4px}
+.dsw-labelinput:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .dsw-limit{color:var(--warn)}
 /* 分组：组标题行 + 组内缩进 + 归组下拉 */
-.dsw-grouphead{display:flex;align-items:center;gap:8px;margin:12px 0 0;font-size:12px}
-.dsw-grouphead .gname{font-weight:500}
-.dsw-grouphead .gcount{color:var(--fg3);font-size:11px}
+.dsw-grouphead{display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-3) 0 0;font-size:12px}
+.dsw-grouphead .gname{font-weight:600}
+.dsw-grouphead .gcount{color:var(--fg3);font-size:11px;font-variant-numeric:tabular-nums}
 .dsw-grouphead .gtoggle{cursor:pointer;user-select:none;color:var(--fg2);width:12px;display:inline-block;text-align:center}
+.dsw-grouphead .gtoggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
 .dsw-grouphead .gspacer{flex:1 1 auto}
 .dsw-grouphead .dsw-btn{font-size:11px;padding:1px 7px}
 .dsw-account.grouped{margin-left:14px}
-.dsw-groupsel{font:inherit;font-size:11px;padding:2px 4px;border-radius:6px;border:1px solid var(--bd2);
+.dsw-groupsel{font:inherit;font-size:11px;padding:2px 4px;border-radius:var(--r-sm);border:1px solid var(--bd2);
 background:var(--bg2);color:var(--fg);max-width:110px}
+.dsw-groupsel:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 /* 操作反馈：不归属任何一页，常驻在标签栏之上 */
-.dsw-alert{margin:0 0 12px;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);
+.dsw-alert{margin:0 0 var(--sp-3);padding:9px 12px;border-radius:var(--r-md);border:1px solid var(--bd);
 background:var(--bg1);white-space:pre-wrap;font-size:12px}
-.dsw-alert.ok{border-left:3px solid var(--ok);color:var(--ok)}
-.dsw-alert.err{border-left:3px solid var(--err);color:var(--err)}
+/* 整行染成纯错误色在深色底上会刺眼且发暗；混一点正文色压回来，色条仍然说明性质。 */
+.dsw-alert.ok{border-left:3px solid var(--ok);color:color-mix(in srgb,var(--ok) 72%,var(--fg))}
+.dsw-alert.err{border-left:3px solid var(--err);color:color-mix(in srgb,var(--err) 78%,var(--fg))}
+/* 用户开了"减少动态效果"就别再让元素滑来滑去。 */
+@media (prefers-reduced-motion:reduce){
+.dsw-page *{transition-duration:.01ms !important}
+}
 `
 
 /** 短时间：今天只显示时分，其它显示月/日 时:分。 */
