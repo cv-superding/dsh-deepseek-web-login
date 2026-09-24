@@ -134,8 +134,34 @@ dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
 
 # B: git install (requires github.com reachability)
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
+
+# C: install from npm (published as of 0.2.0; no git, no build step)
+dsh plugin --profile desktop add dsh-deepseek-web-login
 ```
 
+> ⚠️ **If "Update" in the DSH plugin market fails** (reporting `update failed and restoration of the
+> previous build could not be verified`, with a parenthetical about "the exact GitHub commit before
+> the update"), that parenthetical only explains **why automatic rollback was unavailable** — it is not
+> the cause. This plugin shipped only a **git install source**, so updating clones GitHub, and a failed
+> update cannot be rolled back. Workarounds (any of these, no need to wait for the market):
+
+```bash
+# 1) Install an exact tag (steadier than HEAD — never tripped by an intermediate commit)
+dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login#v0.2.0
+
+# 2) Use the release tarball (no git at all; download the matching tgz from the Releases page)
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.2.0.tgz
+
+# 3) Install from npm (published as of 0.2.0; no git, no build step)
+dsh plugin --profile desktop add dsh-deepseek-web-login
+```
+
+> The catalog entry is currently `npm: null` (**not published to npm**), which is why installs go
+> through git. **0.2.0 is published**, and the catalog re-probes once a day (an "unpublished" verdict
+> expires after a day), after which the market switches to the npm path (version compare + tarball,
+> no local git). If it still shows the git command, give it a day — or use option 3 above.
+
+### 2. Log in once
 `--profile desktop` is the profile used by DSH Desktop (the Electron app); use `--profile web` for a web profile.
 Restart DSH — the plugin is assembled as a bundle and loads automatically.
 

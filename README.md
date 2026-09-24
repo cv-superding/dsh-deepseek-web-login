@@ -127,8 +127,32 @@ dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
 
 # 方式 B：git 装配（本机需可访问 github.com）
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
+
+# 方式 C：从 npm 装（0.2.0 起已发布；免 git、免构建，国内镜像也会同步）
+dsh plugin --profile desktop add dsh-deepseek-web-login
 ```
 
+> ⚠️ **在插件市场里点「更新」失败时**（报 `update failed and restoration of the previous build could
+> not be verified`，括号里写着"当前宿主无法安装更新前的精确 GitHub 提交"）—— 那句括号只是
+> **"失败后无法自动回滚"** 的说明，不是失败原因。本插件长期只提供 **git 安装来源**，所以更新要
+> clone GitHub、失败后市场也救不回来。绕过办法（挑一条，都不用等市场修好）：
+
+```bash
+# 1) 按 tag 精确装（比装 HEAD 稳，不会被中间提交绊住）
+dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login#v0.2.0
+
+# 2) 用 Release 的 tgz（完全不走 git；先从 Releases 页下载对应 tgz）
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.2.0.tgz
+
+# 3) 从 npm 装（0.2.0 起已发布；免 git、免构建，国内镜像也会同步）
+dsh plugin --profile desktop add dsh-deepseek-web-login
+```
+
+> 市场目录里的这个条目当前标记为 `npm: null`（**未发布到 npm**）⇒ 只能走 git。**0.2.0 起已发布**，
+> 目录每天重探一次（未发布的判定 1 天后过期），探到之后市场的安装/更新会自动切到 npm 路径
+> （版本比较 + tarball，不再依赖本机 git）。仍显示 git 时等一天再看，或直接用上面第 3 条。
+
+### 2. 登录一次
 > `--profile desktop` 是 DSH Desktop（Electron 应用）使用的 profile。若你跑的是 web profile，换成 `--profile web`。
 > 重启 DSH 后生效（本插件是 bundle 装配，重启即自动加载）。
 
