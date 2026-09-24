@@ -65,13 +65,8 @@ const spark = `<svg class="dsw-spark" viewBox="0 0 320 40" preserveAspectRatio="
 /** DOM 快照 —— 覆盖面板里出现的每一类元素，顺序贴近真实页面。 */
 const demo = `
 <div class="dsw-page">
-  <div class="dsw-head">
-    <div class="dsw-head-main">
-      <h1 class="dsw-title">DeepSeek 网页登录（免费模型）</h1>
-      <p class="dsw-sub">用 <span class="dsw-nobreak">chat.deepseek.com</span> 网页版登录态驱动 DSH agent —— 不需要 API Key。provider 路由：<span class="dsw-nobreak">deepseek-web</span></p>
-    </div>
-    <button class="dsw-btn ghost dsw-leantoggle">精简</button>
-  </div>
+  <h1 class="dsw-title">DeepSeek 网页登录（免费模型）</h1>
+  <p class="dsw-sub">用 <span class="dsw-nobreak">chat.deepseek.com</span> 网页版登录态驱动 DSH agent —— 不需要 API Key。provider 路由：<span class="dsw-nobreak">deepseek-web</span></p>
 
   <div class="dsw-alert ok">已保存「请求间隔」设置</div>
 
@@ -204,13 +199,6 @@ const demo = `
   </div>
 </div>`
 
-// --lean：把「精简模式」也渲染出来（给 .dsw-page 加 dsw-lean，并把开关文案翻成"完整"）
-// ⚠️ 必须在 html 模板之前求值 —— 模板字符串在定义的那一刻就会就地求值。
-const lean = process.argv.includes('--lean')
-const demoHtml = lean
-  ? demo.replace('<div class="dsw-page">', '<div class="dsw-page dsw-lean">').replace('>精简</button>', '>完整</button>')
-  : demo
-
 const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -233,13 +221,12 @@ ${styles}
 </head>
 <body>
 <div class="wrap">
-  <section class="col light"><p class="tag">Light${lean ? ' · lean' : ''}</p>${demoHtml}</section>
-  <section class="col dark"><p class="tag">Dark${lean ? ' · lean' : ''}</p>${demoHtml}</section>
+  <section class="col light"><p class="tag">Light</p>${demo}</section>
+  <section class="col dark"><p class="tag">Dark</p>${demo}</section>
 </div>
 </body>
 </html>`
 
-const positional = process.argv.slice(2).filter((arg) => !arg.startsWith('--'))
-const out = resolve(positional[0] ?? join(tmpdir(), lean ? 'dsh-panel-preview-lean.html' : 'dsh-panel-preview.html'))
+const out = resolve(process.argv[2] ?? join(tmpdir(), 'dsh-panel-preview.html'))
 writeFileSync(out, html, 'utf8')
 console.log(out)
