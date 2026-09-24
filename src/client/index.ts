@@ -145,7 +145,12 @@ font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12p
 /* 页面标题：整页唯一的 display 级文字。字重 600 + 轻微负字距 ——
    原来是 14px/500，跟 13px 的正文只差 1px，整页因此没有"起点"。 */
 .dsw-title{margin:0 0 4px;font-size:15px;font-weight:600;line-height:1.4;letter-spacing:-.01em;color:var(--fg)}
-.dsw-sub{margin:0 0 var(--sp-5);font-size:12px;line-height:1.65;color:var(--fg2);max-width:64ch}
+.dsw-sub{margin:0;font-size:12px;line-height:1.65;color:var(--fg2);max-width:64ch}
+/* 页头一行：左标题、右精简开关。开关刻意做得小且安静 —— 它是显示偏好，
+   不该跟"登录""退出"这些真正的动作抢注意力。 */
+.dsw-head{display:flex;align-items:flex-start;gap:var(--sp-3);margin:0 0 var(--sp-5)}
+.dsw-head-main{flex:1 1 auto;min-width:0}
+.dsw-leantoggle{flex:0 0 auto;font-size:11px;padding:3px 9px;color:var(--fg2)}
 /* provider 名带连字符，万一折行会断成 deepseek- / web（看着像故障）—— 整词不拆 */
 .dsw-nobreak{white-space:nowrap}
 /* 卡片：内边距与卡片间距都大一档。面板本身信息密度就高，卡片再贴在一起就糊成一整块。 */
@@ -298,6 +303,18 @@ background:var(--bg1);white-space:pre-wrap;font-size:12px}
 /* 整行染成纯错误色在深色底上会刺眼且发暗；混一点正文色压回来，色条仍然说明性质。 */
 .dsw-alert.ok{border-left:3px solid var(--ok);color:color-mix(in srgb,var(--ok) 72%,var(--fg))}
 .dsw-alert.err{border-left:3px solid var(--err);color:color-mix(in srgb,var(--err) 78%,var(--fg))}
+/* ── 精简模式 ────────────────────────────────────────────────────────
+   把"解释性文字"整类收起：页面副标题、各处说明段落、设置摘要（gate-msg）。
+   只留数据、状态与操作 —— 给已经熟悉这个面板的人用，省掉每次滚过同一段说明。
+   用 display:none 而不是 opacity：要让它真正不占高度，否则"精简"只少了字、没少滚动条。
+   ⚠️ 刻意不碰 .dsw-alert 与 .dsw-msg —— 那是操作反馈和错误详情，不是注释。 */
+.dsw-lean .dsw-sub,
+.dsw-lean .dsw-hint,
+.dsw-lean .dsw-gate-msg{display:none}
+/* 说明文字一走，原来给它们留的空白就显得空 —— 顺带收紧一档。 */
+.dsw-lean .dsw-head{margin-bottom:var(--sp-4)}
+.dsw-lean .dsw-card{padding:var(--sp-3);margin-bottom:var(--sp-2)}
+.dsw-lean .dsw-gate-row{margin:var(--sp-2) 0}
 /* 用户开了"减少动态效果"就别再让元素滑来滑去。 */
 @media (prefers-reduced-motion:reduce){
 .dsw-page *{transition-duration:.01ms !important}
@@ -371,7 +388,43 @@ function Panel(): any {
     sub.append('用 chat.deepseek.com 的登录态驱动 DSH，不需要 API Key（provider：')
     sub.append(el('span', 'dsw-nobreak', 'deepseek-web'))
     sub.append('）')
-    page.append(style, title, sub)
+
+    // ── 精简模式：把各处的说明文字整类收起 ──────────────────────────
+    // 天天看这个面板的人只需要"账号什么状态 / 设置成了什么"，解释性文字只在前几次有用。
+    // 状态存 localStorage —— 这是显示偏好，不该每次打开面板都重新点一遍。
+    // 读不到（隐私模式 / 存储被禁）就退化成"本次会话不精简"，绝不能让面板挂掉。
+    const LEAN_KEY = 'dsw-lean-mode'
+    let lean = false
+    try {
+      lean = window.localStorage.getItem(LEAN_KEY) === '1'
+    } catch {
+      /* 存储不可用：用默认值 */
+    }
+
+    const leanToggle = el('button', 'dsw-btn ghost dsw-leantoggle')
+    leanToggle.setAttribute('type', 'button')
+    const applyLean = (next: boolean, persist = true): void => {
+      lean = next
+      page.classList.toggle('dsw-lean', lean)
+      // 按钮文案写"点它会做什么"，而不是"当前是什么" —— 少一次猜测。
+      leanToggle.textContent = lean ? '完整' : '精简'
+      leanToggle.title = lean ? '显示被收起的说明文字' : '收起说明文字，只留数据与操作'
+      leanToggle.setAttribute('aria-pressed', String(lean))
+      if (!persist) return
+      try {
+        window.localStorage.setItem(LEAN_KEY, lean ? '1' : '0')
+      } catch {
+        /* 存不下就算了 —— 只是显示偏好 */
+      }
+    }
+    leanToggle.addEventListener('click', () => applyLean(!lean))
+
+    const headMain = el('div', 'dsw-head-main')
+    headMain.append(title, sub)
+    const head = el('div', 'dsw-head')
+    head.append(headMain, leanToggle)
+    page.append(style, head)
+    applyLean(lean, false)
 
     // ── 操作反馈：常驻在标签栏之上 ──────────────────────────────
     // 拆成标签页后，在「账号」页点按钮的反馈若落在别的页里就等于看不见，所以它不归属任何一页。
