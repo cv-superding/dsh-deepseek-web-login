@@ -135,7 +135,8 @@ dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
 # B: git install (requires github.com reachability)
 dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
 
-# C: install from npm (published as of 0.2.0; no git, no build step)
+# C: install from npm (no git, no build step)
+#   confirm it is published first: npm view dsh-deepseek-web-login version  (else use A/B)
 dsh plugin --profile desktop add dsh-deepseek-web-login
 ```
 
@@ -152,14 +153,16 @@ dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login#v0.2
 # 2) Use the release tarball (no git at all; download the matching tgz from the Releases page)
 dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.2.0.tgz
 
-# 3) Install from npm (published as of 0.2.0; no git, no build step)
+# 3) Install from npm (no git, no build step; check `npm view dsh-deepseek-web-login version` first)
 dsh plugin --profile desktop add dsh-deepseek-web-login
 ```
 
 > The catalog entry is currently `npm: null` (**not published to npm**), which is why installs go
-> through git. **0.2.0 is published**, and the catalog re-probes once a day (an "unpublished" verdict
-> expires after a day), after which the market switches to the npm path (version compare + tarball,
-> no local git). If it still shows the git command, give it a day — or use option 3 above.
+> through git. The package itself is ready (`private` removed, `repository` added — the latter is a
+> hard requirement for the catalog to recognise an npm package). Once published, the catalog
+> re-probes daily (an "unpublished" verdict expires after a day) and switches to the npm path
+> (version compare + tarball, no local git). If it still shows the git command, give it a day —
+> or use option 3 above.
 
 ### 2. Log in once
 `--profile desktop` is the profile used by DSH Desktop (the Electron app); use `--profile web` for a web profile.
