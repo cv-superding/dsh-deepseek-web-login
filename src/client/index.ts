@@ -153,13 +153,17 @@ font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12p
 .dsw-leantoggle{flex:0 0 auto;font-size:11px;padding:3px 9px;color:var(--fg2)}
 /* provider 名带连字符，万一折行会断成 deepseek- / web（看着像故障）—— 整词不拆 */
 .dsw-nobreak{white-space:nowrap}
-/* 卡片：内边距与卡片间距都大一档。面板本身信息密度就高，卡片再贴在一起就糊成一整块。 */
-.dsw-card{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r-lg);
-  padding:var(--sp-4);margin-bottom:var(--sp-3)}
-/* 卡片头：字重 600。改造前它和正文同为 13px/500 —— 标题只能靠"位置"辨认，不靠视觉。 */
-.dsw-cardhead{display:flex;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-3);
+/* 分组不再用"七个一模一样的描边盒子"。
+   盒子本身不表达任何层级，连堆七张就是 AI 默认长相 —— 按 redesign 技能的判据，
+   card 只在 elevation 真的表达层级时才用（我们这里没有那种层级）。
+   数据密集面板的正解是「分区标题 + 负空间」：标题吃字重，分组吃间距，
+   行与行之间的细线交给 .dsw-kv 自己承担。这样页面上唯一有实底的块
+   就只剩账号行和反馈条，它们的重要度反而被衬出来了。 */
+.dsw-card{background:transparent;border:0;border-radius:0;padding:0;margin:0 0 var(--sp-5)}
+/* 分区标题：字重整 600。 */
+.dsw-cardhead{display:flex;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-2);
   font-size:13px;font-weight:600;letter-spacing:-.005em;color:var(--fg)}
-.dsw-card > .name{margin:0 0 var(--sp-3);font-size:13px;font-weight:600;color:var(--fg)}
+.dsw-card > .name{margin:0 0 var(--sp-2);font-size:13px;font-weight:600;color:var(--fg)}
 .dsw-row{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
 .dsw-badge{font-size:11px;font-weight:500;line-height:1.7;padding:1px 9px;border-radius:999px;
   white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -193,7 +197,7 @@ outline:none;transition:border-color .15s ease,box-shadow .15s ease}
 .dsw-kv > :nth-child(1),.dsw-kv > :nth-child(2){border-top:none;padding-top:2px}
 .dsw-kv .k{color:var(--fg2);font-size:12px;white-space:nowrap}
 .dsw-kv > *:not(.k){color:var(--fg);word-break:break-word}
-.dsw-msg{margin-top:var(--sp-3);padding:10px 12px;border-radius:var(--r-md);background:var(--bg1);
+.dsw-msg{margin-top:var(--sp-3);padding:10px 12px;border-radius:var(--r-md);background:var(--bg2);
 border:1px solid var(--bd);border-left:3px solid var(--fg3);white-space:pre-wrap;max-height:240px;
 overflow:auto;font-size:12px;line-height:1.6;color:var(--fg)}
 .dsw-msg.err{border-left-color:var(--err);color:color-mix(in srgb,var(--err) 78%,var(--fg))}
@@ -270,8 +274,11 @@ transition:color .15s ease,border-color .15s ease}
 .dsw-accounts{list-style:none;margin:var(--sp-2) 0 0;padding:0;display:flex;flex-direction:column;gap:var(--sp-2)}
 /* 账号行是可交互的整块 —— 必须给 hover 反馈。改造前它完全静态，鼠标扫过去没有任何回应。
    当前账号再叠一层主色淡底，跟"只是鼠标划过"区分开。 */
+/* 账号行：从"bg2 卡片里的凹陷块"改成"页面上的凸起块"。
+   卡片没了之后 bg1 跟页面同色看不见，必须换成 bg2 —— 顺带让账号库成为
+   页面上唯一有实底的一组，重要度自然凸显。 */
 .dsw-account{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--bd);
-border-radius:var(--r-md);padding:10px 12px;background:var(--bg1);
+border-radius:var(--r-md);padding:10px 12px;background:var(--bg2);
 transition:background-color .15s ease,border-color .15s ease}
 .dsw-account:hover{background:var(--hover)}
 .dsw-account.active{border-color:var(--accent);background:var(--accent-weak)}
@@ -299,7 +306,7 @@ background:var(--bg2);color:var(--fg);max-width:110px}
 .dsw-groupsel:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 /* 操作反馈：不归属任何一页，常驻在标签栏之上 */
 .dsw-alert{margin:0 0 var(--sp-3);padding:9px 12px;border-radius:var(--r-md);border:1px solid var(--bd);
-background:var(--bg1);white-space:pre-wrap;font-size:12px}
+background:var(--bg2);white-space:pre-wrap;font-size:12px}
 /* 整行染成纯错误色在深色底上会刺眼且发暗；混一点正文色压回来，色条仍然说明性质。 */
 .dsw-alert.ok{border-left:3px solid var(--ok);color:color-mix(in srgb,var(--ok) 72%,var(--fg))}
 .dsw-alert.err{border-left:3px solid var(--err);color:color-mix(in srgb,var(--err) 78%,var(--fg))}
@@ -313,7 +320,7 @@ background:var(--bg1);white-space:pre-wrap;font-size:12px}
 .dsw-lean .dsw-gate-msg{display:none}
 /* 说明文字一走，原来给它们留的空白就显得空 —— 顺带收紧一档。 */
 .dsw-lean .dsw-head{margin-bottom:var(--sp-4)}
-.dsw-lean .dsw-card{padding:var(--sp-3);margin-bottom:var(--sp-2)}
+.dsw-lean .dsw-card{margin-bottom:var(--sp-3)}
 .dsw-lean .dsw-gate-row{margin:var(--sp-2) 0}
 /* 用户开了"减少动态效果"就别再让元素滑来滑去。 */
 @media (prefers-reduced-motion:reduce){
