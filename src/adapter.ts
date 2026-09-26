@@ -464,6 +464,14 @@ export interface AdapterDeps {
    * 缺省时退回「调用后 1.5s 删除」的老行为。
    */
   sessionCleaner?: SessionCleaner
+  /**
+   * 请求开始前的**钩子**：宿主用它做自动轮换账号（见 `index.ts` 的 `maybeAutoSwitch`）。
+   *
+   * 位置很讲究 —— 必须在闸门 `acquire` **之前**：换号要落在"两个请求之间"，
+   * 而不能插进一个已经起飞的请求里（那次请求的 `auth` 早就解析完了，中途换号只会自相矛盾）。
+   * 钩子自己吞异常：换号失败最多是这一轮不换，绝不能让请求失败。
+   */
+  maybeAutoSwitch?: () => Promise<void>
 }
 
 function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
@@ -957,6 +965,12 @@ export function createAdapter(deps: AdapterDeps) {
    */
   async function* gatedStream(options: any): AsyncGenerator<any> {
     const purpose = typeof options?.purpose === 'string' && options.purpose ? options.purpose : 'chat'
+    // 自动轮换账号的检查点（宿主注入；不注入即无操作）。
+    // ⚠️ 刻意放在 acquire **之前**：换号要落在"两个请求之间"，不能插进已经起飞的请求里。
+    // 宿主侧已自己吞异常，这里再兜一层 —— 换号这种"顺带做的事"绝不该让请求失败。
+    try {
+      await deps.maybeAutoSwitch?.()
+    } catch {}
     // F11：把调用方的取消信号交给闸门 —— 否则「点停止」之后，请求仍会在排队/
     // 等间隔里干等（间隔 2~4s、长休可达 180s），界面停了、闸门还在倒计时。
     const release = await gate.acquire(purpose, options?.signal)

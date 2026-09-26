@@ -140,6 +140,30 @@ export function clampContextWindow(value: number): number {
   return Math.max(CONTEXT_WINDOW_BOUNDS.min, Math.min(CONTEXT_WINDOW_BOUNDS.max, Math.round(value)))
 }
 
+/**
+ * 自动切换账号的间隔（分钟）—— **0 表示关闭**。
+ *
+ * 用途：按时间把当前账号轮换到下一个，让每个账号分到的请求都变少（降低单账号密度）。
+ *
+ * ⚠️ 它和"**一被限流就自动换号**"不是一回事，别混：
+ *   - 定时均衡轮换 ⇒ 每个号的密度都摊薄，是**分散**；
+ *   - 遇限流就换   ⇒ 同一个出口 IP 上多号交替活跃，反而更像"有组织的规避"，是**加剧**。
+ * 所以这里**只看时间**：受限的账号会被跳过（它自己用不了），但不会因为它受限就提前切。
+ *
+ * 代价（界面上要讲清楚）：换号会让投喂链断掉 —— `decideFeed` 有 `account-changed` 一档 ⇒
+ * 必然 `restart` ⇒ 全量重发 + 新会话 + 历史图重新上传。间隔越短，这个代价出现得越频繁。
+ */
+export const AUTO_SWITCH_BOUNDS = { min: 0, max: 120 } as const
+
+/** 默认关闭 —— 不动这个开关的人行为完全不变。 */
+export const DEFAULT_AUTO_SWITCH_MINUTES = 0
+
+/** 规整自动切换间隔：非数 → 默认；越界 → 夹到边界。 */
+export function clampAutoSwitchMinutes(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_AUTO_SWITCH_MINUTES
+  return Math.max(AUTO_SWITCH_BOUNDS.min, Math.min(AUTO_SWITCH_BOUNDS.max, Math.round(value)))
+}
+
 /** 距上次请求超过这么久就算"歇过了"，连续计数归零。 */
 const LONG_RUN_IDLE_RESET_MS = 120_000
 
@@ -230,6 +254,11 @@ export interface GateSettings {
    * 只是搭同一份设置文件与同一个设置页，真正的执行方是 adapter 的模型信息解析。
    */
   contextWindow?: number
+  /**
+   * 自动切换账号的间隔（分钟，0 = 关闭）。同 contextWindow：**不参与节流逻辑**，
+   * 只是搭同一份设置文件与同一个设置页，真正的执行方是宿主的切号钩子（见 AUTO_SWITCH_BOUNDS）。
+   */
+  autoSwitchMinutes?: number
 }
 
 /** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
@@ -288,6 +317,9 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     if (Number.isFinite(parsed?.contextWindow)) {
       out.contextWindow = clampContextWindow(Number(parsed.contextWindow))
     }
+    if (Number.isFinite(parsed?.autoSwitchMinutes)) {
+      out.autoSwitchMinutes = clampAutoSwitchMinutes(Number(parsed.autoSwitchMinutes))
+    }
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
     return undefined
@@ -331,6 +363,8 @@ export interface RequestGateOptions {
   maxRefImages?: number
   /** 对外声明的模型上下文窗口（同上，本模块不执行，只是存下来以便落盘与回显）。 */
   contextWindow?: number
+  /** 自动切换账号的间隔（分钟，0 = 关闭；同上，本模块不执行，只是存下来以便落盘与回显）。 */
+  autoSwitchMinutes?: number
   /**
    * 会话清理策略（本模块不执行，同样只是存下来以便落盘与回显）。
    *
@@ -555,6 +589,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   let maxRefImages = clampMaxRefImages(options.maxRefImages ?? DEFAULT_MAX_REF_IMAGES)
   // 上下文窗口（同上：只是存着，真正的执行在 adapter 解析模型信息时）。
   let contextWindow = clampContextWindow(options.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
+  // 自动切换账号的间隔（同上：只是存着，真正的执行在宿主的切号钩子 —— 见 AUTO_SWITCH_BOUNDS）。
+  let autoSwitchMinutes = clampAutoSwitchMinutes(options.autoSwitchMinutes ?? DEFAULT_AUTO_SWITCH_MINUTES)
   let cleanupMode = options.sessionCleanup
   // 会话清理的三个区间（同样不参与节流逻辑）。存在这里是为了**能落盘**：
   // writeGateSettings 写的是 settings() 的返回值，不存就丢。
@@ -578,6 +614,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       maxPromptChars,
       maxRefImages,
       contextWindow,
+      autoSwitchMinutes,
     }
   }
 
@@ -589,6 +626,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (next.maxPromptChars !== undefined) maxPromptChars = clampMaxPromptChars(Number(next.maxPromptChars))
     if (next.maxRefImages !== undefined) maxRefImages = clampMaxRefImages(Number(next.maxRefImages))
     if (next.contextWindow !== undefined) contextWindow = clampContextWindow(Number(next.contextWindow))
+    if (next.autoSwitchMinutes !== undefined) autoSwitchMinutes = clampAutoSwitchMinutes(Number(next.autoSwitchMinutes))
     // 三个区间：非法的输入直接当"没给"（不报错、也不覆盖已有的有效值）
     if (next.cleanupBatch !== undefined) {
       const value = normalizeCleanupRange(next.cleanupBatch, CLEANUP_BATCH_BOUNDS)

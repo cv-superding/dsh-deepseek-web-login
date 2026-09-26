@@ -1699,6 +1699,44 @@ function Panel(): any {
       void saveGate({ contextWindow: currentCtxTokens() })
     })
 
+    // ── 自动换号（0 = 关闭）────────────────────────────────────────────
+    // 语义是**按时间均衡轮换**，不是"一被限流就换号"。两者的方向相反：
+    //   均衡轮换 ⇒ 每个账号分到的请求都变少，是把密度摊薄；
+    //   遇限流就换 ⇒ 同一个出口 IP 上多号交替活跃，更像"有组织的规避"。
+    // 所以这里**只看时间**（受限/失效的号会被跳过，但不会因为它受限就提前切）。
+    const swRow = el('div', 'dsw-gate-row')
+    swRow.append(el('span', 'dsw-gate-label', '自动换号'))
+    const swRange = el('input', 'dsw-range') as HTMLInputElement
+    swRange.type = 'range'
+    swRange.min = '0'
+    swRange.max = '120'
+    swRange.step = '1'
+    swRange.setAttribute('aria-label', '自动切换账号的间隔（分钟），0 表示关闭')
+    swRange.title = '每隔这么久换到账号库里的下一个可用账号；0 = 关闭'
+    // 借用成对滑块的宽度（能装下「120 分钟」），不新增样式
+    const swValue = el('span', 'dsw-gate-pair-value', '—')
+    swRow.append(swRange, swValue)
+    gateCard.append(swRow)
+    const swHint = el('p', 'dsw-hint', '')
+    gateCard.append(swHint)
+
+    const currentSwitchMinutes = (): number => Math.max(0, Math.round(Number(swRange.value) || 0))
+
+    const paintAutoSwitch = (): void => {
+      const minutes = currentSwitchMinutes()
+      swValue.textContent = minutes === 0 ? '关闭' : `${minutes} 分钟`
+      swHint.textContent =
+        minutes === 0
+          ? '关闭时不会自动换号 —— 当前账号一直用到你手动切换为止。'
+          : `每 ${minutes} 分钟换到账号库里的下一个可用账号（失效或正在受限的会跳过；可用的不足两个就不换）。` +
+            '换号会让投喂链断掉：下一轮要全量重发，历史图也要重新上传 —— 间隔越短，这个代价出现得越频繁。'
+    }
+    swRange.addEventListener('input', paintAutoSwitch)
+    swRange.addEventListener('change', () => {
+      paintAutoSwitch()
+      void saveGate({ autoSwitchMinutes: currentSwitchMinutes() })
+    })
+
     const cleanupRow = el('div', 'dsw-gate-row')
     cleanupRow.append(el('span', 'dsw-gate-label', '会话清理'))
     const cleanupBtns: Record<string, HTMLButtonElement> = {}
@@ -2329,6 +2367,13 @@ function Panel(): any {
       )
       paintContextWindow()
 
+      // 自动换号：边界与默认值同样由后端给（界面不写第二套数字）。
+      const swBounds = g.autoSwitchBounds ?? { min: 0, max: 120 }
+      swRange.min = String(swBounds.min)
+      swRange.max = String(swBounds.max)
+      swRange.value = String(g.autoSwitchMinutes ?? g.autoSwitchDefault ?? 0)
+      paintAutoSwitch()
+
       const mode = g.cleanup?.mode ?? 'deferred'
       for (const key of Object.keys(cleanupBtns)) {
         cleanupBtns[key].classList.toggle('active', key === mode)
@@ -2362,6 +2407,7 @@ function Panel(): any {
       maxPromptChars?: number
       maxRefImages?: number
       contextWindow?: number
+      autoSwitchMinutes?: number
       cleanupBatch?: { min: number; max: number }
       cleanupDelayMs?: { min: number; max: number }
       cleanupGapMs?: { min: number; max: number }

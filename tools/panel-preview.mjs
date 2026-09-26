@@ -171,6 +171,11 @@ const demo = `
       <input type="range" class="dsw-range" min="0" max="5" step="1" value="2"><span class="dsw-gate-value">128K</span>
     </div>
     <p class="dsw-hint">声明 128K：DSH 会更早压缩/截断历史，每轮重发的转写因此更短。这只是声明值，不改模型真实能力；想彻底压住单次体量，上面的「prompt 上限」也要一起调。</p>
+    <div class="dsw-gate-row">
+      <span class="dsw-gate-label">自动换号</span>
+      <input type="range" class="dsw-range" min="0" max="120" step="1" value="30"><span class="dsw-gate-pair-value">30 分钟</span>
+    </div>
+    <p class="dsw-hint">每 30 分钟换到账号库里的下一个可用账号（失效或正在受限的会跳过；可用的不足两个就不换）。换号会让投喂链断掉：下一轮要全量重发，历史图也要重新上传 —— 间隔越短，这个代价出现得越频繁。</p>
     <div class="dsw-row">
       <button class="dsw-btn ghost dsw-preset active">保守</button>
       <button class="dsw-btn ghost dsw-preset">均衡</button>

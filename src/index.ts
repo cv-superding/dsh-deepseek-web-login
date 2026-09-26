@@ -39,8 +39,12 @@ import {
   CONTEXT_WINDOW_BOUNDS,
   CONTEXT_WINDOW_OPTIONS,
   DEFAULT_CONTEXT_WINDOW,
+  clampAutoSwitchMinutes,
+  AUTO_SWITCH_BOUNDS,
+  DEFAULT_AUTO_SWITCH_MINUTES,
   type GateSettings,
 } from './gate.ts'
+import { decideAutoSwitch, type SwitchableAccount } from './auto-switch.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount, endRelogin } from './account-add.ts'
@@ -310,6 +314,7 @@ export function apply(ctx: any, config: Config = {}): void {
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     maxRefImages: savedGate?.maxRefImages ?? config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES,
     contextWindow: savedGate?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    autoSwitchMinutes: savedGate?.autoSwitchMinutes ?? DEFAULT_AUTO_SWITCH_MINUTES,
     longRunBreakMs: savedGate?.longRunBreakMs,
     // ⚠️ 会话清理这几个字段必须**一起传**（2026-09-14 修）：设置页保存时写的是
     // `gate.settings()` 的返回值 —— 没存进闸门的字段会被**静默抹掉**，
@@ -343,6 +348,68 @@ export function apply(ctx: any, config: Config = {}): void {
         ? '（配置要求 Chromium，但本环境没有 electron.net.fetch，已降级为 Node）'
         : ''),
   )
+
+  // ── 自动切换账号（**检查点式**，刻意不用定时器）────────────────────────
+  // 为什么不用 setInterval：本项目对定时器有过教训（见 gate.ts 里"unref 有前科"那段）——
+  // 宿主关停时定时器会拖住进程，要正确清理又得管一套生命周期。改成**请求进入时的检查点**：
+  // 每次有请求要发（闸门放行之前）顺带判断一次"该不该换号"。
+  // 语义上也更准：没有请求就没有风控暴露，本来也不需要换号。
+  //
+  // ⚠️ 它**只看时间**，不看限流状态：定时均衡轮换是把单账号密度摊薄（分散），
+  // 而"一被限流就换号"会让同一出口 IP 上多号交替活跃（更像有组织的规避）。两者的区别见
+  // auto-switch.ts 的模块注释。唯一的例外是**当前账号自己不可用**（失效 / 受限未解除）——
+  // 那种情况下等满 N 分钟没有意义，立刻切走。
+  let lastAutoSwitchAt = Date.now()
+  let autoSwitching = false
+  /** 本轮探活失败过的账号 —— 不选它们，避免在同一个坏号上反复试。进程重启即清空。 */
+  const autoSwitchSkip = new Set<string>()
+
+  async function maybeAutoSwitch(): Promise<void> {
+    if (autoSwitching) return // 上一次还在探活，别叠加
+    const minutes = gate.settings().autoSwitchMinutes ?? DEFAULT_AUTO_SWITCH_MINUTES
+    if (!Number.isFinite(minutes) || minutes <= 0) return
+    const accounts = listAccounts().filter((account) => !autoSwitchSkip.has(account.id))
+    const decision = decideAutoSwitch({
+      minutes,
+      lastSwitchAt: lastAutoSwitchAt,
+      now: Date.now(),
+      accounts: accounts as SwitchableAccount[],
+      currentId: activeAccountId(),
+    })
+    if (decision.action !== 'switch') return
+    autoSwitching = true
+    try {
+      const target = readAccount(decision.nextId)
+      if (!target) return
+      // 切之前先探活（照 /accounts/switch 的既有做法）：切到一个已失效的号，
+      // 下一个请求必然 AUTH 失败 —— 等于白折腾一轮全量重发。
+      const probed = await probeOnce(target, {
+        info: (message) => logger.info?.(message),
+        warn: (message) => logger.warn?.(message),
+      })
+      if (probed && !probed.ok) {
+        autoSwitchSkip.add(decision.nextId)
+        // 计时要推进：否则每个请求都会重挑一次，探活成了高频动作。
+        lastAutoSwitchAt = Date.now()
+        logger.warn?.(
+          `deepseek-web: 自动切号跳过 ${decision.nextId}（探活未通过：${probed.error ?? '未知原因'}）`,
+        )
+        return
+      }
+      if (!setActiveAccount(decision.nextId)) return
+      lastAutoSwitchAt = Date.now()
+      logger.info?.(
+        `deepseek-web: 已自动切换账号到 ${decision.nextId}（每 ${minutes} 分钟轮换` +
+          (decision.reason === 'current-unusable' ? '；原账号不可用，提前切走' : '') +
+          '）—— 换号会让投喂链断掉，下一轮会全量重发',
+      )
+    } catch (error: any) {
+      lastAutoSwitchAt = Date.now()
+      logger.warn?.(`deepseek-web: 自动切换账号失败（不影响本次请求）：${error?.message ?? error}`)
+    } finally {
+      autoSwitching = false
+    }
+  }
 
   // 上下文投喂方式（2026-09-14）：设置页保存的值优先于 cordis config，即时生效无需重启。
   // 默认 full（每轮重发全量）—— 与 0.1.61 及以前的行为完全一致。
@@ -560,6 +627,8 @@ export function apply(ctx: any, config: Config = {}): void {
     noteCall: recordCallOutcome,
     currentAccountId: activeAccountId,
     gate,
+    // 自动轮换账号的检查点：adapter 在闸门放行之前 await 一下（见 maybeAutoSwitch 的注释）。
+    maybeAutoSwitch,
     sessionCleaner,
     config: adapterConfig,
     readImage: async (ref: any, signal?: AbortSignal) => {
@@ -608,6 +677,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 contextWindowBounds: CONTEXT_WINDOW_BOUNDS,
                 contextWindowDefault: DEFAULT_CONTEXT_WINDOW,
                 contextWindowOptions: CONTEXT_WINDOW_OPTIONS,
+                autoSwitchBounds: AUTO_SWITCH_BOUNDS,
+                autoSwitchDefault: DEFAULT_AUTO_SWITCH_MINUTES,
                 cleanup: sessionCleaner.policy(),
                 // 界面的滑块边界/默认值由后端给 —— 免得两边各写一套数字、改了一边忘另一边
                 cleanupBounds: {
@@ -693,6 +764,15 @@ export function apply(ctx: any, config: Config = {}): void {
                   return
                 }
                 patch.contextWindow = clampContextWindow(window)
+              }
+              if (body.autoSwitchMinutes !== undefined) {
+                const minutes = Number(body.autoSwitchMinutes)
+                if (!Number.isFinite(minutes)) {
+                  sendJson(res, 400, { ok: false, error: 'autoSwitchMinutes 必须是数字' })
+                  return
+                }
+                // 0 = 关闭（默认）。宿主在每次请求前现读 gate.settings()，所以改完即时生效。
+                patch.autoSwitchMinutes = clampAutoSwitchMinutes(minutes)
               }
               if (Object.keys(patch).length === 0) {
                 sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
@@ -815,6 +895,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 return
               }
               logger.info?.(`deepseek-web: 当前账号已切换为 ${id}`)
+              // 手动切号也要重置自动轮换的计时 —— 否则用户刚切完，1 分钟后又被自动切走
+              lastAutoSwitchAt = Date.now()
               sendJson(res, 200, { ok: true, activeId: id })
               return
             }
