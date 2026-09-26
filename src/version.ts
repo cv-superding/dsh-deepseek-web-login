@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs'
 
 /** 与 package.json 保持一致的兜底版本（由测试保证不会漂）。 */
-export const FALLBACK_VERSION = '0.4.1'
+export const FALLBACK_VERSION = '0.4.2'
 
 let cached: string | undefined
 
