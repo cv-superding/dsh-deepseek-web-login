@@ -472,6 +472,12 @@ export interface AdapterDeps {
    * 钩子自己吞异常：换号失败最多是这一轮不换，绝不能让请求失败。
    */
   maybeAutoSwitch?: () => Promise<void>
+  /**
+   * 当前账号被限时问宿主：「换个账号还能不能接着干」——
+   * 原样转给 webapi 的 `CompletionParams.canFailover`，由它决定失败时给长退避还是短退避。
+   * 适配器刻意不自己判断：账号库长什么样只有宿主知道。
+   */
+  canFailover?: () => boolean
 }
 
 function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
@@ -1160,6 +1166,10 @@ export function createAdapter(deps: AdapterDeps) {
         try {
       for await (const event of runStream(auth as WebAuth, {
         prompt: currentPrompt,
+        // 当前账号被限时，由宿主回答"换个号还能不能接着干"。
+        // 能 ⇒ webapi 给短退避（而不是解除时间）⇒ 重试策略立刻重发 ⇒
+        // 重发时 maybeAutoSwitch 换上可用账号 ⇒ 整轮任务不用人插手就能接下去。
+        canFailover: deps.canFailover,
         // 链式投喂用：把结构与 prompt 一起传下去，webapi 才能算出"这一轮新增了哪几条"。
         // 漏传 = 链式模式静默退化成全量（有产物断言守着）。
         promptParts: {

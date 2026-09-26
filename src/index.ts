@@ -44,7 +44,7 @@ import {
   DEFAULT_AUTO_SWITCH_MINUTES,
   type GateSettings,
 } from './gate.ts'
-import { decideAutoSwitch, type SwitchableAccount } from './auto-switch.ts'
+import { decideAutoSwitch, pickNextAccount, type SwitchableAccount } from './auto-switch.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount, endRelogin } from './account-add.ts'
@@ -411,6 +411,20 @@ export function apply(ctx: any, config: Config = {}): void {
     }
   }
 
+  /**
+   * 「当前账号被限时，换个号还能不能接着干」—— 只决定失败该给长退避还是短退避。
+   *
+   * ⚠️ 只在用户**明确开了**自动换号（间隔 > 0）时才为真。默认关闭 ⇒ 保持原行为
+   * （长退避 ⇒ 重试策略放弃），免得把一个没打算换号的用户悄悄换到别的账号上。
+   */
+  const canFailover = (): boolean => {
+    const minutes = gate.settings().autoSwitchMinutes ?? DEFAULT_AUTO_SWITCH_MINUTES
+    if (!Number.isFinite(minutes) || minutes <= 0) return false
+    if (autoSwitching) return false // 正在切，别叠加
+    const accounts = listAccounts().filter((account) => !autoSwitchSkip.has(account.id))
+    return pickNextAccount(accounts as SwitchableAccount[], activeAccountId(), Date.now()) !== undefined
+  }
+
   // 上下文投喂方式（2026-09-14）：设置页保存的值优先于 cordis config，即时生效无需重启。
   // 默认 full（每轮重发全量）—— 与 0.1.61 及以前的行为完全一致。
   let contextMode = applyContextMode(
@@ -629,6 +643,8 @@ export function apply(ctx: any, config: Config = {}): void {
     gate,
     // 自动轮换账号的检查点：adapter 在闸门放行之前 await 一下（见 maybeAutoSwitch 的注释）。
     maybeAutoSwitch,
+    // 账号被限时"还能不能换号接着干" —— 决定那次失败给长退避还是短退避（见 canFailover）。
+    canFailover,
     sessionCleaner,
     config: adapterConfig,
     readImage: async (ref: any, signal?: AbortSignal) => {

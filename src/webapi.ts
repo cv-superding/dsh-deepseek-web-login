@@ -126,6 +126,15 @@ export function muteUntilMs(json: any): number | undefined {
 }
 
 /**
+ * 「能换号接着干」时给的重试退避。
+ *
+ * 为什么是 2 秒而不是 0：让 dsh-llm-retry 立刻重发，但仍留一点余量 ——
+ * 重发进入适配器时，"自动换号"的检查点要先跑完（可能含一次探活）。
+ * 它**不是**"等对面恢复"的退避，而是"我马上换个号再试一次"的信号。
+ */
+const FAILOVER_RETRY_MS = 2_000
+
+/**
  * 被限制时的用户可读文案。
  *
  * 只说结论与解除时间 —— **不解释原因**。原因（免费网页端对高频自动化的静默限流、
@@ -1958,6 +1967,17 @@ export interface CompletionParams {
   /** 同一会话复用的轮次上限（0 = 每请求一个会话，用完即删）。 */
   sessionReuseTurns?: number
   onDeleteSession?: (sessionId: string) => void
+  /**
+   * 当前账号被限时问宿主：「换个账号还能不能接着干」。
+   *
+   * 用途只有一个 —— 决定这次失败给**长退避**还是**短退避**：
+   *  - true（宿主开了自动换号、账号库里还有可用候选）⇒ 给短退避，让 dsh-llm-retry **立刻重发**；
+   *    重发进入适配器时，自动换号的检查点会换上可用账号 ⇒ **整轮任务不用人插手就能接下去**。
+   *  - false ⇒ 保持 0.4.0 之前的行为：把解除时间当退避（几小时）⇒ 重试策略直接放弃，不做无用的空转。
+   *
+   * ⚠️ 不注入 ⇒ 行为与以前完全一致。宿主返回异常时按 false 处理（保守）。
+   */
+  canFailover?: () => boolean
 }
 
 /**
@@ -1986,6 +2006,17 @@ async function openCompletion(
   transport: CompletionTransport,
 ): Promise<{ sessionId: string; resp: Response; feed: FeedDecision }> {
   let lastFailure: AdapterLlmError | undefined
+  /**
+   * 宿主给的「还能不能换号接着干」。问不出来（没注入 / 抛错）时按**不能**处理 ——
+   * 保守方向：宁可让用户点一次「继续」，也不要给一个它其实接不上的短退避。
+   */
+  const canFailover = (): boolean => {
+    try {
+      return params.canFailover?.() === true
+    } catch {
+      return false
+    }
+  }
   for (let attempt = 0; attempt < 2; attempt++) {
     const lease = await leaseSession(
       auth,
@@ -2147,7 +2178,13 @@ async function openCompletion(
           {
             status: resp.status,
             // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
-            ...(muted && untilMs !== undefined ? { providerRetryAfterMs: Math.max(0, untilMs - Date.now()) } : {}),
+            // ⚠️ 但如果**能换号**（宿主开了自动换号且还有可用候选），就不要放弃 —— 给短退避，
+            // 让重试立刻发生；重发时自动换号的检查点会换上可用账号，整轮任务自己就能接下去。
+            ...(muted && untilMs !== undefined
+              ? {
+                  providerRetryAfterMs: canFailover() ? FAILOVER_RETRY_MS : Math.max(0, untilMs - Date.now()),
+                }
+              : {}),
             // 绝对值单独带一份：宿主会把它记到账号上，在设置页显示倒计时
             ...(muted && untilMs !== undefined ? { mutedUntilMs: untilMs } : {}),
             ...(busy ? { providerRetryAfterMs: 5_000 } : {}),

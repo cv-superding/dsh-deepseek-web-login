@@ -95,7 +95,7 @@ function jsonResponse(payload, status = 200) {
 }
 
 /** 装上假的 fetch，跑一次完成请求，返回时序日志与产出。 */
-async function scenario({ completionResponses, sessionReuseTurns = 0 }) {
+async function scenario({ completionResponses, sessionReuseTurns = 0, canFailover }) {
   // 会话复用槽是**模块级**的（生产里一个进程就一个），跨场景必须清掉，
   // 否则本场景会复用上一个场景留下的会话，断言里的 S1/S2 就对不上了。
   resetSessionReuse()
@@ -134,6 +134,7 @@ async function scenario({ completionResponses, sessionReuseTurns = 0 }) {
       idleTimeoutMs: 5_000,
       sessionReuseTurns,
       onDeleteSession: (id) => log.push(`delete:${id}`),
+      ...(canFailover !== undefined ? { canFailover } : {}),
     }, transport)) {
       events.push(event)
     }
@@ -331,6 +332,48 @@ await run('普通业务错误不得被节流判据误伤（仍不可重试）', 
     completionResponses: [jsonResponse(throttleEnvelope(2, 'INVALID_PARAM'))],
   })
   assert.equal(thrown?.code, 'PROVIDER_ERROR', `不是限流就别重试，实际 ${thrown?.code}`)
+})
+
+// ── 事实 ⑦：当前账号被限时，"能不能换号接着干"决定退避长短 ──
+// 背景：封禁（user is muted）过去把**解除时间**当退避 ⇒ 重试策略直接放弃 ⇒ 整轮停下来
+// 等用户手动点「继续」。现在有了自动换号，只要**还有可用账号**，就该给一个短退避让重试立刻
+// 发生 —— 重发时自动换号的检查点会换上可用账号，整轮任务自己就能接下去。
+await run('muted + 能换号 ⇒ 给短退避（让重试立刻发生，而不是放弃）', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(REAL_MUTED)],
+    canFailover: () => true,
+  })
+  const retryAfter = thrown?.failure?.providerRetryAfterMs ?? thrown?.providerRetryAfterMs
+  assert.ok(
+    retryAfter > 0 && retryAfter < 10_000,
+    `要秒级退避，实际 ${retryAfter}（给了解除时间就等于放弃重试，白等几小时）`,
+  )
+})
+
+await run('muted + 不能换号 ⇒ 仍是解除时间（放弃重试，不做无用空转）', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(REAL_MUTED)],
+    canFailover: () => false,
+  })
+  const retryAfter = thrown?.failure?.providerRetryAfterMs ?? thrown?.providerRetryAfterMs
+  assert.ok(retryAfter > 60_000, `没有别的账号可用时不该给短退避（会一直空转），实际 ${retryAfter}`)
+})
+
+await run('muted + 没注入 canFailover ⇒ 与旧行为完全一致', async () => {
+  const { thrown } = await scenario({ completionResponses: [jsonResponse(REAL_MUTED)] })
+  const retryAfter = thrown?.failure?.providerRetryAfterMs ?? thrown?.providerRetryAfterMs
+  assert.ok(retryAfter > 60_000, `默认必须保持旧行为（不动这个开关的人无感），实际 ${retryAfter}`)
+})
+
+await run('muted + canFailover 抛错 ⇒ 按"不能"处理（问不出来就别赌）', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(REAL_MUTED)],
+    canFailover: () => {
+      throw new Error('boom')
+    },
+  })
+  const retryAfter = thrown?.failure?.providerRetryAfterMs ?? thrown?.providerRetryAfterMs
+  assert.ok(retryAfter > 60_000, `异常要保守处理，实际 ${retryAfter}`)
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
