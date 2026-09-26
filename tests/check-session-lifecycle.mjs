@@ -299,6 +299,40 @@ await run('信封里的「并发生成」同样归为可重试（RATE_LIMIT + 5s
   assert.match(String(thrown.message), /同时只能生成一条|being generated/i)
 })
 
+// ── 事实 ⑥：节流也会以「HTTP 200 + 信封」回来，而且它的业务码是 40029 ──
+// 来源：cuckoo-code 0.6.1 的实测记录 ——「DeepSeek 返回"操作过于频繁"（HTTP 429 / 业务码 40029）」，
+// 它为此专门加了 60 秒退避重试。
+// 我们原先只认 HTTP 429（httpErrorCode）与 SSE error 事件的文案（isThrottled）⇒ 走信封的这一路
+// 会落到 bizErrorCode(40029) = PROVIDER_ERROR（**不可重试**）⇒ 恰好在最该退避的时候整轮失败。
+const throttleEnvelope = (code, msg) => `{"code":0,"msg":"","data":{"biz_code":${code},"biz_msg":"${msg}"}}`
+
+await run('信封形式的 40029：归 RATE_LIMIT（可重试）+ 文案是「网页版限流」', async () => {
+  // ⚠️ msg 故意用**不含「频繁」字样**的中性串 —— 这样这条守的是**码**，
+  // 而不是被 isThrottled 的文案兜底接住（否则去掉 40029 也照样绿，就成了假绿）。
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(throttleEnvelope(40029, 'request rejected by policy'))],
+  })
+  assert.ok(thrown, '必须抛出')
+  assert.equal(thrown.code, 'RATE_LIMIT', `40029 是限流码，不能落到不可重试的 PROVIDER_ERROR，实际 ${thrown.code}`)
+  assert.match(String(thrown.message), /网页版限流/, `文案要短且统一，实际：${thrown.message}`)
+  const retryAfter = thrown.failure?.providerRetryAfterMs ?? thrown.providerRetryAfterMs
+  assert.ok(retryAfter >= 20_000, `节流退避要给足（≥20s），实际 ${retryAfter}`)
+})
+
+await run('信封形式的老话术（码不认识）：按文案也要归 RATE_LIMIT', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(throttleEnvelope(7, '消息发送过于频繁，请稍后重试'))],
+  })
+  assert.equal(thrown?.code, 'RATE_LIMIT', `话术变了也不能漏，实际 ${thrown?.code}`)
+})
+
+await run('普通业务错误不得被节流判据误伤（仍不可重试）', async () => {
+  const { thrown } = await scenario({
+    completionResponses: [jsonResponse(throttleEnvelope(2, 'INVALID_PARAM'))],
+  })
+  assert.equal(thrown?.code, 'PROVIDER_ERROR', `不是限流就别重试，实际 ${thrown?.code}`)
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1

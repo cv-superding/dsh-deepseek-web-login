@@ -254,7 +254,11 @@ export function isInvalidSessionError(biz: { code?: number; msg?: string } | und
 /** 业务错误码 → 稳定错误码（40003/40001：授权失败）。 */
 function bizErrorCode(code: number): string {
   if (code === 40003 || code === 40001) return 'AUTH'
-  if (code === 429) return 'RATE_LIMIT'
+  // 429（HTTP 状态码）之外还要认 **40029**（业务码，HTTP 可能仍是 200 的 JSON 信封）：
+  // 「操作过于频繁」在信封里的码就是它。只认 429 会漏掉走信封的这一路 ⇒ 落到 PROVIDER_ERROR
+  // ⇒ 不可重试 ⇒ 整轮直接失败（而且是在被限流、最该退避的时候失败）。
+  // 来源：cuckoo-code 0.6.1 的实测记录（它专门为这个码加了 60 秒退避重试）。
+  if (code === 429 || code === 40029) return 'RATE_LIMIT'
   return 'PROVIDER_ERROR'
 }
 
@@ -276,6 +280,9 @@ function bizErrorMessage(code: number, msg: string): string {
   if (code === 40003 || code === 40001) {
     return `DeepSeek 网页授权失败：${msg} —— 登录态已过期或无效，请到「设置 → DeepSeek 网页登录」重新登录`
   }
+  // 防御：40029 已被信封路径的 throttled 判据接住，正常走不到这里 ——
+  // 留着是怕将来有人只动了判据、忘同步文案，至少文案口径还是对的。
+  if (code === 40029) return '网页版限流：发得太频繁，稍后自动重试'
   return `DeepSeek 网页端错误（code ${code}）：${msg}`
 }
 
@@ -2114,6 +2121,12 @@ async function openCompletion(
     const biz = envelopeError(parsed)
     const muted = isMutedError(biz)
     const busy = !muted && !!biz && isBusyGenerating(biz.msg)
+    // 账号级节流有**两个来源**，合到一个判据里：
+    //   ① 码：40029（cuckoo-code 0.6.1 实测的「操作过于频繁」业务码）
+    //   ② 文案族：isThrottled（「过于频繁 / 操作频繁 / 稍后重试 / 限流」…，话术变了也不会漏）
+    // ⚠️ 必须合并 —— 分开写时我第一版就是「只给文案那条加了 20s 退避」，
+    // 结果认了码却没带 providerRetryAfterMs（用例当场抓住）。两条来源的后续处理完全一样。
+    const throttled = !muted && !busy && !!biz && (biz.code === 40029 || isThrottled(biz.msg))
     const untilMs = muteUntilMs(parsed)
     const failure = biz
       ? new AdapterLlmError(
@@ -2121,8 +2134,10 @@ async function openCompletion(
             ? mutedMessage(untilMs)
             : busy
               ? '网页版限流：同一账号同时只能生成一条消息，稍后自动重试'
-              : bizErrorMessage(biz.code, biz.msg),
-          muted || busy
+              : throttled
+                ? '网页版限流：发得太频繁，稍后自动重试'
+                : bizErrorMessage(biz.code, biz.msg),
+          muted || busy || throttled
             ? 'RATE_LIMIT'
             : isInvalidSessionError(biz)
               ? 'TRANSPORT'
@@ -2136,6 +2151,8 @@ async function openCompletion(
             // 绝对值单独带一份：宿主会把它记到账号上，在设置页显示倒计时
             ...(muted && untilMs !== undefined ? { mutedUntilMs: untilMs } : {}),
             ...(busy ? { providerRetryAfterMs: 5_000 } : {}),
+            // 节流给 20s（与 SSE 路径的 throttleBackoffMs 首档一致）；并发那条只给 5s
+            ...(throttled ? { rateLimitKind: 'throttled' as const, providerRetryAfterMs: 20_000 } : {}),
           },
         )
       : new AdapterLlmError(
