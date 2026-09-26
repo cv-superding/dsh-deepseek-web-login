@@ -209,8 +209,14 @@ await run('muted：报 RATE_LIMIT + 解除时间，并带上 providerRetryAfterM
   const { thrown, log } = await scenario({ completionResponses: [jsonResponse(REAL_MUTED)] })
   assert.ok(thrown, '必须抛出（不能假装成功）')
   assert.equal(thrown.code, 'RATE_LIMIT', '应归到「服务端让你慢一点」这一类')
-  assert.match(String(thrown.message), /临时限制|muted/i)
-  assert.match(String(thrown.message), /2026|解除/, `消息要带解除时间：${thrown.message}`)
+  assert.match(String(thrown.message), /封禁|限制/, '文案要表明是账号被限制/封禁')
+  assert.match(String(thrown.message), /解除/, `消息要带解除时间：${thrown.message}`)
+  // 用户反馈过"封号报错太长" ⇒ 文案只说结论 + 解除时间，不准再写机制解释。
+  // 用长度上限当阀门（比逐字断言稳，改措辞不会假红），80 字够写「已封禁本账号，X 解除（约 N 分钟）」还有富余。
+  assert.ok(
+    String(thrown.message).length < 80,
+    `封禁文案要短，实际 ${String(thrown.message).length} 字：${thrown.message}`,
+  )
   const retryAfter = thrown.failure?.providerRetryAfterMs ?? thrown.providerRetryAfterMs
   assert.ok(retryAfter > 60_000, `解除时间很远时必须给出 providerRetryAfterMs（>60s）让重试策略放弃空转，实际 ${retryAfter}`)
   assert.ok(log.includes('delete:S1'), '失败也要回收会话')

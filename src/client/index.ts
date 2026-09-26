@@ -509,7 +509,7 @@ function Panel(): any {
       limitRow.textContent =
         text === '已解除'
           ? `账号级限制已解除（${shortTime(activeLimitUntilMs)}）。`
-          : `⚠️ 账号级限制：${text}（${shortTime(activeLimitUntilMs)} 解除）—— 期间生成会被拒；只读调用（校验 / 探活）不受影响。`
+          : `⚠️ 账号级限制：${text}（${shortTime(activeLimitUntilMs)} 解除，期间生成会被拒）`
     }
 
     // ── 账号卡（退出 / 换号）──

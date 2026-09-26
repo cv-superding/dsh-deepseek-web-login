@@ -125,18 +125,20 @@ export function muteUntilMs(json: any): number | undefined {
   return Math.round(seconds * 1000)
 }
 
-/** 被限制时的用户可读文案（带解除时间）。 */
+/**
+ * 被限制时的用户可读文案。
+ *
+ * 只说结论与解除时间 —— **不解释原因**。原因（免费网页端对高频自动化的静默限流、
+ * 登录态其实有效、只有 completion 被拒……）属于开发/排查信息，写在这里就够了：
+ * 用户看到报错时只需要知道「是什么 + 到几点结束」，长篇解释只会淹没这两件事。
+ */
 function mutedMessage(untilMs: number | undefined): string {
   if (untilMs === undefined) {
-    return 'DeepSeek 网页端已临时限制本账号（user is muted），未给出解除时间。这期间任何网页模型调用都会失败；请等待解除，或改用官方 API key。'
+    return 'DeepSeek 网页端已封禁本账号（未给出解除时间）'
   }
   const when = new Date(untilMs).toLocaleString('zh-CN', { hour12: false })
   const minutes = Math.max(1, Math.round((untilMs - Date.now()) / 60_000))
-  return (
-    `DeepSeek 网页端已临时限制本账号（user is muted）：预计 ${when} 解除，约 ${minutes} 分钟后。` +
-    '这期间任何网页模型调用都会失败（登录态本身有效、建会话也正常，只有发消息被拒）；' +
-    '请等待解除，或改用官方 API key。免费网页端对高频自动化调用会静默限流，刚跑过大量工具步骤的会话尤其容易被限。'
-  )
+  return `DeepSeek 网页端已封禁本账号，${when} 解除（约 ${minutes} 分钟）`
 }
 
 /**
@@ -2079,7 +2081,7 @@ async function openCompletion(
         code === 'AUTH'
           ? ' —— 网页登录态可能已过期，请到「设置 → DeepSeek 网页登录」重新登录'
           : code === 'RATE_LIMIT'
-            ? ' —— 网页端频控（免费额度），稍后重试即可'
+            ? ' —— 网页版限流'
             : ''
       retireSession(sessionId) // 失败即弃，下次换新会话
       params.onDeleteSession?.(sessionId)
@@ -2118,7 +2120,7 @@ async function openCompletion(
           muted
             ? mutedMessage(untilMs)
             : busy
-              ? 'DeepSeek 网页端同一账号同时只能生成一条消息（另一个窗口/标签页正在用同一账号生成）。这一步会自动重试；若两个窗口都要用网页模型，建议其中一个换 provider 或换账号。'
+              ? '网页版限流：同一账号同时只能生成一条消息，稍后自动重试'
               : bizErrorMessage(biz.code, biz.msg),
           muted || busy
             ? 'RATE_LIMIT'

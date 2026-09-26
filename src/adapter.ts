@@ -1230,12 +1230,14 @@ export function createAdapter(deps: AdapterDeps) {
           // webapi 层已按语义归类（并发生成 → RATE_LIMIT + retryAfterMs）：
           // 这类错误交给 dsh-llm-retry 自动重发，而不是让整轮直接失败。
           if (event.code === 'RATE_LIMIT') {
-            // 两种 RATE_LIMIT 的成因完全不同，文案别串台（曾经把「账号节流」说成「另一个窗口正在生成」）
+            // 两种 RATE_LIMIT 的成因不同，后缀别串台（曾经把「账号节流」说成「另一个窗口正在生成」）；
+            // 但**前缀统一叫「网页版限流」** —— 用户只需要知道"被限了、会自动重试"，
+            // 机制解释（登录态其实有效、建会话也正常、每轮工具调用都是一次请求……）留在代码注释里。
             const throttled = event.rateLimitKind === 'throttled'
             throw new AdapterLlmError(
               throttled
-                ? `DeepSeek 网页端对这个账号限流了（发得太频繁）。这不是封号：登录态有效、建会话也正常，只有发消息被拒。这一步会自动退避重试；若一直不过，请等几分钟再继续，或降低自动化步骤密度（每一轮工具调用都是一次网页端请求）。`
-                : `DeepSeek 网页端同一账号同时只能生成一条消息（另一个窗口/标签页正在用同一账号生成）。这一步会自动重试；若两个窗口都要用网页模型，建议其中一个换 provider 或换账号。`,
+                ? '网页版限流：发得太频繁，稍后自动重试'
+                : '网页版限流：同一账号同时只能生成一条消息，稍后自动重试',
               'RATE_LIMIT',
               {
                 ...(event.retryAfterMs !== undefined ? { providerRetryAfterMs: event.retryAfterMs } : {}),
