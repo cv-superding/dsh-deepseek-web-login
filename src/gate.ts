@@ -106,6 +106,40 @@ export function clampMaxRefImages(value: number): number {
   return Math.max(MAX_REF_IMAGES_BOUNDS.min, Math.min(MAX_REF_IMAGES_BOUNDS.max, Math.round(value)))
 }
 
+/**
+ * 对外声明的模型上下文窗口（token），即模型信息里的 `context.contextWindow`。
+ *
+ * 它决定的是**DSH 什么时候开始压缩/截断历史**，而不是插件发多少 —— 声明 1M，DSH 就认为
+ * "还装得下"，于是一直不压，每轮都把整段转写重发。对只跑短任务的人来说，那部分体量是白烧的。
+ *
+ * ⚠️ 它和 `maxPromptChars` 是**两道独立阀门**，别混：
+ *   - `maxPromptChars` 管"单次请求最多发多少字符"（插件自己切，见上）；
+ *   - `contextWindow` 管"DSH 认为模型能装多少"（DSH 据此决定压不压历史）。
+ * 两个都调小，单次体量才会真的降下来；只调一个，另一个仍会把请求撑大。
+ *
+ * 上限取 DeepSeek 标称的 1Mi（服务端自己的数字也都是 1024 的整数倍），也就是本插件
+ * 一直以来的硬编码值；下限 32K —— 再小的话工具目录（约 5.6 万字符）就先装不下了。
+ */
+export const CONTEXT_WINDOW_BOUNDS = { min: 32_768, max: 1_048_576 } as const
+
+/** 默认＝原来的硬编码值（1Mi）—— 不动这个开关的人行为完全不变。 */
+export const DEFAULT_CONTEXT_WINDOW = 1_048_576
+
+/**
+ * 面板滑块的档位。
+ *
+ * **用档位而不是线性连续值**：32K→1M 是 32 倍跨度，线性拖动时前四分之三的行程都挤在低档位，
+ * 手感很差；档位化之后每一格都是"翻倍"这个直觉，也正好落在 1024 的整数倍上。
+ * 直接调接口传任意值仍被接受（只做边界夹取，不强制吸附）—— 档位只约束面板。
+ */
+export const CONTEXT_WINDOW_OPTIONS = [32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576] as const
+
+/** 规整上下文窗口：非数 → 默认；越界 → 夹到边界。 */
+export function clampContextWindow(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_CONTEXT_WINDOW
+  return Math.max(CONTEXT_WINDOW_BOUNDS.min, Math.min(CONTEXT_WINDOW_BOUNDS.max, Math.round(value)))
+}
+
 /** 距上次请求超过这么久就算"歇过了"，连续计数归零。 */
 const LONG_RUN_IDLE_RESET_MS = 120_000
 
@@ -191,6 +225,11 @@ export interface GateSettings {
   maxPromptChars?: number
   /** 一次请求最多带多少张图片（`ref_file_ids` 的长度；0 = 不限制）。见 MAX_REF_IMAGES_BOUNDS。 */
   maxRefImages?: number
+  /**
+   * 对外声明的模型上下文窗口（token）。同 maxPromptChars / maxRefImages：**不参与节流逻辑**，
+   * 只是搭同一份设置文件与同一个设置页，真正的执行方是 adapter 的模型信息解析。
+   */
+  contextWindow?: number
 }
 
 /** 节流设置文件：`${DSH_HOME || ~/.dsh}/web-login/gate.json`（插件自治，与凭证同目录）。 */
@@ -246,6 +285,9 @@ export function readGateSettings(): Partial<GateSettings> | undefined {
     if (Number.isFinite(parsed?.maxRefImages)) {
       out.maxRefImages = clampMaxRefImages(Number(parsed.maxRefImages))
     }
+    if (Number.isFinite(parsed?.contextWindow)) {
+      out.contextWindow = clampContextWindow(Number(parsed.contextWindow))
+    }
     return Object.keys(out).length > 0 ? out : undefined
   } catch {
     return undefined
@@ -287,6 +329,8 @@ export interface RequestGateOptions {
   maxPromptChars?: number
   /** 一次请求最多带多少张图片（同上，本模块不执行，只是存下来以便落盘与回显）。 */
   maxRefImages?: number
+  /** 对外声明的模型上下文窗口（同上，本模块不执行，只是存下来以便落盘与回显）。 */
+  contextWindow?: number
   /**
    * 会话清理策略（本模块不执行，同样只是存下来以便落盘与回显）。
    *
@@ -509,6 +553,8 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   let maxPromptChars = clampMaxPromptChars(options.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS)
   // 图片数量上限（同 maxPromptChars：只是存着，真正的执行在 adapter 的 uploadRequestImages）。
   let maxRefImages = clampMaxRefImages(options.maxRefImages ?? DEFAULT_MAX_REF_IMAGES)
+  // 上下文窗口（同上：只是存着，真正的执行在 adapter 解析模型信息时）。
+  let contextWindow = clampContextWindow(options.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
   let cleanupMode = options.sessionCleanup
   // 会话清理的三个区间（同样不参与节流逻辑）。存在这里是为了**能落盘**：
   // writeGateSettings 写的是 settings() 的返回值，不存就丢。
@@ -531,6 +577,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       ...(longRunBreakMs ? { longRunBreakMs } : {}),
       maxPromptChars,
       maxRefImages,
+      contextWindow,
     }
   }
 
@@ -541,6 +588,7 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (next.sessionCleanup !== undefined) cleanupMode = next.sessionCleanup
     if (next.maxPromptChars !== undefined) maxPromptChars = clampMaxPromptChars(Number(next.maxPromptChars))
     if (next.maxRefImages !== undefined) maxRefImages = clampMaxRefImages(Number(next.maxRefImages))
+    if (next.contextWindow !== undefined) contextWindow = clampContextWindow(Number(next.contextWindow))
     // 三个区间：非法的输入直接当"没给"（不报错、也不覆盖已有的有效值）
     if (next.cleanupBatch !== undefined) {
       const value = normalizeCleanupRange(next.cleanupBatch, CLEANUP_BATCH_BOUNDS)

@@ -35,6 +35,10 @@ import {
   DEFAULT_CLEANUP_GAP_MS,
   normalizeCleanupRange,
   clampMaxRefImages,
+  clampContextWindow,
+  CONTEXT_WINDOW_BOUNDS,
+  CONTEXT_WINDOW_OPTIONS,
+  DEFAULT_CONTEXT_WINDOW,
   type GateSettings,
 } from './gate.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
@@ -305,6 +309,7 @@ export function apply(ctx: any, config: Config = {}): void {
     longRunThreshold: savedGate?.longRunThreshold ?? DEFAULT_LONG_RUN_THRESHOLD,
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     maxRefImages: savedGate?.maxRefImages ?? config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES,
+    contextWindow: savedGate?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     longRunBreakMs: savedGate?.longRunBreakMs,
     // ⚠️ 会话清理这几个字段必须**一起传**（2026-09-14 修）：设置页保存时写的是
     // `gate.settings()` 的返回值 —— 没存进闸门的字段会被**静默抹掉**，
@@ -352,6 +357,7 @@ export function apply(ctx: any, config: Config = {}): void {
   const adapterConfig: AdapterConfig = {
     maxPromptChars: savedGate?.maxPromptChars ?? config.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS,
     maxRefImages: savedGate?.maxRefImages ?? config.maxRefImages ?? DEFAULT_MAX_REF_IMAGES,
+    contextWindow: savedGate?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     idleTimeoutMs: config.idleTimeoutMs ?? 120_000,
     deleteWebSessions: config.deleteWebSessions !== false,
     // 会话复用：默认 20 轮共用一个网页端会话。0 = 关闭（回到每请求一个会话）
@@ -597,6 +603,11 @@ export function apply(ctx: any, config: Config = {}): void {
                 maxPromptCharsDefault: DEFAULT_MAX_PROMPT_CHARS,
                 maxRefImagesBounds: MAX_REF_IMAGES_BOUNDS,
                 maxRefImagesDefault: DEFAULT_MAX_REF_IMAGES,
+                // 上下文窗口用「档位数组」而不是 bounds：面板是索引滑块（32K→1M 是 32 倍跨度，
+                // 线性拖动前四分之三的行程都挤在低档，手感很差）。档位同样由后端给。
+                contextWindowBounds: CONTEXT_WINDOW_BOUNDS,
+                contextWindowDefault: DEFAULT_CONTEXT_WINDOW,
+                contextWindowOptions: CONTEXT_WINDOW_OPTIONS,
                 cleanup: sessionCleaner.policy(),
                 // 界面的滑块边界/默认值由后端给 —— 免得两边各写一套数字、改了一边忘另一边
                 cleanupBounds: {
@@ -675,6 +686,14 @@ export function apply(ctx: any, config: Config = {}): void {
                 }
                 patch.maxRefImages = clampMaxRefImages(count)
               }
+              if (body.contextWindow !== undefined) {
+                const window = Number(body.contextWindow)
+                if (!Number.isFinite(window)) {
+                  sendJson(res, 400, { ok: false, error: 'contextWindow 必须是数字' })
+                  return
+                }
+                patch.contextWindow = clampContextWindow(window)
+              }
               if (Object.keys(patch).length === 0) {
                 sendJson(res, 400, { ok: false, error: '没有可更新的字段' })
                 return
@@ -684,6 +703,8 @@ export function apply(ctx: any, config: Config = {}): void {
               if (applied.maxPromptChars !== undefined) adapterConfig.maxPromptChars = applied.maxPromptChars
               // 图片上限同样是 adapter 每轮现读的 ⇒ 必须一起同步，否则保存成功但要等重启
               if (applied.maxRefImages !== undefined) adapterConfig.maxRefImages = applied.maxRefImages
+              // 上下文窗口走同一条路：resolvedModelInfo 每次请求都会重算 ⇒ 改完立刻生效
+              if (applied.contextWindow !== undefined) adapterConfig.contextWindow = applied.contextWindow
               // 清理策略由 cleaner 执行 → 同步生效
               if (patch.sessionCleanup) sessionCleaner.configure({ mode: patch.sessionCleanup })
               // 三个区间即时作用到清理器（它会用新区间重新随机取值）

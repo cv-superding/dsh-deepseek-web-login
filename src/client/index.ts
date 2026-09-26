@@ -1637,6 +1637,68 @@ function Panel(): any {
       void saveGate({ maxRefImages: Number(imgRange.value) })
     })
 
+    // ── 上下文范围（第三个请求级阀门，但作用方式不同）──────────────────
+    // 前两个阀门管"插件发多少"，这个管"DSH 认为模型能装多少" —— 它决定 DSH 什么时候
+    // 开始压缩/截断历史。原来硬编码 1M（DeepSeek 标称值），于是 DSH 长期认为"还装得下"
+    // 而不压缩；对只跑短任务的人来说，那部分体量是白烧的。
+    //
+    // 用**档位滑块**而不是连续值：32K→1M 是 32 倍跨度，线性拖动时前四分之三的行程都挤在
+    // 低档位，手感很差。每一格翻倍则正好符合直觉（档位由后端 CONTEXT_WINDOW_OPTIONS 给）。
+    const ctxRow = el('div', 'dsw-gate-row')
+    ctxRow.append(el('span', 'dsw-gate-label', '上下文'))
+    const ctxRange = el('input', 'dsw-range') as HTMLInputElement
+    ctxRange.type = 'range'
+    ctxRange.min = '0'
+    ctxRange.step = '1'
+    ctxRange.setAttribute('aria-label', '对外声明的上下文窗口大小')
+    ctxRange.title = '告诉 DSH 这个模型能装多少上下文；调小会让它更早压缩历史'
+    const ctxValue = el('span', 'dsw-gate-value', '—')
+    ctxRow.append(ctxRange, ctxValue)
+    gateCard.append(ctxRow)
+    const ctxHint = el('p', 'dsw-hint', '')
+    gateCard.append(ctxHint)
+
+    // 档位表：接口给了就用接口的，没给（老宿主）回落到内置这份 —— 界面不该因为少一个字段就没得选。
+    let ctxOptions: number[] = [32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576]
+
+    /** token 数转人话：1M / 512K / 128K …… 与「模型」页的写法保持一致。 */
+    const formatCtxWindow = (tokens: number): string =>
+      tokens >= 1_048_576 ? `${(tokens / 1_048_576).toFixed(0)}M` : `${Math.round(tokens / 1024)}K`
+
+    /** 把任意值吸附到最近的档位（配置里可能是旧值或手改过的值）。 */
+    const nearestCtxIndex = (value: number): number => {
+      let best = 0
+      let bestDiff = Number.POSITIVE_INFINITY
+      ctxOptions.forEach((option, index) => {
+        const diff = Math.abs(option - value)
+        if (diff < bestDiff) {
+          bestDiff = diff
+          best = index
+        }
+      })
+      return best
+    }
+
+    const currentCtxTokens = (): number =>
+      ctxOptions[Number(ctxRange.value)] ?? ctxOptions[ctxOptions.length - 1]
+
+    const paintContextWindow = (): void => {
+      const tokens = currentCtxTokens()
+      ctxValue.textContent = formatCtxWindow(tokens)
+      ctxHint.textContent =
+        tokens >= 1_048_576
+          ? '当前按 DeepSeek 标称的 1M 声明 —— DSH 会认为「还装得下」，尽量不压缩历史。' +
+            '如果你的任务都很短，可以调小以省下每轮重发的体量。'
+          : `声明 ${formatCtxWindow(tokens)}：DSH 会更早压缩/截断历史，每轮重发的转写因此更短。` +
+            '这只是「声明值」，不改模型真实能力；调小只是让 DSH 早点动手。' +
+            '想彻底压住单次体量，上面的「prompt 上限」也要一起调。'
+    }
+    ctxRange.addEventListener('input', paintContextWindow)
+    ctxRange.addEventListener('change', () => {
+      paintContextWindow()
+      void saveGate({ contextWindow: currentCtxTokens() })
+    })
+
     const cleanupRow = el('div', 'dsw-gate-row')
     cleanupRow.append(el('span', 'dsw-gate-label', '会话清理'))
     const cleanupBtns: Record<string, HTMLButtonElement> = {}
@@ -2251,6 +2313,22 @@ function Panel(): any {
       imgRange.value = String(g.maxRefImages ?? g.maxRefImagesDefault ?? 24)
       paintImageCap()
 
+      // 上下文范围：档位表与当前值都从后端拿，老宿主没有这两个字段就沿用内置档位。
+      if (Array.isArray(g.contextWindowOptions) && g.contextWindowOptions.length > 0) {
+        const parsedOptions = g.contextWindowOptions
+          .map((value: unknown) => Number(value))
+          .filter((value: number) => Number.isFinite(value) && value > 0)
+        if (parsedOptions.length > 0) ctxOptions = parsedOptions
+      }
+      ctxRange.min = '0'
+      ctxRange.max = String(Math.max(0, ctxOptions.length - 1))
+      ctxRange.value = String(
+        nearestCtxIndex(
+          Number(g.contextWindow ?? g.contextWindowDefault ?? ctxOptions[ctxOptions.length - 1]),
+        ),
+      )
+      paintContextWindow()
+
       const mode = g.cleanup?.mode ?? 'deferred'
       for (const key of Object.keys(cleanupBtns)) {
         cleanupBtns[key].classList.toggle('active', key === mode)
@@ -2283,6 +2361,7 @@ function Panel(): any {
       sessionCleanup?: string
       maxPromptChars?: number
       maxRefImages?: number
+      contextWindow?: number
       cleanupBatch?: { min: number; max: number }
       cleanupDelayMs?: { min: number; max: number }
       cleanupGapMs?: { min: number; max: number }

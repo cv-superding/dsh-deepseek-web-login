@@ -166,6 +166,11 @@ const demo = `
       <span class="dsw-gate-label">图片上限</span>
       <input type="range" class="dsw-range" value="24"><span class="dsw-gate-value">24 份</span>
     </div>
+    <div class="dsw-gate-row">
+      <span class="dsw-gate-label">上下文</span>
+      <input type="range" class="dsw-range" min="0" max="5" step="1" value="2"><span class="dsw-gate-value">128K</span>
+    </div>
+    <p class="dsw-hint">声明 128K：DSH 会更早压缩/截断历史，每轮重发的转写因此更短。这只是声明值，不改模型真实能力；想彻底压住单次体量，上面的「prompt 上限」也要一起调。</p>
     <div class="dsw-row">
       <button class="dsw-btn ghost dsw-preset active">保守</button>
       <button class="dsw-btn ghost dsw-preset">均衡</button>

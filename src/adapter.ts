@@ -347,6 +347,13 @@ export interface AdapterConfig {
    * `0` ＝ 不限制（逃生舱，但等于把这个故障放回来，别设）。
    */
   maxRefImages?: number
+  /**
+   * 对外声明的模型上下文窗口（token）。默认 1_048_576（1Mi —— 即原来的硬编码值）。
+   *
+   * 调小它 ⇒ DSH 更早压缩/截断历史 ⇒ 每轮重发的转写更短。与 maxRefImages 同一条路：
+   * 由 gate.json 存、index.ts 注入，这里只负责把它塞进模型信息（见 resolvedModelInfo）。
+   */
+  contextWindow?: number
   /** SSE 空闲超时（毫秒）。 */
   idleTimeoutMs?: number
   /** 是否在调用结束后删除网页端会话（默认 true）。 */
@@ -471,10 +478,24 @@ function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
   }
 }
 
-function resolvedModelInfo(provider: string, spec: ModelSpec, requestedId?: string) {
+/**
+ * 组装模型信息。
+ *
+ * `contextWindowOverride` 来自设置页的「上下文范围」滑块（经 gate.json → index.ts → AdapterConfig）。
+ * 传 undefined 就沿用 MODEL_SPECS 里的标称值（1Mi）—— 也就是不调这个开关时的原行为。
+ *
+ * ⚠️ 这个函数**每次请求都会被调用**（见下方 resolveModel / stream），所以滑块改完是即时生效的，
+ * 不需要重启 DSH。
+ */
+function resolvedModelInfo(
+  provider: string,
+  spec: ModelSpec,
+  requestedId?: string,
+  contextWindowOverride?: number,
+) {
   return {
     ...modelInfoFor(provider, spec, requestedId),
-    context: { contextWindow: spec.contextWindow },
+    context: { contextWindow: contextWindowOverride ?? spec.contextWindow },
     defaultMaxTokens: spec.maxOutputTokens,
     reasoning: spec.configurableThinking
       ? { efforts: REASONING_EFFORTS, defaultEffort: spec.thinking ? EFFORT_HIGH : EFFORT_OFF }
@@ -655,7 +676,9 @@ export function createAdapter(deps: AdapterDeps) {
     },
 
     resolveModel(provider: string, model: string) {
-      return Promise.resolve(resolvedModelInfo(provider, resolveSpec(model), String(model ?? '')))
+      return Promise.resolve(
+        resolvedModelInfo(provider, resolveSpec(model), String(model ?? ''), deps.config.contextWindow),
+      )
     },
 
     /**
@@ -665,7 +688,7 @@ export function createAdapter(deps: AdapterDeps) {
     prepareCall(provider: string, model: string, _signal?: AbortSignal) {
       const spec = resolveSpec(model)
       return Promise.resolve({
-        model: resolvedModelInfo(provider, spec, String(model ?? '')),
+        model: resolvedModelInfo(provider, spec, String(model ?? ''), deps.config.contextWindow),
         stream: (options: any) => gatedStream(options),
       })
     },
