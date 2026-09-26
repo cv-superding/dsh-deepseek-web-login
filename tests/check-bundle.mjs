@@ -611,8 +611,24 @@ const checks = {
   // 最容易悄悄坏掉的是三件事：包装层没被接上、两个降级标志被改名或丢掉、缓存被改成全清。
   'host 把「请求侧无效应答」与「上传侧类型不支持」两个 code 9 分得开':
     host.includes('isInvalidRefFileError') && /ref\s*file/i.test(host),
-  'host 的闸门外壳改走带降级的包装层（gatedStream 不再直接调 streamImpl）':
-    /yield\* streamWithImageFallback\(options\)/.test(host) && !/yield\* streamImpl\(options\)/.test(host),
+  // ⚠️ 断意图、不断语法：这里只要求「闸门外壳调的是包装层、且没绕过它直调 streamImpl」。
+  // 旧写法把 `yield*` 也绑进去了 —— 0.4.2 为了顺手捕获 usage 事件改成 for-await 转发时，
+  // 这条断言就假红了（转发方式变了，但"走包装层"这个事实没变）。
+  // 用两个函数之间的片段定位，避免包装层自己**合法**调用 `streamImpl(options)` 被误伤。
+  'host 的闸门外壳改走带降级的包装层（gatedStream 不再直接调 streamImpl）': (() => {
+    const start = host.indexOf('async function* gatedStream(')
+    const end = host.indexOf('async function* streamImpl(')
+    if (start < 0 || end <= start) return false
+    const body = host.slice(start, end)
+    return body.includes('streamWithImageFallback(options)') && !body.includes('streamImpl(options)')
+  })(),
+  'host 的闸门外壳在转发时捕获 usage，且仍然把它发出去（捕获不能变成吞掉）': (() => {
+    const start = host.indexOf('async function* gatedStream(')
+    const end = host.indexOf('async function* streamImpl(')
+    if (start < 0 || end <= start) return false
+    const body = host.slice(start, end)
+    return /type\s*===\s*["']usage["']/.test(body) && /yield\s+event\b/.test(body)
+  })(),
   'host 的两级降级标志都在（先重传 __retryImages，再禁图 __skipImages）':
     host.includes('__retryImages') && host.includes('__skipImages'),
   // ⚠️ 必须把断言锁进函数体：直接写 `/attempt < 2/` 会被 webapi 里那个**早就存在**的

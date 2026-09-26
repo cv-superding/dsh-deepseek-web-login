@@ -62,6 +62,55 @@ const spark = `<svg class="dsw-spark" viewBox="0 0 320 40" preserveAspectRatio="
   (_, i) => `<rect x="${i * 8}" y="${40 - (8 + ((i * 7) % 26))}" width="5" height="${8 + ((i * 7) % 26)}"${i % 11 === 3 ? ' class="bad"' : i % 5 === 0 ? ' class="on"' : ''}></rect>`
 ).join('')}</svg>`
 
+/** Token 页的按天趋势图（结构代表）。与 client 里那份**同构**：同样的类名、同样的
+ *  "左轴 token / 右轴调用次数"双尺子。数值是编的 —— 预览只看排版，不看数据。 */
+const trend = (() => {
+  const W = 640
+  const H = 170
+  const padL = 46
+  const padR = 30
+  const padT = 10
+  const padB = 18
+  const plotW = W - padL - padR
+  const plotH = H - padT - padB
+  const values = Array.from({ length: 30 }, (_, i) => 40 + Math.round(80 * Math.abs(Math.sin(i / 2.4)) + (i === 17 ? 240 : 0)))
+  const calls = values.map((v, i) => Math.round(v / 12) + (i % 7 === 0 ? 6 : 0))
+  const maxTok = Math.max(...values)
+  const maxCalls = Math.max(...calls)
+  const slot = plotW / values.length
+  const barW = Math.max(1.5, slot * 0.62)
+  let out = `<svg class="dsw-trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="按天用量趋势">`
+  const ticks = ['0', '60 万', '120 万']
+  ;[0, 0.5, 1].forEach((ratio, index) => {
+    const y = padT + plotH - plotH * ratio
+    out += `<line class="grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"></line>`
+    out += `<text class="axis" x="${padL - 5}" y="${y + 3}" text-anchor="end">${ticks[index]}</text>`
+  })
+  values.forEach((value, i) => {
+    const x = padL + slot * i + (slot - barW) / 2
+    const hIn = ((value * 0.75) / maxTok) * plotH
+    const hOut = ((value * 0.25) / maxTok) * plotH
+    const yIn = padT + plotH - hIn
+    out +=
+      `<g><title>样例日：总 62.8 万 · 输入 47.1 万 / 输出 15.7 万 · 调用 13 次</title>` +
+      `<rect class="bar-in" x="${x.toFixed(1)}" y="${yIn.toFixed(1)}" width="${barW.toFixed(1)}" height="${hIn.toFixed(1)}" rx="1"></rect>` +
+      `<rect class="bar-out" x="${x.toFixed(1)}" y="${(yIn - hOut).toFixed(1)}" width="${barW.toFixed(1)}" height="${hOut.toFixed(1)}" rx="1"></rect></g>`
+  })
+  const points = calls
+    .map((count, i) => `${(padL + slot * i + slot / 2).toFixed(1)},${(padT + plotH - (count / maxCalls) * plotH).toFixed(1)}`)
+    .join(' ')
+  out += `<polyline class="line" points="${points}"></polyline>`
+  out += `<text class="axis" x="${W - padR + 4}" y="${padT + 3}" text-anchor="start">${maxCalls}</text>`
+  out += `<text class="axis" x="${W - padR + 4}" y="${padT + plotH + 3}" text-anchor="start">0</text>`
+  for (const i of [0, 6, 12, 18, 24, 29]) {
+    const month = i < 2 ? 8 : 9
+    const day = i < 2 ? 28 + i : i - 1
+    out += `<text class="axis" x="${(padL + slot * i + slot / 2).toFixed(1)}" y="${H - 5}" text-anchor="middle">${month}/${day}</text>`
+  }
+  out += '</svg>'
+  return out
+})()
+
 /** DOM 快照 —— 覆盖面板里出现的每一类元素，顺序贴近真实页面。 */
 const demo = `
 <div class="dsw-page">
@@ -72,8 +121,9 @@ const demo = `
 
   <div class="dsw-tabs">
     <button class="dsw-tab active">账号</button><button class="dsw-tab">模型</button>
-    <button class="dsw-tab">防风控</button><button class="dsw-tab">传输层</button>
-    <button class="dsw-tab">上下文</button><button class="dsw-tab">关于</button>
+    <button class="dsw-tab">Token 统计</button><button class="dsw-tab">防风控</button>
+    <button class="dsw-tab">传输层</button><button class="dsw-tab">上下文</button>
+    <button class="dsw-tab">关于</button>
   </div>
 
   <div class="dsw-subtabs">
@@ -207,6 +257,43 @@ const demo = `
     </div>
     <code class="dsw-code">dsh plugin add ./dsh-deepseek-web-login-0.2.1.tgz</code>
   </div>
+
+  <div class="dsw-subtabs">
+    <button class="dsw-subtab">今天</button><button class="dsw-subtab">近 7 天</button>
+    <button class="dsw-subtab active">近 30 天</button><button class="dsw-subtab">总计</button>
+  </div>
+
+  <div class="dsw-stats">
+    <div class="dsw-stat"><div class="k">总 Token</div><div class="v">628.4 万</div><div class="n">服务端口径 41/164 次</div></div>
+    <div class="dsw-stat"><div class="k">输入 Token</div><div class="v">604.1 万</div><div class="n">占总量 96.1%</div></div>
+    <div class="dsw-stat"><div class="k">输出 Token</div><div class="v">24.3 万</div><div class="n">占总量 3.9%</div></div>
+    <div class="dsw-stat"><div class="k">调用次数</div><div class="v">164</div><div class="n">成功 161 · 失败 3</div></div>
+  </div>
+
+  <div class="dsw-card">
+    <div class="dsw-cardhead"><span class="name">按天用量</span> <span class="dsw-badge on">近 30 天</span></div>
+    <p class="dsw-hint">柱高＝当天的输入 + 输出；虚线＝当天调用次数。鼠标停在柱上可看具体数字。</p>
+    <div class="dsw-legend">
+      <span><i style="background:var(--accent)"></i>输入</span>
+      <span><i style="background:color-mix(in srgb,var(--accent) 45%,transparent)"></i>输出</span>
+      <span><i style="background:var(--fg2)"></i>调用次数</span>
+    </div>
+    ${trend}
+  </div>
+
+  <div class="dsw-card">
+    <div class="dsw-cardhead"><span class="name">用量分布</span>
+      <div class="dsw-subtabs"><button class="dsw-subtab active">按账号</button><button class="dsw-subtab">按模型</button></div>
+    </div>
+    <div class="dsw-ranks">
+      <div class="dsw-rank"><div class="rk-name">143******@qq.com</div><div class="rk-val">402.6 万 · 64.1% · 108 次</div><div class="rk-track"><div class="rk-fill" style="width:100%"></div></div></div>
+      <div class="dsw-rank"><div class="rk-name">199******@163.com</div><div class="rk-val">173.2 万 · 27.6% · 44 次</div><div class="rk-track"><div class="rk-fill" style="width:43%"></div></div></div>
+      <div class="dsw-rank"><div class="rk-name">备用号（工作）</div><div class="rk-val">52.6 万 · 8.3% · 12 次</div><div class="rk-track"><div class="rk-fill" style="width:13%"></div></div></div>
+    </div>
+  </div>
+
+  <div class="dsw-row"><button class="dsw-btn ghost">刷新</button></div>
+  <p class="dsw-hint dsw-gate-msg">数据覆盖 2026-08-28 ~ 2026-09-26（保留 90 天）。网页端只在部分响应里给出总量，拿不到时按字符估算，所以这两个数是估算值。</p>
 </div>`
 
 const html = `<!doctype html>

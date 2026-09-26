@@ -62,6 +62,15 @@ import {
 } from './webapi.ts'
 import { consumeProbeRequest, runNetFetchDiagnostics, type NetFetchMode } from './net-diagnostics.ts'
 import { noteCall as writeLedgerEntry, pruneLedger, summarizeLedger, ledgerDir, LEDGER_KEEP_DAYS } from './ledger.ts'
+import {
+  noteUsage as writeUsageEntry,
+  pruneUsage,
+  summarizeUsage,
+  usageDir,
+  usageEntryFrom,
+  usageExists,
+  USAGE_KEEP_DAYS,
+} from './usage.ts'
 import { probeOnce, startProbeLoop } from './probe.ts'
 import { checkForUpdate, RELEASE_REPO } from './update-check.ts'
 import { pluginVersion } from './version.ts'
@@ -521,18 +530,23 @@ export function apply(ctx: any, config: Config = {}): void {
 
   const getAuth = (): WebAuth | undefined => readAuth()
 
-  // 台账按天滚动清理（保留 LEDGER_KEEP_DAYS 天），启动时做一次就够。
+  // 台账与用量都按天滚动清理（分别保留 LEDGER_KEEP_DAYS / USAGE_KEEP_DAYS 天），启动时各做一次就够。
   try {
     const pruned = pruneLedger(LEDGER_KEEP_DAYS)
     if (pruned > 0) logger.info?.(`deepseek-web: 已清理 ${pruned} 个过期台账文件`)
   } catch {}
+  try {
+    const pruned = pruneUsage(USAGE_KEEP_DAYS)
+    if (pruned > 0) logger.info?.(`deepseek-web: 已清理 ${pruned} 个过期用量文件`)
+  } catch {}
 
   /**
-   * 每次模型调用的结果上报（adapter 的 noteCall 钩子）。做两件事：
+   * 每次模型调用的结果上报（adapter 的 noteCall 钩子）。做三件事：
    *
    *  1. **把"账号级限制"学到账号上**。这个状态只能在生成请求被拒时学到
    *     （受限期间 `users/current` 依然 200），所以必须在这里记；成功一次且已过解除时间就清掉。
-   *  2. 写本地台账，供设置页看请求密度与失败分类。
+   *  2. 写本地台账，供设置页看请求密度与失败分类（保留 7 天）。
+   *  3. 写本地用量，供设置页的「Token 统计」页看长期趋势（保留 90 天）。
    *
    * 全程 try/catch：旁路设施绝不能影响调用本身。
    */
@@ -546,6 +560,10 @@ export function apply(ctx: any, config: Config = {}): void {
     throttled?: boolean
     /** 发起调用那一刻的账号 id（由适配器在起飞前捕获）。 */
     accountId?: string
+    /** 本次用到的模型 id。 */
+    model?: string
+    /** 本轮 token（与适配器上报给宿主的 `usage` 事件同源）。 */
+    tokens?: { inputTokens: number; outputTokens: number; reasoningTokens?: number; serverTotal?: boolean }
   }): void => {
     try {
       // 优先用**发起时**捕获的 id；只在拿不到时才回退到"此刻"的当前账号。
@@ -618,6 +636,10 @@ export function apply(ctx: any, config: Config = {}): void {
         ...(muted ? { muted: true } : {}),
         ...(info.throttled ? { throttled: true } : {}),
       })
+      // 用量比台账宽一档：**每次调用都记**（含失败与"没拿到 token"的调用），
+      // 这样界面上的「调用次数」才是完整的；token 那两栏在缺数据时记 0。
+      // 记录怎么拼交给 usage.ts 的纯函数（那几行没人守，抽出来才测得到）。
+      writeUsageEntry(usageEntryFrom(info, Date.now()))
     } catch {}
   }
 
@@ -826,6 +848,21 @@ export function apply(ctx: any, config: Config = {}): void {
             if (req.method === 'GET' && route === '/ledger') {
               const hours = Math.min(72, Math.max(1, Number(url.searchParams.get('hours')) || 24))
               sendJson(res, 200, summarizeLedger(hours))
+              return
+            }
+            // Token 统计（「Token 统计」页）。与 /ledger 是**两份数据**：这里保留 90 天、只关心用量，
+            // 台账只有 7 天且在管请求密度与失败分类。
+            // ⚠️ `Number(null)` 是 0，而 0 在 clampUsageDays 里意味着"全部" —— 漏了下面的判空，
+            //    不带参数访问会静默变成全量查询（数据一多就是慢查询）。
+            if (req.method === 'GET' && route === '/usage') {
+              const raw = url.searchParams.get('days')
+              const days = raw === null || raw === '' ? 30 : raw
+              sendJson(res, 200, {
+                ...summarizeUsage(days),
+                keepDays: USAGE_KEEP_DAYS,
+                dir: usageDir(),
+                hasData: usageExists(),
+              })
               return
             }
             // 检查更新：读自身版本 → 比对 GitHub Releases latest。

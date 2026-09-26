@@ -438,6 +438,18 @@ export interface AdapterDeps {
      * ⚠️ 不能由宿主在收到上报时现取 —— 见 F05 的说明。
      */
     accountId?: string
+    /**
+     * 本次调用用到的模型 id（「Token 统计」页按模型分布要用）。
+     * 可能为空（调用方没指定）⇒ 存储侧写成 `(未标注)`。
+     */
+    model?: string
+    /**
+     * 本轮 token（就是适配器通过 `usage` 事件上报给宿主的同一组数）。
+     * ⚠️ 与 `usage` 事件**同源、不要重复计算** —— 这里只是顺手回传一份给本地统计。
+     * 语义见 adapter 末尾的估算说明：能拿到服务端 `accumulated_token_usage` 时用它，
+     * 否则全是本地估算（输入按 prompt 字数、输出按正文+思考字数 / 3.2）。
+     */
+    tokens?: { inputTokens: number; outputTokens: number; reasoningTokens?: number; serverTotal?: boolean }
   }) => void
   /**
    * 取"当前账号 id"。宿主注入；适配器在**发起请求前**调一次，
@@ -987,16 +999,51 @@ export function createAdapter(deps: AdapterDeps) {
     // 被限制的号反而清白，正在用的号却背了别人的处罚。
     const accountIdAtStart = deps.currentAccountId?.()
     let reported = false
+    /**
+     * 捕获本轮适配器算出的 token 数（就是下面 yield 出去的 `usage` 事件）。
+     * 为什么在这里抓而不是让 streamImpl 再算一遍：**同一组数只能有一个来源**，
+     * 两处各算一次迟早会漂（本地统计说 1000、界面用量说 980 这种事最难查）。
+     */
+    let capturedTokens: {
+      inputTokens: number
+      outputTokens: number
+      reasoningTokens?: number
+      serverTotal?: boolean
+    } | undefined
     /** 上报一次结果。钩子是宿主给的，它自己负责不抛错；这里再兜一层，别让它影响调用。 */
     const report = (info: { ok: boolean; code?: string; message?: string; mutedUntilMs?: number; throttled?: boolean }): void => {
       if (reported) return
       reported = true
       try {
-        deps.noteCall?.({ purpose, ms: Date.now() - startedAt, accountId: accountIdAtStart, ...info })
+        deps.noteCall?.({
+          purpose,
+          ms: Date.now() - startedAt,
+          accountId: accountIdAtStart,
+          ...(typeof options?.model === 'string' && options.model ? { model: options.model } : {}),
+          ...(capturedTokens ? { tokens: capturedTokens } : {}),
+          ...info,
+        })
       } catch {}
     }
     try {
-      yield* streamWithImageFallback(options)
+      // 原样转发每个事件（宿主该收到的都得收到），只在路过时抄一份 `usage`。
+      for await (const event of streamWithImageFallback(options)) {
+        if (event?.type === 'usage' && event.usage) {
+          const input = Number(event.usage.inputTokens)
+          const output = Number(event.usage.outputTokens)
+          if (Number.isFinite(input) && Number.isFinite(output)) {
+            capturedTokens = {
+              inputTokens: input,
+              outputTokens: output,
+              serverTotal: event.usage.serverTotal === true,
+              ...(Number.isFinite(event.usage.reasoningTokens)
+                ? { reasoningTokens: Number(event.usage.reasoningTokens) }
+                : {}),
+            }
+          }
+        }
+        yield event
+      }
       // 跑完没抛错 = 这次调用成功。宿主会用这个信号清理"已经过期的受限标记"。
       report({ ok: true })
     } catch (error: any) {
@@ -1454,6 +1501,10 @@ export function createAdapter(deps: AdapterDeps) {
     const outputChars =
       (textBlock?.text?.length ?? 0) + (reasoningBlock?.text?.length ?? 0) - echoNoticeChars
     let inputTokens = 0, outputTokens = 0
+    // 「本轮总 token 是不是服务端口径」——网页端只在小部分响应里上报 `accumulated_token_usage`。
+    // 取 `every`（有一轮是估的就算估）：本地统计页要把它当"这组数可不可信"的标签用，
+    // 宁可少标（说"估算"但其实有服务端锚点）也不能多标（把估算说成精确值）。
+    let serverTotal = usageRounds.length > 0
     for (const round of usageRounds) {
       const estimateOutput = Math.ceil(round.outputChars / 3.2)
       if (round.total !== undefined) {
@@ -1461,11 +1512,12 @@ export function createAdapter(deps: AdapterDeps) {
         outputTokens += output
         inputTokens += round.total - output
       } else {
+        serverTotal = false
         outputTokens += estimateOutput
         inputTokens += estimateTokens(round.prompt)
       }
     }
-    yield { type: 'usage', usage: { inputTokens, outputTokens,
+    yield { type: 'usage', usage: { inputTokens, outputTokens, serverTotal,
       ...(reasoningBlock ? { reasoningTokens: Math.min(outputTokens, estimateTokens(reasoningBlock.text)) } : {}) } }
 
     if (toolCallCount > 0) {
