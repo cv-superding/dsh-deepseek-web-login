@@ -149,22 +149,24 @@ const PROTOCOL_SLACK_CHARS = 96
 
 export const TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. When you need a tool, output ONLY a single JSON object, with no other text before or after it:
+You can call tools to complete the user's task. When you need a tool, output a single JSON object inside a fenced code block, with no other text before or after it:
 
+\`\`\`dsh-tool
 {"tool_calls":[{"name":"<tool-name>","arguments":{<json-arguments>}}]}
+\`\`\`
 
 Rules:
 1. Put every tool you want to run in the "tool_calls" array (usually exactly one; a batch is allowed).
-2. Stop immediately after that JSON object. The runner executes the call(s) and returns the results to you as the next message.
+2. Stop immediately after the closing fence. The runner executes the call(s) and returns the results to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
 5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
 5b. Two things break the JSON most often — check them before you emit:
    (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
    (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. Do NOT use XML/HTML-like markup for tool calls: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), and none of the private delimiter-prefixed variants some DeepSeek surfaces use. The JSON object above is the ONLY accepted format. Markup is not just ignored — it leaks into the visible transcript (and into the web conversation) as broken output.
+6. Always wrap the JSON in a \`\`\`dsh-tool fence (see the example above). Do NOT use XML/HTML-like markup instead: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), nor the private delimiter-prefixed variants some DeepSeek surfaces use. An unfenced object or any such markup leaks into the visible transcript and into the web conversation.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
-8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry — measured case: a model emitted 15 replayed calls inside one 8152-char payload, and every one of them had to be thrown away.
+8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
 9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
 10. Each call must be able to run on its own: no shared shell variables across calls, no dependence on another call in the same batch.`
 
@@ -183,22 +185,24 @@ Rules:
  */
 export const SERIAL_TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. When you need a tool, output ONLY a single JSON object, with no other text before or after it:
+You can call tools to complete the user's task. When you need a tool, output a single JSON object inside a fenced code block, with no other text before or after it:
 
+\`\`\`dsh-tool
 {"tool_calls":[{"name":"<tool-name>","arguments":{<json-arguments>}}]}
+\`\`\`
 
 Rules:
 1. Put exactly ONE tool in the "tool_calls" array — one call per message, never a batch.
-2. Stop immediately after that JSON object. The runner executes the call and returns the result to you as the next message.
+2. Stop immediately after the closing fence. The runner executes the call and returns the result to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
 5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
 5b. Two things break the JSON most often — check them before you emit:
    (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
    (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. Do NOT use XML/HTML-like markup for tool calls: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), and none of the private delimiter-prefixed variants some DeepSeek surfaces use. The JSON object above is the ONLY accepted format. Markup is not just ignored — it leaks into the visible transcript (and into the web conversation) as broken output.
+6. Always wrap the JSON in a \`\`\`dsh-tool fence (see the example above). Do NOT use XML/HTML-like markup instead: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), nor the private delimiter-prefixed variants some DeepSeek surfaces use. An unfenced object or any such markup leaks into the visible transcript and into the web conversation.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
-8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry — measured case: a model emitted 15 replayed calls inside one 8152-char payload, and every one of them had to be thrown away.
+8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
 9. Do NOT batch. Emit one call, stop, and wait for its real result before you decide the next step. Needing several tools means several successive messages, one call each — the user has turned batching off for this session, so a multi-call array works against them.
 10. Unlike a batch, a call here MAY build on the previous step's result — read what came back and use it. That is the point of one-at-a-time. But never invent a result you have not received.`
 
@@ -884,9 +888,53 @@ const DSML_PREFIX = `(?:${DSML_PREFIX_BODY})?`
 /** 整组**必需**（给"必须有前缀才剥"的场合用，如 `invoke`）。 */
 const DSML_PREFIX_ONLY = `(?:${DSML_PREFIX_BODY})`
 const XML_STARTER_RE = new RegExp(`<\\s*${DSML_PREFIX}(${WRAPPER_NAMES}|invoke)\\b`, 'i')
-/** 代码围栏收尾（模型常把调用块放进 ``` 里）。 */
-const FENCE_TAIL_RE = /\n?[ \t]*```[a-zA-Z0-9]*[ \t]*\n?$/
+/**
+ * 代码围栏：模型常把调用块放进 ``` 里。
+ *
+ * 🔴 0.6.38：`FENCE_HEAD_RE` 原来只认**行首的裸围栏**（`^[ \t]*\n?```[ \t]*\n?`），
+ * 于是「散文 + 换行 + ```dsh-tool + JSON」这种现场形态剥不掉开栏，围栏标签整行漏到正文。
+ * 判据按**实测**写：允许围栏带语言名，且不要求它在行首（前面可能有同一段散文）。
+ * ⚠️ 不能无脑放宽到"任何位置的 ```" —— 正文里正常讨论的代码块会被吃掉。
+ * 所以分两种：`FENCE_HEAD_RE` 宽松（用于**已进入捕获态**的缓冲，此时围栏必是调用块的一部分），
+ * 而 `drain()` 里对**尚未捕获**的普通正文仍用保守的行首判据。
+ */
+const FENCE_TAIL_RE = /\n?[ \t]*```[a-zA-Z0-9_-]*[ \t]*\n?$/
 const FENCE_HEAD_RE = /^[ \t]*\n?```[ \t]*\n?/
+/** 捕获态里出现的围栏（含语言名、不要求行首）。 */
+const FENCE_ANY_HEAD_RE = /\n?[ \t]*```[ \t]*[a-zA-Z0-9_-]*[ \t]*\n?/
+
+/**
+ * 我们自己的调用围栏**开栏**：` ```dsh-tool `（0.6.38）。
+ *
+ * ⚠️ **只认带这个语言名的开栏**，绝不能碰裸 ` ``` ` —— 裸围栏是正常回答里的代码块
+ * （`check-auto-continue` N03 与 `check-tools-section` 各有用例守着）。
+ * ⚠️ 判据里**不能加"后面不是闭栏"的负向断言**：逐字符分块时开栏先到（JSON 还没来），
+ * 那条断言会把它误判成闭栏而放行出去 ⇒ 开栏整行漏进正文（实测第 24 字符处）。
+ * 开栏/闭栏之分交给 `sawCallFence` 记录去分辨，不在这里猜。
+ */
+const CALL_FENCE_NAME = 'dsh-tool'
+const CALL_FENCE_OPEN_RE = new RegExp(`\`\`\`[ \\t]*${CALL_FENCE_NAME}[ \\t]*\\n?`, 'i')
+/**
+ * 闭栏（可能带语言名）。**只在 sawCallFence 为真时使用** ——
+ * 那表示开栏已经被剥掉，这个闭栏必定是调用块的另一半。
+ *
+ * ⚠️ 闭栏**不能**在 `drain()` 里按"位置"裸判（`/\n?```…$/` 那种）：用户正常回答里的
+ * 代码块闭栏也会命中，逐字符分块时必现（`check-auto-continue` N03 抓到过）。
+ */
+const CALL_FENCE_TAIL_RE = /\n?[ \t]*```[ \t]*(?:[a-zA-Z0-9_-]*)[ \t]*\n?$/
+
+/**
+ * 剥掉**属于调用块**的围栏（0.6.38）。
+ *
+ * ⚠️ 这里可以**无条件剥所有围栏**（包括裸 ``` 和 ```json）：进入本函数的文本都已经
+ * 确定属于一个调用块 —— 捕获态的 buffer，或紧跟其后残留的部分。
+ * 那个"不要误伤用户代码块"的约束在**别处**（`drain()` 里对**普通正文**的判据），
+ * 那里用 `CALL_FENCE_OPEN_RE` + `sawCallFence` 把关。
+ * 模型也常用 ```json 包裹调用（`logic-test` 有用例守着），那些围栏同样该剥。
+ */
+function stripCallFence(text: string): string {
+  return text.replace(/```[ \t]*[a-zA-Z0-9_-]*[ \t]*\n?/g, '')
+}
 
 /**
  * 开/收标签前缀（宽容写法）。严格解析与宽容解析**必须共用同一套**，否则会出现
@@ -945,6 +993,9 @@ const XML_MARKER_STARTERS = [
  * @returns 需要保留在缓冲区里的尾部字符数（0 = 无需保留）
  */
 function partialMarkerSuffixLength(text: string): number {
+  // ⚠️ 围栏前缀**不在这里判**（0.6.38）：本函数只在 `pending.length > HOLD_BACK_CHARS` 时被调用，
+  // 而逐字符分块时 pending 只有二十来字符 ⇒ 永远到不了这里。围栏的扣留由 drain() 里
+  // `trailingFenceLength` 在 HOLD_BACK 早退**之前**完成（那才是能覆盖小 pending 的位置）。
   const LIMIT = 32
   const from = Math.max(0, text.length - LIMIT)
   const raw = text.slice(from)
@@ -1591,7 +1642,9 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
  * 注意：不配平的截断仍由 structuralRepairCandidates 的安全闸门拒绝（宁可不执行半条命令）。
  */
 function parseSalvagedToolCallJson(buffer: string): ToolCallRequest[] | null {
-  const text = buffer.replace(FENCE_HEAD_RE, '')
+  // 🔴 0.6.38：剥**任意位置**的围栏头（协议要求 ```dsh-tool 包裹，围栏前可能有同段散文）。
+  // 旧的 FENCE_HEAD_RE 只认行首裸围栏 ⇒ 围栏形态整块进不了 JSON 解析。
+  const text = buffer.replace(FENCE_ANY_HEAD_RE, '').replace(/^\s+/, '')
   const direct = parseToolCallJson(text)
   if (direct) return direct
   const balanced = extractBalancedJson(text)
@@ -1719,6 +1772,14 @@ export class ToolCallStreamFilter {
   private capture: { mode: 'json' | 'xml'; buffer: string } | null = null
   private abandoned: { raw: string; mode: 'json' | 'xml'; reason?: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' } | null = null
   private readonly knownTools?: ReadonlySet<string>
+  /**
+   * 本次流里**我们剥掉过一个调用围栏的开栏**（0.6.38）。
+   *
+   * ⇒ 之后出现的闭栏必定是同一个调用块的收尾，可以安全剥掉。
+   * ⚠️ 有了这个标记才敢剥闭栏：否则"正文里正常的代码块"会被误伤
+   * （`check-auto-continue` N03 / `check-tools-section` 各有用例守着）。
+   */
+  private sawCallFence = false
 
   constructor(knownTools?: ReadonlySet<string>) {
     this.knownTools = knownTools
@@ -1753,7 +1814,11 @@ export class ToolCallStreamFilter {
       this.capture = null
     }
     // 流结束：把 hold 住的尾巴吐出去之前先剥掉孤立残片 —— 它们会在这里"逃逸"成正文
-    out.text += stripStrayToolMarkup(this.pending)
+    // 🔴 0.6.38：连带剥掉**我们自己留下的**围栏残留（开栏在捕获时已剥，闭栏留到这里）。
+    // ⚠️ 必须用 sawCallFence 门控：没剥过开栏就剥闭栏 = 吃掉用户代码块的收尾
+    // （`check-auto-continue` N03 守着这条 —— 它的例子就是 ```xml 代码块）。
+    const tailText = stripStrayToolMarkup(this.pending)
+    out.text += this.sawCallFence ? tailText.replace(CALL_FENCE_TAIL_RE, '') : tailText
     this.pending = ''
     if (this.abandoned) out.rejected = this.abandoned
     return out
@@ -1782,7 +1847,7 @@ export class ToolCallStreamFilter {
           else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
           else out.text += stripStrayToolMarkup(block)
           this.capture = null
-          this.pending = captured.buffer.slice(end).replace(FENCE_HEAD_RE, '') + this.pending
+          this.pending = stripCallFence(captured.buffer.slice(end)) + this.pending
           continue
         }
         const balanced = extractBalancedJson(captured.buffer)
@@ -1800,7 +1865,10 @@ export class ToolCallStreamFilter {
           // 未知工具名也照常透出：由运行器给出「未知工具」结果，模型可自行纠正。
           out.calls.push(...calls)
           this.capture = null
-          this.pending = captured.buffer.slice(balanced.end).replace(FENCE_HEAD_RE, '') + this.pending
+          // 🔴 0.6.38：协议改成 ```dsh-tool 包裹后，这里剩下的是**带语言名的闭栏**。
+          // 旧的 FENCE_HEAD_RE 只认行首裸围栏（`^[ \t]*\n?```[ \t]*\n?`）⇒ 闭栏剥不掉，
+          // 一行 ``` 就漏进正文（实测"逐字符"分块必现）。
+          this.pending = stripCallFence(captured.buffer.slice(balanced.end)) + this.pending
           continue
         }
         // 形状不符：能进到捕获态就说明 MARKER_RE 命中过（`{"tool_calls":`），
@@ -1821,9 +1889,12 @@ export class ToolCallStreamFilter {
       const useXml = xmlIndex !== -1 && (jsonIndex === -1 || xmlIndex < jsonIndex)
       const index = useXml ? xmlIndex : jsonIndex
       if (index !== -1) {
-        let head = this.pending.slice(0, index)
-        const fence = FENCE_TAIL_RE.exec(head)
-        if (fence) head = head.slice(0, fence.index)
+        // 🔴 0.6.38：head 里的围栏（` ```dsh-tool `）也必须剥掉 —— 它是**调用块的配套标签**，
+        // 不是正文。旧判据 FENCE_TAIL_RE 要求前导换行 + 行尾位置，逐字符分块时
+        // head 只有 "```dsh-tool\n"，剥不掉 ⇒ 一行围栏漏进正文（实测必现）。
+        const rawHead = this.pending.slice(0, index)
+        const head = stripCallFence(rawHead)
+        if (head !== rawHead) this.sawCallFence = true
         out.text += head
         this.capture = { mode: useXml ? 'xml' : 'json', buffer: this.pending.slice(index) }
         this.pending = ''
@@ -1832,11 +1903,36 @@ export class ToolCallStreamFilter {
 
       // 未见完整标记：先把夹在正文里的孤立残片剥掉，再保留末尾可能的标记前缀
       this.pending = stripStrayToolMarkup(this.pending)
+      // 🔴 0.6.38：**开栏之后紧跟的 JSON 前缀**要扣住。
+      // 逐字符分块时 `{"tool` 还没命中 MARKER_RE（要等冒号），而 pending 只有二十来字符
+      // ⇒ 直接被下面的 HOLD_BACK 早退放行，把 ```dsh-tool 一起推进正文（实测必现）。
+      //
+      // ⚠️ **只认我们自己的 ```dsh-tool**，绝不动裸 ```：正文里正常的代码块
+      // （`check-auto-continue` N03、`check-tools-section` 都守着）会被无条件剥除吃掉。
+      // 判据 = 开栏**带我们指定的语言名**且其后不是完整围栏（即后面还接着内容）。
+      const ownFence = CALL_FENCE_OPEN_RE.exec(this.pending)
+      if (ownFence) {
+        this.sawCallFence = true
+        out.text += this.pending.slice(0, ownFence.index)
+        this.pending = this.pending.slice(ownFence.index)
+        return
+      }
       if (this.pending.length <= HOLD_BACK_CHARS) return
       const hold = partialMarkerSuffixLength(this.pending)
       if (hold > 0) {
         out.text += this.pending.slice(0, this.pending.length - hold)
         this.pending = this.pending.slice(this.pending.length - hold)
+        return
+      }
+      // 🔴 0.6.38：pending 尾部若是**我们自己留下的围栏残留**，剥掉。
+      //
+      // ⚠️ 判据必须能区分"我们的围栏"与"正常代码块"：开栏在捕获那步已被 stripCallFence
+      // 剥掉，所以**闭栏到这里时一定是配对的另一半** ⇒ 用 sawCallFence 记录，别去判
+      // pending 里的裸 ```（那会吃掉正常代码块 —— `check-auto-continue` N03 守着这条；
+      // 逐字符分块时闭栏还没成行，任何"独占一行"判据都会在它成行之前先把它放行出去）。
+      if (this.sawCallFence && this.pending.includes('```')) {
+        out.text += this.pending.replace(CALL_FENCE_TAIL_RE, '')
+        this.pending = ''
         return
       }
       out.text += this.pending

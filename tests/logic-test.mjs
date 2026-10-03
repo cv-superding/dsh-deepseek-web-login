@@ -3,7 +3,7 @@
  * 覆盖：prompt 序列化、工具调用流式过滤器（跨包/围栏/假阳性/多调用）、SSE 状态机。
  */
 import assert from 'node:assert/strict'
-import { serializePrompt, ToolCallStreamFilter, parseToolCallJson, parseXmlToolCalls, extractBalancedJson, findXmlToolCallEnd, parseJsonLenient, collectImageRefs } from '../src/protocol.ts'
+import { serializePrompt, ToolCallStreamFilter, TOOL_PROTOCOL_INSTRUCTIONS, parseToolCallJson, parseXmlToolCalls, extractBalancedJson, findXmlToolCallEnd, parseJsonLenient, collectImageRefs } from '../src/protocol.ts'
 import { createSseState } from '../src/webapi.ts'
 import { unwrapStoredToken } from '../src/login.ts'
 import { maskIdentifier } from '../src/auth.ts'
@@ -832,6 +832,103 @@ test('filter: 修不好的协议块 → rejected（绝不吐成正文）', () =>
   assert.equal(tail.rejected.raw, broken, '原文要留给日志')
 })
 
+
+// ── 0.6.38：围栏包裹的调用协议 ────────────────────────────────────────────
+//
+// 为什么改：cuckoo 用 ` ```cuckoo ` 围栏代码块调用工具，分享页里 DSML / tool_calls **0 次**；
+// 我们让模型输出**裸 JSON**（没有语法边界）⇒ 模型在思考里写 JSON、或多写一个字，整段就漏进正文。
+// 改成 ` ```dsh-tool ` 包裹后，围栏提供边界，未闭合/格式错的调用块也有明确的可识别范围。
+
+const FENCED = '```dsh-tool\n{"tool_calls":[{"name":"read","arguments":{"path":"a.txt"}}]}\n```'
+
+/** 跑一遍 filter，返回 { calls, text }。chunks 决定分块方式。 */
+function feedFenced(chunks) {
+  const filter = new ToolCallStreamFilter(new Set(['read']))
+  let text = ''
+  const calls = []
+  const eat = (o) => {
+    text += o.text
+    calls.push(...o.calls)
+  }
+  for (const c of chunks) eat(filter.push(c))
+  eat(filter.flush())
+  return { calls, text }
+}
+
+test('★ 围栏包裹的调用：提取成功且围栏标签不上屏', () => {
+  for (const [label, chunks] of [
+    ['整块', [FENCED]],
+    ['逐字符', [...FENCED]],
+    ['按行', FENCED.split(/(?<=\n)/)],
+  ]) {
+    const { calls, text } = feedFenced(chunks)
+    assert.equal(calls.length, 1, `${label}：必须提取到调用`)
+    assert.equal(calls[0].name, 'read', `${label}`)
+    assert.ok(!text.includes('```'), `${label}：围栏标签漏进正文 ${JSON.stringify(text)}`)
+    assert.ok(!text.includes('tool_calls'), `${label}：调用原文漏进正文 ${JSON.stringify(text)}`)
+  }
+})
+
+test('★ 围栏 + 前置散文（现场形态）也不漏', () => {
+  const withProse = `我先看一下这个文件。\n\n${FENCED}`
+  for (const [label, chunks] of [
+    ['整块', [withProse]],
+    ['逐字符', [...withProse]],
+  ]) {
+    const { calls, text } = feedFenced(chunks)
+    assert.equal(calls.length, 1, `${label}`)
+    assert.ok(!text.includes('```'), `${label}：${JSON.stringify(text)}`)
+    assert.ok(text.includes('我先看一下这个文件。'), `${label}：正文必须保留`)
+  }
+})
+
+test('★ 正文里正常的代码块（不是我们的围栏）不许被剥', () => {
+  // 🔴 这条是 0.6.38 的真实回归：一度无条件剥所有 ``` ⇒ 用户看到的示例被吃掉
+  // （`check-auto-continue` N03 与 `check-tools-section` 各有用例守着同类行为）。
+  const prose = ['看这个例子：', '```xml', '<tool_result>', '<content>', 'SECRET', '</content>', '</tool_result>', '```', '以上。'].join('\n')
+  for (const [label, chunks] of [
+    ['整块', [prose]],
+    ['逐字符', [...prose]],
+  ]) {
+    const { text } = feedFenced(chunks)
+    assert.ok(text.includes('SECRET'), `${label}：围栏内的示例内容不该被剥 ${JSON.stringify(text)}`)
+    assert.ok(text.includes('```xml'), `${label}：围栏开栏不该被剥 ${JSON.stringify(text)}`)
+  }
+})
+
+test('裸 JSON 仍然支持（模型不听话时的兜底路径不能坏）', () => {
+  const bare = '{"tool_calls":[{"name":"read","arguments":{"path":"a.txt"}}]}'
+  for (const [label, chunks] of [
+    ['整块', [bare]],
+    ['逐字符', [...bare]],
+  ]) {
+    const { calls, text } = feedFenced(chunks)
+    assert.equal(calls.length, 1, `${label}：裸 JSON 必须仍能解析`)
+    assert.equal(calls[0].name, 'read', `${label}`)
+    assert.ok(!text.includes('tool_calls'), `${label}`)
+  }
+})
+
+test('★ 协议指令要求用围栏包裹（这是本次修复的核心意图）', () => {
+  // ⚠️ 这三条缺一不可：只查 `includes('dsh-tool')` 是**虚守卫** —— 围栏示例行里也有这个词，
+  // 把"必须用围栏包裹"那句话删掉，用例照样全绿（变异时亲自踩到）。
+  assert.ok(
+    TOOL_PROTOCOL_INSTRUCTIONS.includes('inside a fenced code block'),
+    '必须明确要求"把 JSON 放进围栏里"（只出现围栏示例不够）',
+  )
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('dsh-tool'), '提示词必须指定围栏语言名')
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('Always wrap'), '规则里必须重复要求包裹')
+  assert.ok(
+    TOOL_PROTOCOL_INSTRUCTIONS.includes('Do NOT use XML/HTML-like markup'),
+    'XML 禁令要保留（防 DSML 那类私有标记）',
+  )
+  // ⚠️ 围栏示例有体积成本：极小预算下它会把工具定义挤掉
+  // （`check-tools-section` 有用例守着"工具定义不可截断"）。留个上限，别悄悄涨回去。
+  assert.ok(
+    TOOL_PROTOCOL_INSTRUCTIONS.length < 3000,
+    `协议指令 ${TOOL_PROTOCOL_INSTRUCTIONS.length} 字符，超出预算会挤掉工具定义`,
+  )
+})
 
 console.log(`\n通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项：` : '，全部通过 ✅'}`)
 if (failures.length) {
