@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { listSessionDirs } from './session-locate.mjs'
 /**
  * 一次性诊断：把某个会话里「每一轮发给模型的消息序列」原样打出来，
  * 用来回答「链式的严格前缀判据到底在哪一步被打破」。
@@ -63,6 +64,11 @@ function readEvents(file) {
 
 const prefix = process.argv[2]
 if (!prefix) {
+  // 🔴 同 replay-turn-prompts：批跑不传参数，`exit(1)` 会被健康检查判成"探针起不来"（误报）。
+  if (!listSessionDirs().length) {
+    console.log('跳过：需要一个真机会话 ID 前缀，且当前环境没有真机会话（沙箱属正常）。')
+    process.exit(0)
+  }
   console.error('用法: node dev/dump-turn-input.mjs <会话ID前缀>')
   process.exit(1)
 }

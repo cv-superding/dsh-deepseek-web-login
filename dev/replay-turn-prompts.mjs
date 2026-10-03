@@ -1,3 +1,4 @@
+import { listSessionDirs } from './session-locate.mjs'
 /**
  * 一次性诊断：把某个 DSH 会话**每一轮真实发出去的提示词**重放出来，并给出结构统计。
  *
@@ -35,6 +36,12 @@ function inflate(buffer) {
 
 const prefix = process.argv[2]
 if (!prefix) {
+  // 🔴 批跑（`scripts/test-offline.mjs` 注入临时 DSH_HOME，CI 跑的也是批）不会传参数。
+  // 原来这里 `exit(2)` ⇒ 健康检查判为"探针起不来"（误报）。改成正常退出并说明原因。
+  if (!listSessionDirs().length) {
+    console.log('跳过：需要一个真机会话 ID 前缀，且当前环境没有真机会话（沙箱属正常）。')
+    process.exit(0)
+  }
   console.error('用法: node dev/replay-turn-prompts.mjs <会话ID前缀>')
   process.exit(2)
 }

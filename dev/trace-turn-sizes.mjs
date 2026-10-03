@@ -1,11 +1,10 @@
 // 13:25:54 那轮发了 49973 字符（firstDiff=17）。看它到底发了什么。
 // 用会话日志重放，并把每条 entry 的长度列出来 —— 定位"大"在哪一条。
-import { readFileSync, readdirSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import zlib from 'node:zlib'
 
-const ROOT = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'sessions')
+import { bailIfNoSessions, listSessionDirs } from './session-locate.mjs'
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 function inflate(buf) {
   const offs = []
@@ -21,13 +20,15 @@ function inflate(buf) {
   return out.join('')
 }
 
-const dir = readdirSync(ROOT, { withFileTypes: true })
-  .filter((d) => d.isDirectory())
-  .flatMap((d) =>
-    readdirSync(join(ROOT, d.name), { withFileTypes: true })
-      .filter((x) => x.isDirectory() && x.name.includes(process.argv[2]))
-      .map((x) => join(ROOT, d.name, x.name)),
-  )[0]
+bailIfNoSessions('这个追溯需要真机会话日志')
+const dir = listSessionDirs()
+  .filter((p) => p.includes(process.argv[2] ?? ' '))
+  .sort()
+  .pop()
+if (!dir) {
+  console.log('没找到含 "' + process.argv[2] + '" 的会话。')
+  process.exit(0)
+}
 const events = inflate(readFileSync(join(dir, 'session.v4.jsonl.zstd')))
   .split('\n')
   .filter(Boolean)
