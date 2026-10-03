@@ -862,9 +862,28 @@ const MARKER_RE = /\{\s*"tool_calls?"\s*:/
  * 却撞上第二个 `｜` → 整个标记认不出来 → 不进捕获态 → 原样进正文 → GUI 渲染成乱码。
  * 现在竖线按 `+` 容忍（含全角/半角混用），并把 `calls` 也列入包裹标签名。
  */
-const DSML_PREFIX = '(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)?'
 const WRAPPER_NAMES = 'tool_calls|tool_call|function_calls|calls'
-const XML_STARTER_RE = new RegExp(`<\\s*${DSML_PREFIX}(?:dsml-)?(${WRAPPER_NAMES}|invoke)\\b`, 'i')
+/**
+ * DSML 前缀（竖线段**或** `dsml-` 连字符段），**整组可选**。
+ *
+ * 🔴 2026-10-03 修掉一个连踩两次的坑：此前是两个**各自独立**的可选片段
+ * （`DSML_PREFIX` 自带 `?`，再串一个 `(?:dsml-)?`）。写成 `A? B? invoke` 时，
+ * `A?` 里的 `?` 会让**整组都能为空** ⇒ "无前缀也匹配 invoke" ⇒ 正文里正常讨论的
+ * `<invoke>` 被吞（logic-test 守着这条）。**可选性只能写在整个片段的外层**，
+ * 两个变体必须放进同一个交替里。现在 `stripStrayToolMarkup` 里 `invoke` 用的就是这个
+ * 片段的**非可选**写法 `DSML_PREFIX_ONLY`。
+ *
+ * 另修：`dsml-` 与标签名之间**允许空白**（`<dsml- calls>`）。旧写法只认 `<dsml-calls>`，
+ * 而模型两种都吐 ⇒ 带空格那种整块原样上屏（144 组合矩阵里 24 个泄漏）。
+ * ⚠️ 之所以一直没暴露：现有用例只写了无空格形态（`check-dsml-stray.mjs` / `logic-test.mjs`）——
+ * **测的形态和现场形态不是同一个**。与「0.6.28 思考分支跳过全部四道网」同类。
+ */
+const DSML_PREFIX_BODY = '[|｜]+\\s*DSML\\s*[|｜]+\\s*|\\s*dsml-\\s*'
+/** 整组可选（前缀可有可无）。 */
+const DSML_PREFIX = `(?:${DSML_PREFIX_BODY})?`
+/** 整组**必需**（给"必须有前缀才剥"的场合用，如 `invoke`）。 */
+const DSML_PREFIX_ONLY = `(?:${DSML_PREFIX_BODY})`
+const XML_STARTER_RE = new RegExp(`<\\s*${DSML_PREFIX}(${WRAPPER_NAMES}|invoke)\\b`, 'i')
 /** 代码围栏收尾（模型常把调用块放进 ``` 里）。 */
 const FENCE_TAIL_RE = /\n?[ \t]*```[a-zA-Z0-9]*[ \t]*\n?$/
 const FENCE_HEAD_RE = /^[ \t]*\n?```[ \t]*\n?/
@@ -874,8 +893,8 @@ const FENCE_HEAD_RE = /^[ \t]*\n?```[ \t]*\n?/
  * 「findXmlToolCallEnd 认得出收尾、parseXmlToolCalls 认不出 invoke」→ 整块被降级成正文泄漏。
  * 覆盖：`< invoke`（标签名带空白）、单/重复竖线的 DSML 前缀（含全角）、`<dsml-invoke>`。
  */
-const TAG_OPEN_PREFIX = `<\\s*${DSML_PREFIX}(?:dsml-)?`
-const TAG_CLOSE_PREFIX = `<\\/\\s*${DSML_PREFIX}(?:dsml-)?`
+const TAG_OPEN_PREFIX = `<\\s*${DSML_PREFIX}`
+const TAG_CLOSE_PREFIX = `<\\/\\s*${DSML_PREFIX}`
 const XML_CLOSE_NAMES = `parameter|invoke|${WRAPPER_NAMES}`
 
 /**
@@ -886,8 +905,10 @@ const XML_CLOSE_NAMES = `parameter|invoke|${WRAPPER_NAMES}`
 function normalizeDsml(text: string): string {
   return text
     .replace(new RegExp(`<(/?)${DSML_PREFIX}`, 'gi'), '<$1')
-    .replace(/<\s*dsml-/gi, '<')
-    .replace(/<\/\s*dsml-/gi, '</')
+    // ⚠️ 连字符与其后的空白都要吃掉（`<dsml- calls>` / `<dsml-calls>` 两种现场都出现过），
+    // 否则归一化后仍剩下 `< calls>`，标签名与 `<` 之间多了空格，后面所有匹配继续失败。
+    .replace(/<\s*dsml-\s*/gi, '<')
+    .replace(/<\/\s*dsml-\s*/gi, '</')
 }
 
 /**
@@ -899,8 +920,25 @@ function normalizeDsml(text: string): string {
  */
 const JSON_MARKER_STARTERS = ['{"tool_calls"', '{"tool_call"']
 
-/** XML 标记前缀（用于跨包 hold-back 判断）。`calls` 是实测出现的退化包裹名。 */
-const XML_MARKER_STARTERS = ['<tool_calls', '<tool_call', '<function_calls', '<calls', '<invoke', '<dsml-tool_calls', '<dsml-invoke']
+/**
+ * XML 标记前缀（用于跨包 hold-back 判断）。`calls` 是实测出现的退化包裹名。
+ *
+ * ⚠️ `dsml-` 连字符条目必须同时列**带空格**形态（`<dsml- calls>`）：hold-back 判据是
+ * "逐字符比对 starter 前缀"，少列一种 ⇒ 跨包切分时判不出前缀 ⇒ 半截标记当正文吐出。
+ * 这条与 dsml- 前缀的修复是同一根因（2026-10-03）。
+ */
+const XML_MARKER_STARTERS = [
+  '<tool_calls',
+  '<tool_call',
+  '<function_calls',
+  '<calls',
+  '<invoke',
+  '<dsml-tool_calls',
+  '<dsml-invoke',
+  '<dsml- tool_calls',
+  '<dsml- invoke',
+  '<dsml- calls',
+]
 
 /**
  * 判断 text 末尾是否是（可能的）标记前缀 —— 决定是否 hold back。
@@ -1569,14 +1607,14 @@ function parseSalvagedToolCallJson(buffer: string): ToolCallRequest[] | null {
  */
 export function findXmlToolCallEnd(buffer: string): number {
   const text = buffer
-  const wrapper = new RegExp(`<\\s*${DSML_PREFIX}(?:dsml-)?(${WRAPPER_NAMES})\\b`, 'i').exec(text)
+  const wrapper = new RegExp(`<\\s*${DSML_PREFIX}(${WRAPPER_NAMES})\\b`, 'i').exec(text)
   const startsWithWrapper = wrapper !== null && wrapper.index === 0
   const isInvokeStart = (value: string): boolean =>
-    new RegExp(`^\\s*<\\s*${DSML_PREFIX}(?:dsml-)?invoke\\b`, 'i').test(value)
+    new RegExp(`^\\s*<\\s*${DSML_PREFIX}invoke\\b`, 'i').test(value)
 
   if (startsWithWrapper) {
     const tag = wrapper![1].toLowerCase()
-    const closeRe = new RegExp(`<\\/\\s*${DSML_PREFIX}(?:dsml-)?${tag}\\s*>`, 'i')
+    const closeRe = new RegExp(`<\\/\\s*${DSML_PREFIX}${tag}\\s*>`, 'i')
     const match = closeRe.exec(text)
     return match ? match.index + match[0].length : -1
   }
@@ -1588,7 +1626,9 @@ export function findXmlToolCallEnd(buffer: string): number {
   for (;;) {
     const slice = text.slice(cursor)
     if (!isInvokeStart(slice)) return cursor > 0 ? cursor : -1
-    const closeRe = /<\/\s*(?:\|\s*DSML\s*\|\s*)?(?:dsml-)?invoke\s*>/i
+    // 🔴 旧写法 `(?:\|\s*DSML\s*\|\s*)?` 只认**半角单竖线**，而现场样本是**全角** `｜｜`
+    // （见 DSML_PREFIX 的说明）⇒ 这条匹配不到，裸 invoke 块的收尾会落到"当正文吐出"的分支。
+    const closeRe = new RegExp(`<\\/\\s*${DSML_PREFIX}invoke\\s*>`, 'i')
     const match = closeRe.exec(slice)
     if (!match) return -1
     cursor += match.index + match[0].length
@@ -1600,7 +1640,7 @@ export function findXmlToolCallEnd(buffer: string): number {
     // 孤立的闭合标签属于这一批调用，不该上屏 —— 收全了就一起吞掉。
     // 复现：连续裸 `<|DSML|invoke …>` 之后跟一个 `</|DSML|calls>`，旧代码会把它当正文吐出。
     const strayClose = new RegExp(
-      `^\\s*<\\/\\s*${DSML_PREFIX}(?:dsml-)?(?:${WRAPPER_NAMES})\\s*>`,
+      `^\\s*<\\/\\s*${DSML_PREFIX}(?:${WRAPPER_NAMES})\\s*>`,
       'i',
     )
     const stray = strayClose.exec(rest)
@@ -1634,22 +1674,36 @@ export function stripStrayToolMarkup(text: string): string {
   if (!text) return text
   if (!/voke\s*>|calls?\s*>|tool_calls?\s*>|function_calls?\s*>|DSML/i.test(text)) return text
   return text
-    // 0) DSML 前缀的**裸包裹标签**（开或闭都算）。实测（2026-09-12 用户截图）：
+    // 0) 包裹标签的**开启与闭合**（开或闭都算）。实测（2026-09-12 用户截图）：
     //    模型吐过一个退化的 `<|DSML|calls>` + `</|DSML|invoke>` + `</|DSML|calls>`，
     //    里面没有任何 invoke → 不是调用块 → 被当正文透出。DSML 是私有标记，正文里不会正常出现。
+    //
+    // 🔴 2026-10-03：前缀必须**可选**。旧写法把 DSML 前缀与 `dsml-` 都列为必需，于是
+    // 无前缀的裸 `<calls>` / `</calls>` 只被下面第 2 条（仅闭合）剥掉，**开启标签整行残留**
+    // 在正文里（实测形态 `<calls>\n</calls>`）。这里与 TAG_OPEN/TAG_CLOSE 共用同一套前缀，
+    // 避免"严格解析认得、残留清理认不得"这类分裂。
+    // ⚠️ `invoke` 与包裹标签**区别对待**：`invoke` 必须带**整组** DSML 前缀（竖线段或
+    // `dsml-` 连字符，二者任一）才剥 —— 无前缀的 `<invoke>` 是正文里正常讨论的标签
+    // （logic-test 守着：`在 HTML 里 <invoke> 不是一个标准标签`）。
+    // ⚠️ 前缀的**两个片段必须写在同一个可选组里**：`(?:A)B` 里的 `(?:A)?` 各自可选会退化成
+    // "无前缀也匹配"，实测这正是把行内 `<invoke>` 吞掉的那一行。
     .replace(
-      //    `dsml-` 连字符变体（`<dsml-calls>`）也要算 —— 本文件其它地方已声明兼容该变体。
       new RegExp(
-        `<\\/?\\s*(?:(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)|dsml-)(?:dsml-)?(?:${WRAPPER_NAMES}|invoke)\\s*>`,
+        // 包裹标签：整组前缀**可选** ⇒ 写成 `(?:${DSML_PREFIX_ONLY})?`，
+        // ⚠️ 不能用 `${DSML_PREFIX}`（它自带 `?`，再串一层会让"包裹标签组"整体可空，
+        //    于是 `<invoke>` 那种无前缀写法也会被这个分支吃掉 —— 实测踩过）。
+        `<\\/?\\s*(?:${DSML_PREFIX_ONLY})?(?:${WRAPPER_NAMES})\\s*>` +
+          // invoke：整组前缀**必需**（`DSML_PREFIX_ONLY` 本身不带 `?`）
+          `|<\\/?\\s*${DSML_PREFIX_ONLY}invoke\\s*>`,
         'gi',
       ),
       '',
     )
-    .replace(
-      new RegExp(`<\\/\\s*(?:[|｜]+\\s*DSML\\s*[|｜]+\\s*)?(?:dsml-)?(?:${WRAPPER_NAMES}|invoke)\\s*>`, 'gi'),
-      '',
-    )
-    .replace(/<\/\s+(?:tool_calls?|function_calls|calls|invoke)\s*>/gi, '')
+    // 前缀被吃光、只剩 `< calls>` / `</ calls>` 的退化形态。
+    // ⚠️ 只处理**独占一行**的标签：行内讨论（`在 HTML 里 <invoke> 只是普通文字`）必须原样保留
+    // —— 那是正常回答，不是乱码（logic-test 有用例守着）。实测泄漏样本
+    // （`<calls>\n</calls>`）正是逐行独占的形态。
+    .replace(new RegExp(`(^|\\n)[ \\t]*<\\/?[ \\t]+(?:${WRAPPER_NAMES})[ \\t]*>[ \\t]*(?=\\n|$)`, 'gi'), '$1')
     .replace(/(^|\n)[ \t]*(?:in)?voke\s*>\s*(?=\n|$)/gi, '$1')
 }
 

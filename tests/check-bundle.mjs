@@ -367,8 +367,18 @@ const checks = {
   'host 保存后即时推给 adapter（不必重启）': host.includes('adapterConfig.maxPromptChars = applied.maxPromptChars'),
   // 跨行伪标记（模型复述的工具结果）要被剥掉
   'host 会剥掉跨行的伪标记': host.includes('LONG_MARKER_TAGS') && host.includes('insideFence'),
-  // 退化块（开标签+闭合标签、无 invoke）不再当正文透出
-  'host 会剥掉 DSML 裸包裹标签': host.includes('stripStrayToolMarkup') && /\|dsml-\)\(\?:dsml-\)\?/.test(host),
+  // 退化块（开标签+闭合标签、无 invoke）不再当正文透出。
+  // ⚠️ 0.6.37：原断言的正则 `/\|dsml-\)\(\?:dsml-\)\?/` **绑死了旧的双可选结构**
+  // （`DSML_PREFIX?` 紧跟 `(?:dsml-)?`）—— 那正是 0.6.37 修掉的错误结构：两个片段各自可选
+  // 会让整组可空 ⇒ 无前缀的 `<invoke>` 也被匹配 ⇒ 正文里正常讨论的标签被吞。
+  //
+  // 改守**意图**（前缀两种变体都在 + 存在"非可选"写法），**不再逐字符比对前缀字符串**：
+  // 打包器把单引号改写成双引号，且产物里 `\\s` 是**两个字符**（反斜杠+s），
+  // 在正则里写 `\\s` 或 `\\\\s` 都不等于它 —— 逐字符比对纯属自找麻烦。
+  'host 会剥掉 DSML 裸包裹标签':
+    host.includes('stripStrayToolMarkup') &&
+    /DSML_PREFIX_BODY\s*=\s*['"][^'"]*DSML[^'"]*dsml-[^'"]*['"]/.test(host) &&
+    /DSML_PREFIX_ONLY\s*=\s*`\(\?:\$\{DSML_PREFIX_BODY\}\)`/.test(host),
   // F24：思考续段不得被当成正文（`response/fragments/-1/content` 在 fragments 为空时要跟随 sink）。
   // 断言两处修改的**调用点形态**：① 无 fragment 的分支里先判 sink；
   // ② `sink` 不被无条件覆盖成 'fragments'（否则第一处修复会被紧接着的续段抵消）。

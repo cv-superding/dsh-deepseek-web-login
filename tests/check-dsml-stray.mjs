@@ -227,6 +227,76 @@ test('工具协议提示词里不再出现私有标记的字面量', () => {
   assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('Do NOT use XML/HTML-like markup'), '禁令本身要保留')
 })
 
+// ── 0.6.37：前缀形态矩阵（2026-10-03 用户截图「DSML 漏到网页端」）──────────────
+//
+// 🔴 这批用例为什么必须存在：旧用例只测了 `<dsml-calls>`（**连字符后无空格**）这一种写法，
+// 而模型还吐 `<dsml- calls>`（**有空格**）—— 那种整块原样上屏，两条通道都拦不住。
+// 与「0.6.28 思考分支一句 continue 跳过全部四道网」是同一类错误：
+// **判据只覆盖了一种规范写法，现场却是另一种。**
+//
+// 现场样本（用户分享页原文，DSML 前后是全角双竖线、标签名前有空格）：
+//     <｜｜DSML｜｜ calls>
+//     <｜｜DSML｜｜ invoke name="pwsh">
+//     <｜｜DSML｜｜ parameter name="command" …>…</｜｜DSML｜｜ parameter>
+//     </｜｜DSML｜｜ invoke>
+//     </｜｜DSML｜｜ calls>
+
+/** 按给定前缀拼一个完整的 DSML 调用块。 */
+function dsmlBlock(prefix) {
+  return [
+    `<${prefix} calls>`,
+    `<${prefix} invoke name="pwsh">`,
+    `<${prefix} parameter name="command">Get-Date</${prefix} parameter>`,
+    `</${prefix} invoke>`,
+    `</${prefix} calls>`,
+  ].join('\n')
+}
+
+/** 上屏文本里是否还留着标记痕迹（正文里正常讨论的代码片段不算，见下方独立用例）。 */
+function hasMarkup(text) {
+  return /DSML|｜｜|\|\||<|dsml|<\/?\s*(calls|invoke|parameter)\b/i.test(text)
+}
+
+for (const [label, prefix] of [
+  ['全角双竖线（★现场形态）', '｜｜DSML｜｜'],
+  ['全角双竖线 + 空格', '｜｜ DSML ｜｜'],
+  ['半角单竖线', '|DSML|'],
+  ['半角双竖线', '||DSML||'],
+  ['dsml- 连字符（★旧用例只测这个）', 'dsml-'],
+  ['dsml- 连字符 + 空格（★本次实测泄漏）', 'dsml- '],
+  ['无前缀裸标签', ''],
+]) {
+  test(`前缀「${label}」：整块不许上屏，且必须提取出调用`, () => {
+    const { text, calls } = runThrough([dsmlBlock(prefix)])
+    assert.ok(!hasMarkup(text), `标记泄漏到正文: ${JSON.stringify(text.slice(0, 120))}`)
+    assert.equal(calls.length, 1, '真调用必须被提取（否则这次修复是把调用也吞了）')
+    assert.equal(calls[0].name, 'pwsh')
+  })
+
+  test(`前缀「${label}」：流被截断（无任何闭合）也不许上屏`, () => {
+    const truncated = [`<${prefix} calls>`, `<${prefix} invoke name="pwsh">`, `<${prefix} parameter name="command">Get-Date`].join('\n')
+    const { text } = runThrough([truncated])
+    assert.ok(!hasMarkup(text), `截断的标记泄漏到正文: ${JSON.stringify(text.slice(0, 120))}`)
+  })
+
+  test(`前缀「${label}」：逐字符分块也不许上屏（跨包 hold-back）`, () => {
+    const raw = dsmlBlock(prefix)
+    const { text } = runThrough([...raw])
+    assert.ok(!hasMarkup(text), `逐字符分块时泄漏: ${JSON.stringify(text.slice(0, 120))}`)
+  })
+}
+
+test('★ 反向：正文里正常讨论 <invoke> 不会被误吞（`invoke` 与包裹标签区别对待）', () => {
+  // ⚠️ 修带空格前缀时我一度把「无前缀」也放开，结果把这句话吃掉了（logic-test 抓到）。
+  // 放宽前缀不得殃及正常回答 —— 判据放宽很容易，判据**收窄**才难。
+  //
+  // 只守 `invoke`：`calls` / `tool_calls` 是 DSML 的**私有包裹标签名**，正文里不会正常
+  // 出现（模型讨论工具协议时说的是「tool calling protocol」而不是 `<calls>`），
+  // 所以剥它是零风险；`invoke` 才是通用 XML 标签，必须留着。
+  const line = '在 HTML 里 <invoke> 不是一个标准标签，它只是普通文字。'
+  assert.equal(stripStrayToolMarkup(line), line, `被误吞了: ${JSON.stringify(stripStrayToolMarkup(line))}`)
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)
