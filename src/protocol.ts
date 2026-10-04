@@ -1445,6 +1445,52 @@ function parseParameterValue(raw: string): unknown {
 }
 
 /**
+ * 🔴 0.6.40：剥掉 DSML 的 `<parameter name="arguments">` **包装层**。
+ *
+ * ## 为什么必须剥
+ *
+ * 真机实测（2026-10-04 20:03，DSH 会话 `8a66f573`）第一次抓到 **DSML 被当成调用执行**：
+ * 模型写成
+ * ```
+ * <｜｜DSML｜｜invoke name="pwsh">
+ *   <｜｜DSML｜｜parameter name="arguments" string="false">{"command":"node …"}</parameter>
+ * </｜｜DSML｜｜invoke>
+ * ```
+ * `parseParameterValue` 会把那段 JSON **解析成对象**，于是参数表变成
+ * `{arguments: {command: …}}` ⇒ 执行器报 `missing required property "command"`，
+ * 而**模型看不懂这条报错**（它并不知道参数被包了一层），下一轮继续写错的。
+ *
+ * ⇒ 这一层必须在解析时剥掉，而不是指望模型自己发现。
+ *
+ * ## 为什么两种形态都要处理
+ *
+ * - **对象**：`parseParameterValue` 已把内文解析成对象（上面那种，最常见）
+ * - **字符串**：整份 JSON 被当字符串塞进来（值不是对象）⇒ 补一次解析
+ *
+ * ⚠️ **只剥"只有一个 `arguments` 键"的情况** —— 多个键时那不是包装层，
+ * 硬剥会把真的参数名（某个工具恰好有 `arguments` 参数）丢掉。
+ *
+ * 两条解析路径（`parseXmlToolCalls` 与 `salvageXmlToolCalls`）**都要走这里** ——
+ * salvage 是"收尾不全"的兜底，遇到坏形态的概率更高。
+ */
+function unwrapDsmlArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const wrapped = args.arguments
+  if (wrapped === undefined) return args
+  if (typeof wrapped === 'string') {
+    // 值是字符串 ⇒ 整份 JSON 被当字符串塞进来，补一次解析
+    const reparsed = parseJsonLenient(wrapped)
+    if (reparsed && typeof reparsed === 'object' && reparsed !== null && !Array.isArray(reparsed)) {
+      return reparsed as Record<string, unknown>
+    }
+    return args
+  }
+  if (wrapped && typeof wrapped === 'object' && !Array.isArray(wrapped)) {
+    if (Object.keys(args).length === 1) return wrapped as Record<string, unknown>
+  }
+  return args
+}
+
+/**
  * 解析 XML/DSML 风格的工具调用块（整块文本，可能含多个 invoke）。
  * 支持：`<tool_calls>`/`<function_calls>` 包裹、裸 `<invoke>`、`|DSML|` 前缀、
  * CDATA 值、属性任意顺序、围栏包裹。
@@ -1476,7 +1522,7 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
     const name = readAttr(invoke[1], 'name')
     if (!name) continue
     const body = invoke[2]
-    const args: Record<string, unknown> = {}
+    let args: Record<string, unknown> = {}
     let sawParam = false
     const paramRe = new RegExp(`${TAG_OPEN_PREFIX}parameter\\b([^>]*)>([\\s\\S]*?)${TAG_CLOSE_PREFIX}parameter\\s*>`, 'gi')
     let param: RegExpExecArray | null
@@ -1499,6 +1545,9 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
         }
       }
     }
+    // 🔴 0.6.40：剥掉 DSML 的 `parameter name="arguments"` 包装层
+    //（真机样本与两种形态的说明见 `unwrapDsmlArguments` 的注释）。
+    args = unwrapDsmlArguments(args)
     calls.push({
       id: `call_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
       name,
@@ -1541,7 +1590,10 @@ function salvageXmlToolCalls(text: string): ToolCallRequest[] | null {
     calls.push({
       id: `call_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
       name,
-      arguments: JSON.stringify(salvageXmlParameters(body)),
+      // 🔴 0.6.40：同样要剥包装层 —— salvage 是"收尾不全"的兜底路径，
+      // 遇到坏形态的概率**更高**（实测 DSML 变体常缺闭栏）。两处必须一致，
+      // 漏一处就等于给 salvage 留了个后门。
+      arguments: JSON.stringify(unwrapDsmlArguments(salvageXmlParameters(body))),
     })
   }
   return calls.length > 0 ? calls : null

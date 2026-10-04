@@ -2,6 +2,76 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.6.40 — 2026-10-04
+
+修 **DSML 被当成合法调用执行**时参数结构错报。**这是 0.6.39 首次拿到真机数据后查出的第一个真缺陷。**
+
+### 起因：一张截图
+
+用户在网页端"已思考"里看到完整的 DSML 结构，而且**它被执行了**：
+
+```
+<｜｜DSML｜｜invoke name="pwsh">
+  <｜｜DSML｜｜parameter name="arguments" string="false">
+    {"command":"node audit-tool-args.mjs","description":"Classify DSML hits"}
+  </parameter>
+</｜｜DSML｜｜invoke>
+[Tool Result [ERROR] for call_26ef892b8db934a0c8a05]
+Error: invalid arguments: missing required property "command"
+```
+
+0.6.39 加的 `diagnostics/call-shapes.jsonl` 同时给出了三行留痕：
+
+```
+12:03:28  fenced   ← 模型照 0.6.38 发了围栏
+12:03:32  bare     ← 下一轮退回裸 DSML，并且被执行
+12:03:40  none
+```
+
+⚠️ `rejected-meta.jsonl` **没有**新记录 ⇒ 那个 DSML **没被丢弃**，
+走 `parseXmlToolCalls` 被当成合法调用执行了。
+
+### 根因
+
+`parseParameterValue` 会把 `{"command":…}` **解析成对象**，然后塞进 `args["arguments"]`
+⇒ 参数表变成 `{arguments: {command: …}}`，而 DSH 要的是 `{command: …}` 顶层
+⇒ 执行器报 `missing required property "command"`。
+
+**模型看不懂这条报错**（它并不知道参数被包了一层），所以下一轮继续写错的 ——
+截图里那句"它跑到了执行器，返回的是 invalid arguments…"正是它自己的困惑。
+
+### 改动
+
+**`unwrapDsmlArguments()`**（新函数，`protocol.ts`）——
+剥掉 DSML 的 `<parameter name="arguments">` **包装层**。两种形态都处理：
+
+- **对象**：`parseParameterValue` 已把内文解析成对象（上面那种，最常见）
+- **字符串**：整份 JSON 被当字符串塞进来 ⇒ 补一次解析
+
+⚠️ **只在"只有一个 `arguments` 键"时剥** —— 多个键时那不是包装层
+（某个工具真的有名为 `arguments` 的参数），硬剥会把参数丢掉。
+
+**两条解析路径都接上**：`parseXmlToolCalls` 与 `salvageXmlToolCalls`。
+salvage 是"收尾不全"的兜底路径，遇到坏形态的概率**更高**（DSML 变体常缺闭栏）；
+只修一条等于给另一条留后门。
+
+### 验证
+
+- `logic-test` 74 → **78**，四条新用例：
+  - 真机样本（**逐字用现场形态**：全角 `｜｜` + `string="false"` 属性）
+  - 正常形态不被破坏（反向用例）
+  - **salvage 路径单独一条**（同一语义两个来源，各守一条）
+  - 多键时**不许**剥（防"无脑剥一层"）
+- **两个变异分别验证**：断对象分支 → 2 条红；只断 salvage → 恰好 1 条红
+  （证明两条用例真的各守一条路径，不是同一条在重复报）
+- `tsc` / smoke / 产物 / 隔离 / 诊断脚本 / **65/65** 全过
+
+### 尚未解决：围栏触发率
+
+3 轮里只有 1 轮照围栏（`fenced` 50%）。**这次修的是"错结构被执行"，
+不是"模型不听话"。** 提高触发率要改载荷形态（避开 `tool_calls` 这个撞形键名），
+是独立的一件事，见 0.6.39 的 cuckoo / ToolBridge 对照分析。
+
 ## 0.6.39 — 2026-10-04
 
 让 0.6.38 的围栏协议**能被验证**。这是一个纯观测能力的变更 —— 上一版改完协议之后，

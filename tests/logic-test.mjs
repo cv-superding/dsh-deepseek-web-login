@@ -534,6 +534,78 @@ test('xml: 参数值按 JSON 解析（数字/对象/布尔）', () => {
   assert.deepEqual(JSON.parse(calls[0].arguments), { n: 42, o: { a: 1 }, b: true, s: 'plain' })
 })
 
+// ── 0.6.40：DSML 的 `parameter name="arguments"` 包装层 ─────────────────────
+// 为什么加：2026-10-04 20:03 真机（DSH 会话 8a66f573）第一次抓到 **DSML 被执行**：
+// 模型写成 `<parameter name="arguments" string="false">{"command":…}</parameter>`，
+// 解析后变成 `{arguments: {command:…}}` ⇒ 执行器报 `missing required property "command"`，
+// 而**模型看不懂这条报错**（它不知道参数被包了一层），下一轮继续错。
+// ⇒ 解析时把这一层剥掉。
+//
+// 🔴 用例必须用**现场原文的形态**（全角竖线 `｜｜` + `string="false"` 属性）——
+// 0.6.37 踩过"判据只列了规范写法、现场是另一种"。
+const V = '｜' // 全角竖线
+const DSML_WRAPPED =
+  `<${V}${V}DSML${V}${V}calls>\n` +
+  `<${V}${V}DSML${V}${V}invoke name="pwsh">\n` +
+  `<${V}${V}DSML${V}${V}parameter name="arguments" string="false">` +
+  `{"command":"node audit-tool-args.mjs","description":"Classify DSML hits"}` +
+  `</${V}${V}DSML${V}${V}parameter>\n` +
+  `</${V}${V}DSML${V}${V}invoke>\n` +
+  `</${V}${V}DSML${V}${V}calls>`
+
+test('dsml: parameter name="arguments" 包装层要剥掉（真机样本）', () => {
+  const calls = parseXmlToolCalls(DSML_WRAPPED)
+  assert.equal(calls?.length, 1, '应解析出一个调用')
+  const args = JSON.parse(calls[0].arguments)
+  assert.equal(calls[0].name, 'pwsh')
+  assert.ok('command' in args, `command 应在参数顶层，实际键：${Object.keys(args).join(',')}`)
+  assert.ok('description' in args, 'description 应在参数顶层')
+  assert.ok(!('arguments' in args), '包装层必须剥掉，否则执行器认不到 command')
+})
+
+test('dsml: 正常形态（parameter 直接是 command）不被这次改动破坏', () => {
+  // 反向用例：剥包装层不能变成"无脑剥一层"——正常 DSML 本来就没有那层包装。
+  const normal =
+    `<${V}${V}DSML${V}${V}calls>\n` +
+    `<${V}${V}DSML${V}${V}invoke name="pwsh">\n` +
+    `<${V}${V}DSML${V}${V}parameter name="command">node x.js</${V}${V}DSML${V}${V}parameter>\n` +
+    `<${V}${V}DSML${V}${V}parameter name="description">do it</${V}${V}DSML${V}${V}parameter>\n` +
+    `</${V}${V}DSML${V}${V}invoke>\n` +
+    `</${V}${V}DSML${V}${V}calls>`
+  const calls = parseXmlToolCalls(normal)
+  const args = JSON.parse(calls?.[0]?.arguments ?? '{}')
+  assert.ok('command' in args && 'description' in args, `实际键：${Object.keys(args).join(',')}`)
+  assert.ok(!('arguments' in args), '正常形态不该凭空多出 arguments 层')
+})
+
+test('dsml: 收尾不全走 salvage 时也要剥包装层（同一语义，第二条来源）', () => {
+  // 🔴 为什么要单独一条：`parseXmlToolCalls` 与 `salvageXmlToolCalls` 是**两个**来源，
+  // 只修一个就等于给另一个留后门（0.6.38 的「同一语义多个来源」教训）。
+  // 现场形态：闭栏整段缺失 —— DSML 变体里最常见的那种残缺。
+  const broken =
+    `<${V}${V}DSML${V}${V}invoke name="pwsh">\n` +
+    `<${V}${V}DSML${V}${V}parameter name="arguments">{"command":"node x.js"}</parameter>`
+  const calls = parseXmlToolCalls(broken)
+  assert.equal(calls?.length, 1, 'salvage 路径也应救回一个调用')
+  const args = JSON.parse(calls[0].arguments)
+  assert.ok('command' in args, `salvage 路径没剥包装层，实际键：${Object.keys(args).join(',')}`)
+})
+
+test('dsml: 多个键时不得剥（某个工具真有名为 arguments 的参数）', () => {
+  // 回归守卫：`unwrapDsmlArguments` 只在"只有一个 arguments 键"时剥。
+  const mixed =
+    `<${V}${V}DSML${V}${V}calls>\n` +
+    `<${V}${V}DSML${V}${V}invoke name="custom">\n` +
+    `<${V}${V}DSML${V}${V}parameter name="arguments">keep-me</${V}${V}DSML${V}${V}parameter>\n` +
+    `<${V}${V}DSML${V}${V}parameter name="other">x</${V}${V}DSML${V}${V}parameter>\n` +
+    `</${V}${V}DSML${V}${V}invoke>\n` +
+    `</${V}${V}DSML${V}${V}calls>`
+  const calls = parseXmlToolCalls(mixed)
+  const args = JSON.parse(calls?.[0]?.arguments ?? '{}')
+  assert.ok('arguments' in args, '有多个键时 arguments 是真参数名，不许剥')
+  assert.ok('other' in args, '其它参数必须保留')
+})
+
 test('xml: 围栏包裹与后续正文分离', () => {
   const filter = new ToolCallStreamFilter(new Set(['read']))
   const out = filter.push('```xml\n<tool_calls><invoke name="read"><parameter name="file_path">b.txt</parameter></invoke></tool_calls>\n```\n以上就是我要做的。')
