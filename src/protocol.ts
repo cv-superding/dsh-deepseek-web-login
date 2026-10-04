@@ -852,8 +852,34 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
 
 // ── 流式工具调用过滤器 ────────────────────────────────────
 
-/** 完整 JSON 调用标记：{"tool_calls": 或 {"tool_call": （允许空白）。 */
-const MARKER_RE = /\{\s*"tool_calls?"\s*:/
+/**
+ * 完整 JSON 调用标记：`{"tool_calls":` 或 `{"tool_call":`（允许空白）。
+ *
+ * 🔴 2026-10-04：原先要求对象**以 `{"tool_calls":` 开头**，于是模型把调用写成
+ * `{"tool_ancestors":["pwsh"],"tool_calls":[…]}`（首个键是别的字段）时 `jsonMarker`
+ * 永不命中 ⇒ 不进捕获态 ⇒ 整个围栏块被当正文透传 ⇒ 该轮零工具调用、agent loop
+ * 判定回合完成（现场表现为「停顿」）。更糟的是泄漏正文会进历史，模型下一轮照抄自己，
+ * 于是从偶发变成持续复现（实测同一会话 turn3/turn4 逐字相同的泄漏块）。
+ *
+ * 而下游 `parseToolCallJson` 本来就是宽容的（直接读 `parsed.tool_calls`，
+ * 不要求它是首键），所以这纯粹是**入口判定**的缺口 —— 能进捕获态就能正确解析。
+ *
+ * 现在容忍 `tool_calls` 之前的其它字段：前缀部分限 240 字符，且要求 `{` 之后紧跟一个
+ * **带引号的键**（而不是任意字符），以免把正文里恰好含 `, "tool_calls":` 的片段
+ * 误判成调用对象。
+ */
+const MARKER_RE = /\{\s*(?:"(?:[^"\\]|\\.)*"\s*:[\s\S]{0,240}?)?\s*"tool_calls?"\s*:/
+/**
+ * JSON 对象的开头（`{` + 一个带引号的键）。
+ *
+ * 用途只有一个：当**裸 JSON**（无围栏）的调用对象前缀比 `HOLD_BACK_CHARS` 窗口还长时，
+ * 末尾窗口里已经找不到那个 `{`，`partialMarkerSuffixLength` 就判不出该扣留
+ * ⇒ 半截对象当正文吐出。这里用它给 pending 里的对象开头找一个**锚点**，
+ * 扣留方式与上面的围栏分支同构。
+ *
+ * 要求 `{` 之后是**带引号的键**（不是任意字符），把正文里 `{` 后接散文的情形挡在外面。
+ */
+const JSON_OBJECT_OPEN_RE = /\{\s*"(?:[^"\\]|\\.)*"\s*:/
 /**
  * XML 风格调用标记（实测：思考模式下模型偶尔改用这套标记，形如
  * `<tool_calls><invoke name="read"><parameter name="file_path">…</parameter></invoke></tool_calls>`；
@@ -1012,7 +1038,15 @@ function partialMarkerSuffixLength(text: string): number {
     const body = normalized.replace(/^\{\s*/, '').replace(/\s+/g, '')
     // body 已含前引号（如 `"tool`）→ 与 starter 比较时应拼 `{` + body
     const ok = JSON_MARKER_STARTERS.some((starter) => starter.startsWith(`{${body}`))
-    return ok ? held : 0
+    if (ok) return held
+    // 🔴 2026-10-04：starter 清单只能覆盖**首键就是 `tool_calls`** 的形状。模型漂移出
+    //    `{"tool_ancestors":…,"tool_calls":…}` 时，逐字符分块下末尾停在 `{"tool_anc`，
+    //    上面那条不命中 ⇒ 半截对象被当正文吐出、后续再也拼不回完整标记（实测必现）。
+    //    兜底：最后这个 `{` **还没闭合**（其后无 `}`）就先扣住。
+    //    扣留上限就是本函数的 LIMIT（32 字符），对象一旦闭合或流结束即放行，
+    //    所以最坏代价是**最多 32 字符的延迟**，不会让 pending 无限增长。
+    if (!normalized.includes('}')) return held
+    return 0
   }
   if (normalized.startsWith('<')) {
     if (XML_STARTER_RE.test(normalized)) return 0 // 已是完整标记
@@ -1918,6 +1952,19 @@ export class ToolCallStreamFilter {
         return
       }
       if (this.pending.length <= HOLD_BACK_CHARS) return
+      // 🔴 2026-10-04：**裸 JSON** 的调用对象前缀可能比 HOLD_BACK 窗口（32 字符）还长 ——
+      //    `{"tool_ancestors":["pwsh"],"tool_calls":` 有 39 字符，此时末尾窗口里已经找不到
+      //    那个 `{`，`partialMarkerSuffixLength` 判不出该扣留 ⇒ 半截对象当正文吐出，
+      //    随后即便 `"tool_calls":` 出现也拼不回完整标记（实测必现）。
+      //    这里给 pending 里的对象开头补一个**锚点**：对象尚未闭合就整段扣留，
+      //    与上面围栏分支同构；一旦闭合（或流结束）立即放行。
+      //    ⚠️ 只认 `{` + 带引号的键，正文里 `{` 后接散文的情形不受影响。
+      const openObject = JSON_OBJECT_OPEN_RE.exec(this.pending)
+      if (openObject && extractBalancedJson(this.pending.slice(openObject.index)) === null) {
+        out.text += this.pending.slice(0, openObject.index)
+        this.pending = this.pending.slice(openObject.index)
+        return
+      }
       const hold = partialMarkerSuffixLength(this.pending)
       if (hold > 0) {
         out.text += this.pending.slice(0, this.pending.length - hold)

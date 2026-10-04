@@ -29,6 +29,11 @@ const checks = {
   '解析失败不再吐成正文（rejected 通道）': host.includes('rejected') && host.includes('无法解析'),
   '安全闸门（截断在字符串中间不修补）': host.includes('仍在字符串内'),
   'arguments 数组解包': host.includes('Array.isArray(args) && args.length === 1'),
+  // 2026-10-04：调用对象首个键不是 `tool_calls` 时（模型漂移，如 `{"tool_ancestors":…,"tool_calls":…}`）
+  // 也必须进捕获态。`0,240` 是放宽后 MARKER_RE 的前缀上限常量，`JSON_OBJECT_OPEN_RE`
+  // 是给裸 JSON 那条路补的对象锚点 —— 两者都在产物里才说明修复真的进了 lib。
+  '★ 首个键不是 tool_calls 的漂移调用也要认（入口判定 + 裸 JSON 锚点）':
+    host.includes('0,240') && host.includes('JSON_OBJECT_OPEN_RE'),
   '转写回声守卫（TranscriptEchoGuard）': host.includes('TranscriptEchoGuard'),
   '网页端免责声明剥离（BoilerplateFilter）': host.includes('BoilerplateFilter') && host.includes('本回答由 AI 生成'),
   '三层缓冲按流水线反序吐净 + 轮末补剥声明（drainTextPipeline）': host.includes('drainTextPipeline') && host.includes('tailGuarded.text + tailBoiled.text + tail.text'),

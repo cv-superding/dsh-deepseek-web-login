@@ -909,6 +909,73 @@ test('裸 JSON 仍然支持（模型不听话时的兜底路径不能坏）', ()
   }
 })
 
+// ── 2026-10-04：首个键不是 tool_calls 的漂移形态 ────────────────────────────
+//
+// 现场（会话 b098e7bf turn3/turn4，逐字相同地连续两轮）：模型把调用写成
+//   ```dsh-tool
+//   {"tool_ancestors":["pwsh"],"tool_calls":[…]}
+//   ```
+// 首个键是**别的字段**。旧 MARKER_RE 要求对象以 `{"tool_calls":` 开头 ⇒ jsonMarker
+// 永不命中 ⇒ 不进捕获态 ⇒ 整块漏进正文 ⇒ 该轮零工具调用、agent loop 判定回合完成
+// （用户感知为「停顿」；泄漏正文进历史后模型下一轮照抄自己，于是从偶发变成持续）。
+// 而下游 parseToolCallJson 本来就宽容（直接读 parsed.tool_calls），
+// 所以这是**入口判定**的缺口，不是解析能力不足。
+
+/** 漂移形态：首个键是别的字段（工具名/参数取自现场会话）。 */
+const DRIFTED =
+  '```dsh-tool\n{"tool_ancestors":["read"],"tool_calls":[{"name":"read","arguments":{"path":"a.txt"}}]}\n```'
+
+test('★ 首个键不是 tool_calls 的调用也要认（现场漂移形态）', () => {
+  for (const [label, chunks] of [
+    ['整块', [DRIFTED]],
+    ['逐字符', [...DRIFTED]],
+    ['按行', DRIFTED.split(/(?<=\n)/)],
+  ]) {
+    const { calls, text } = feedFenced(chunks)
+    assert.equal(calls.length, 1, `${label}：必须提取到调用`)
+    assert.equal(calls[0].name, 'read', `${label}`)
+    assert.ok(!text.includes('```'), `${label}：围栏标签漏进正文 ${JSON.stringify(text)}`)
+    assert.ok(!text.includes('tool_calls'), `${label}：调用原文漏进正文 ${JSON.stringify(text)}`)
+  }
+})
+
+test('★ 裸 JSON + 前置字段：前缀长于 HOLD_BACK 窗口时逐字符也不能漏', () => {
+  // `{"tool_ancestors":["read"],"tool_calls":` 有 38 字符 ⇒ 末尾 32 字窗口里已经找不到
+  // 那个 `{`，`partialMarkerSuffixLength` 判不出该扣留（旧的 starter 清单只覆盖
+  // `{"tool_calls"` 打头的形状）。drain() 里补的「对象开头锚点」负责这一条。
+  const bare = '{"tool_ancestors":["read"],"tool_calls":[{"name":"read","arguments":{"path":"a.txt"}}]}'
+  for (const [label, chunks] of [
+    ['整块', [bare]],
+    ['逐字符', [...bare]],
+  ]) {
+    const { calls, text } = feedFenced(chunks)
+    assert.equal(calls.length, 1, `${label}：裸 JSON 漂移形态必须仍能解析`)
+    assert.equal(calls[0].name, 'read', `${label}`)
+    assert.ok(!text.includes('tool_calls'), `${label}：${JSON.stringify(text)}`)
+  }
+})
+
+test('★ 锚点不许吞正文：普通 JSON 对象照常上屏，未闭合的花括号也要吐出来', () => {
+  // 锚点会扣留「`{` + 带引号的键、且尚未闭合」的片段 —— 必须有守卫证明它不吃正文。
+  // （`check-auto-continue` N03 / `check-tools-section` 守的是围栏那一侧的同类行为。）
+  const prose = [
+    '配置如下：',
+    '```json',
+    '{"name":"demo","version":"1.0.0"}',
+    '```',
+    '结尾一个未闭合的 {"k":"v"',
+  ].join('\n')
+  for (const [label, chunks] of [
+    ['整块', [prose]],
+    ['逐字符', [...prose]],
+  ]) {
+    const { text } = feedFenced(chunks)
+    assert.ok(text.includes('"name":"demo"'), `${label}：普通 JSON 代码块被吞 ${JSON.stringify(text)}`)
+    assert.ok(text.includes('结尾一个未闭合的'), `${label}：正文被吞 ${JSON.stringify(text)}`)
+    assert.ok(text.includes('{"k":"v"'), `${label}：未闭合对象必须在 flush 时吐出 ${JSON.stringify(text)}`)
+  }
+})
+
 test('★ 协议指令要求用围栏包裹（这是本次修复的核心意图）', () => {
   // ⚠️ 这三条缺一不可：只查 `includes('dsh-tool')` 是**虚守卫** —— 围栏示例行里也有这个词，
   // 把"必须用围栏包裹"那句话删掉，用例照样全绿（变异时亲自踩到）。
