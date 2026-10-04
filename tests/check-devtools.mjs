@@ -37,6 +37,7 @@ const PROBES = [
   'audit-reasoning-json.mjs',
   'audit-reasoning-both-ways.mjs',
   'trace-dsml-sources.mjs',
+  'verify-fence-on-machine.mjs',
   'measure-protocol-size.mjs',
   'trace-json-origin.mjs',
   'trace-turn-sizes.mjs',
