@@ -1146,7 +1146,41 @@ export function createSessionCleaner(options: SessionCleanerOptions = {}): Sessi
    * 接线在 adapter.ts。所以**关掉总闸时这类会话仍会留在网页端**，这是已知代价。
    */
   function discard(auth: WebAuth, sessionId: string): Promise<void> {
-    return deleteChunk([{ auth, sessionId }])
+    // ⚠️ `deleteChunk` 调用必须留在**函数开头**：`check-bundle` 有一条守卫按
+    // `function discard(…) {` 之后 90 字符定位它（`host 的 discard 删的是**那一个**会话`），
+    // 在这里插别的东西会把它推出去、那条守卫会红。留痕因此放在**后面**。
+    const p = deleteChunk([{ auth, sessionId }])
+    // 🔴 0.6.41：留痕「这条脚手架会话**真的**被丢了吗」。
+    //
+    // 为什么必须记：2026-10-04 之前 `ledger` 只记请求结果（`ok:true`）、**不记删除**，
+    // 所以「发一句话网页端建俩窗口」历史上出现过 14 次却**一次都查不了** ——
+    // 分不清是"没走到 discard"还是"discard 了但 DELETE 没成功"。判据缺失就永远只能靠用户报。
+    //
+    // ⚠️ **没有 `blocked` 分支**：总闸在 `adapter.ts` 接线时判过
+    // （`deleteWebSessions === false` 时 `onDiscardSession` 传 `undefined`）
+    // ⇒ 能走到这里就说明总闸开着，在这里再判一次是重复判断、且拿不到配置。
+    const trace = (outcome: 'sent' | 'failed', detail?: string) => {
+      try {
+        const dir = join(webLoginDir(), 'diagnostics')
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
+        const file = join(dir, 'scaffolding-discards.jsonl')
+        const line = JSON.stringify({ at: new Date().toISOString(), session: sessionId.slice(0, 8), outcome, detail }) + '\n'
+        let size = 0
+        try {
+          size = statSync(file).size
+        } catch {
+          /* 首次写入 */
+        }
+        if (size + Buffer.byteLength(line) > 4_000_000) return
+        appendFileSync(file, line, { encoding: 'utf8', mode: 0o600 })
+      } catch {
+        /* 留痕失败不影响主流程 */
+      }
+    }
+    return p.then(
+      () => trace('sent'),
+      (err: any) => trace('failed', String(err?.message ?? err).slice(0, 120)),
+    )
   }
 
   function configure(next: Partial<SessionCleanupPolicy>): SessionCleanupPolicy {
@@ -3045,6 +3079,27 @@ export async function* streamWebCompletion(
       yield item.value
     }
   } catch (error: any) {
+    // 🔴 0.6.41：**内部请求（不带 `promptParts`）的脚手架会话，在**抛错前**就要丢。
+    //
+    // 为什么（2026-10-04 实测复现「发一句话网页端建俩窗口」）：下面三个 `throw` 全部
+    // **绕过**收尾路径里的 `params.onDiscardSession`（那个在 `for (const id of owned)` 那段里，
+    // 只有正常走完才会到）⇒ `session-title` 这类**短请求一旦出错**（限流/网络抖动/上游 5xx），
+    // 它的脚手架会话就**永远留在网页端**。
+    //
+    // ⚠️ 为什么只在 `promptParts === undefined` 时做：用户的对话会话**绝不能**在这里被丢 ——
+    // 出错后用户还要重登/重试接着聊（0.6.29 的约定）。判据与收尾路径同一处。
+    if (params.promptParts === undefined) {
+      const scaffolding = new Set<string>(owned)
+      if (sessionId) scaffolding.add(sessionId)
+      for (const id of scaffolding) {
+        retireSession(id)
+        try {
+          params.onDiscardSession?.(id)
+        } catch {
+          /* 丢弃失败不影响错误上抛 */
+        }
+      }
+    }
     if (params.signal?.aborted) throw new AdapterLlmError('请求已取消', 'ABORTED', { cause: error })
     if (controller.signal.aborted && controller.signal.reason instanceof AdapterLlmError) throw controller.signal.reason
     if (error instanceof AdapterLlmError) throw error

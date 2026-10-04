@@ -2,6 +2,62 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.6.41 — 2026-10-04
+
+修「发一句话网页端建俩窗口」在**出错路径**上漏掉的那个窗口，并补上缺失的判据。
+
+### 起因
+
+用户新开一个 DSH 对话、只发一句话，网页端出现**两个**窗口（同标题、不同 URL）。
+`feed-decisions.jsonl` 里对上了：
+
+```
+21:37:15  new-session  a3c3b79b   ← 真对话
+21:37:33  no-parts     1705d934   ← 🔴 多出来的那个
+```
+
+`reason: 'no-parts'` = **内部请求**，`promptChars: 477` 与那段 "Create a concise title…"
+完全吻合 ⇒ 是 `session-title` 的**脚手架会话**，本该被丢掉。
+
+**先证伪了"PR 引入"**：`git diff d24d5f3 HEAD --stat -- src/webapi.ts` 为空 ——
+今天两个提交（含 PR #11 合并）一个字都没碰 `webapi.ts`，而这段逻辑来自 0.6.31。
+
+### 根因：抛错路径绕过了丢弃
+
+`openCompletion` 的收尾路径里有 `params.onDiscardSession?.(id)`，
+但**它前面有 `catch` 里的三个 `throw`**（`ABORTED` / 上游 `AdapterLlmError` / `TRANSPORT`）
+⇒ 内部请求一旦出错（限流、网络抖动、5xx），**这三个 `throw` 直接跳过收尾**，
+`finally` 只清 timer/abort，**不丢会话** ⇒ 脚手架会话永远留在网页端。
+
+### 改动
+
+**`catch` 里、第一个 `throw` 之前**就把脚手架会话丢掉。
+⚠️ 只在 `params.promptParts === undefined` 时做 —— 用户的对话会话**绝不能**在出错时丢
+（0.6.29 的约定：出错后还要重登/重试接着聊）。
+
+**新增留痕 `diagnostics/scaffolding-discards.jsonl`**（`sent` / `failed` 两态）。
+🔴 之前 `ledger` 只记 `ok`、**不记删除** ⇒ 这个 bug 历史上出现过 **14 次**却一次都查不了
+（分不清"没走到 discard"还是"discard 了但 DELETE 失败"）。**判据缺失就永远只能靠用户报。**
+
+### 验证（两处都做了变异，且都踩了一次坑）
+
+- 变异 A（删掉 catch 里的丢弃块）→ **1 条红**；变异 B（把 `deleteChunk([{auth,sessionId}])`
+  改成 `deleteChunk(queue)`）→ 那条"不 drain 队列"守卫红，**还原后全绿**。
+- ⚠️ **变异 B 第一次测"红 0 项"**：守卫读的是**产物**，我改的是 `src` 又忘了 `build` ⇒
+  产物没变。**"跑过了"不等于"测到了"**（今天第五次踩同一类）。
+- ⚠️ 新守卫首版用 `indexOf('} catch (error: any) {')` 匹配到**第一个** catch
+  （`webapi.ts` 里有 **7 个**）⇒ 判据恒假。改成**扫全部**、只认"含丢弃逻辑的那个"。
+- ⚠️ 把 `trace` 插在 `discard` 函数开头会**顶出一条已有守卫**（它按"开头 90 字符内"
+  定位 `deleteChunk`，而 tsdown 还会把这个调用拆成多行）⇒ 守卫窗口放宽到 240，并补了
+  "不许把 queue/owned 整个传进去"的反向判据。
+- `tsc` / smoke / 产物 / 隔离 / 诊断脚本 / logic-test 81 / **65/65** 全过。
+
+### 仍需你验证
+
+**判据只证明"逻辑在"，不证明"窗口真的没了"** —— 后者要真机：
+重启 DSH → 新开对话发一句话 → 看网页端**是不是只有一个窗口**，
+再看 `diagnostics/scaffolding-discards.jsonl` 里有没有 `outcome:"sent"`。
+
 ## 0.6.40 — 2026-10-04
 
 修 **DSML 被当成合法调用执行**时参数结构错报。**这是 0.6.39 首次拿到真机数据后查出的第一个真缺陷。**

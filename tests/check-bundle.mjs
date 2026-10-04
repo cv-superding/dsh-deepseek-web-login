@@ -5,6 +5,9 @@ const host = readFileSync('lib/index.js', 'utf8')
 const client = readFileSync('lib/client.js', 'utf8')
 // 源码（注释不会进 bundle，涉及"注释里必须写明风险"的断言只能读源文件）
 const srcAccounts = readFileSync('src/accounts.ts', 'utf8')
+// ⚠️ tsdown 会压缩/重排产物（实测 `catch(e){`、`'failed'` 字面量都变形）⇒
+//    涉及**语句顺序**的不变量只能读源码判，否则守的是一个不稳定的形状。
+const srcWebapi = readFileSync('src/webapi.ts', 'utf8')
 
 const checks = {
   'XML 工具调用解析器': host.includes('function_calls') && host.includes('<parameter'),
@@ -1077,7 +1080,12 @@ const checks = {
     // ② 打包器把 `undefined` 改写成 `void 0`（写 `=== undefined` 必然假红）。
     /if \(params\.promptParts === void 0\) \{[\s\S]{0,260}?params\.onDiscardSession\?\.\(id\)/.test(host),
   'host 的 discard 删的是**那一个**会话，不 drain 队列（否则会把用户的会话顺手删了）':
-    /function discard\(auth, sessionId\) \{[\s\S]{0,90}?return deleteChunk\(\[\{[\s\S]{0,70}?sessionId/.test(host),
+    // ⚠️ 窗口 90 → 240：tsdown 会把 `deleteChunk([{ auth, sessionId }])` **拆成多行**
+    // （实测 `const p = deleteChunk([{\n\t\tauth,\n\t\tsessionId\n\t}]);`），90 字符窗口会误判。
+    // 守的意图不变：**只删传进来的那一个 sessionId**（不能是整个 `queue`/`owned`）。
+    /function discard\(auth, sessionId\) \{[\s\S]{0,240}?deleteChunk\(\[[\s\S]{0,120}?sessionId/.test(host) &&
+    // 反向：不能出现把队列整个传进去的形态
+    !/function discard\(auth, sessionId\) \{[\s\S]{0,240}?deleteChunk\((queue|owned)/.test(host),
   'host 的丢弃通道仍受 deleteWebSessions 总闸约束（"一个都不许删"的语义不能破）':
     /onDiscardSession: deps\.config\.deleteWebSessions === false \? void 0 : /.test(host) &&
     /deps\.sessionCleaner\.discard\(auth, sessionId\)/.test(host),
@@ -1101,6 +1109,37 @@ const checks = {
     /firstDiff:[\s\S]{0,120}?firstDifference\(chainEntries, currentEntries\)/.test(host),
   'host 的 promptParts 带上了 transcript（漏传会静默退回旧行为）':
     /transcript: promptParts\.transcript/.test(host),
+
+  // ── 0.6.41：脚手架会话在**抛错路径**上也要丢 ──────────────────────────────
+  // 2026-10-04 实测复现「发一句话网页端建俩窗口」：`session-title` 这类**短请求**一旦
+  // 出错（限流/网络抖动/5xx），`catch` 里的 `throw` 会**绕过**收尾路径的
+  // `params.onDiscardSession` ⇒ 脚手架会话永远留在网页端。
+  //
+  // ⚠️ 为什么判**src** 而不是产物：`tsdown` 会重排/压缩产物（实测 `catch(e){`、
+  //   `'failed'` 字面量都变了形）⇒ 守产物等于守一个不稳定的形状。
+  //   真正的不变量是「源码里 catch 块内、第一个 throw 之前有丢弃逻辑」，那个顺序才决定行为。
+  // 🔴 反向验证：把 catch 里那段 `if (params.promptParts === undefined) {…}` 删掉
+  //   ⇒ 下面这条会红。已实测。
+  //
+  // ⚠️ 判据必须扫**全部** `} catch (error: any) {`（`webapi.ts` 里有 7 个！），不能只取
+  //   `indexOf` 的第一个 —— 那会匹配到 `PoW challenge request failed` 那个无关的 catch，
+  //   于是判据恒假、"守卫"变成一句空话（我自己踩了一次：首版就是这么写的，红了才发现）。
+  '脚手架会话在 catch（抛错）路径上也被丢弃（0.6.41 修「建俩窗口」）':
+    (() => {
+      const RE = /\} catch \(error: any\) \{/g
+      let m
+      while ((m = RE.exec(srcWebapi)) !== null) {
+        // 只看**第一个 throw 之前**那一段：顺序颠倒（先 throw 后清理）就等于没修
+        const end = srcWebapi.indexOf('if (params.signal?.aborted)', m.index)
+        if (end < 0) continue
+        const seg = srcWebapi.slice(m.index, end)
+        if (/params\.promptParts === undefined/.test(seg) && /onDiscardSession\?\.\(/.test(seg)) return true
+      }
+      return false
+    })(),
+
+  '脚手架丢弃有留痕（判据缺失就永远查不了：历史上 14 次无法区分）':
+    /scaffolding-discards\.jsonl/.test(srcWebapi) && /outcome: 'sent' \| 'failed'/.test(srcWebapi),
 }
 
 let failed = 0
