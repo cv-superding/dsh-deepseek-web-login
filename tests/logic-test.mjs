@@ -930,6 +930,67 @@ test('★ 协议指令要求用围栏包裹（这是本次修复的核心意图�
   )
 })
 
+// ── 0.6.39：`fenced` 判据（记录"模型有没有照 0.6.38 的围栏协议发调用"）────────
+// 为什么加：0.6.38 换了协议格式，但**无法验证模型听不听话** —— 裸 JSON 走 fallback
+// 同样能执行成功，而我们的轮次**不落 DSH 会话日志**（走插件 → 网页端），
+// `~/.dsh/sessions/` 里查不到原文 ⇒ 只能在解析时记一笔，写进 `feed-decisions.jsonl`。
+//
+// 🔴 反向验证：把 `if (this.sawCallFence) out.fenced = true` 改成 `if (false)` ⇒ 下面变红。
+const FENCED_CALL = '```dsh-tool\n{"tool_calls":[{"name":"read","arguments":{"path":"a"}}]}\n```'
+const BARE_CALL = '{"tool_calls":[{"name":"read","arguments":{"path":"a"}}]}'
+
+/** 三种分块方式都要试 —— 围栏开栏与 JSON 到达可能不在同一个 `push` 里。 */
+const CHUNKERS = {
+  '整块': (t) => [t],
+  '逐字符': (t) => [...t],
+  '按行': (t) => t.split('\n'),
+}
+
+for (const [how, chunk] of Object.entries(CHUNKERS)) {
+  test(`fenced: 围栏包裹 → true（${how}）`, () => {
+    const f = new ToolCallStreamFilter(new Set(['read']))
+    let fenced, calls = 0
+    for (const c of chunk(FENCED_CALL)) {
+      const o = f.push(c)
+      if (o.fenced) fenced = true
+      calls += o.calls.length
+    }
+    const tail = f.flush()
+    if (tail.fenced) fenced = true
+    calls += tail.calls.length
+    assert.equal(calls, 1, '应当只提取出一个调用')
+    assert.equal(fenced, true, '围栏包裹的调用必须记 fenced=true')
+  })
+
+  test(`fenced: 裸 JSON → false（${how}）`, () => {
+    const f = new ToolCallStreamFilter(new Set(['read']))
+    let fenced = false, calls = 0
+    for (const c of chunk(BARE_CALL)) {
+      const o = f.push(c)
+      if (o.fenced) fenced = true
+      calls += o.calls.length
+    }
+    const tail = f.flush()
+    if (tail.fenced) fenced = true
+    calls += tail.calls.length
+    assert.equal(calls, 1, '裸 JSON 也应能被接住（fallback 路径刻意保留）')
+    assert.equal(fenced, false, '裸 JSON 不是围栏包裹，必须记 false（这是它"没听话"的证据）')
+  })
+}
+
+test('fenced: 正文里的普通代码块不许被当成围栏调用', () => {
+  // 反向用例：用户答案里写 ```json 的示例，不是调用 ⇒ 既不产生调用、也不置 fenced。
+  const f = new ToolCallStreamFilter(new Set(['read']))
+  let fenced = false, calls = 0
+  const text = '示例：\n```json\n{"foo":1}\n```\n就这样。'
+  for (const o of [f.push(text), f.flush()]) {
+    if (o.fenced) fenced = true
+    calls += o.calls.length
+  }
+  assert.equal(calls, 0, '不该提取出调用')
+  assert.equal(fenced, false, '普通代码块不代表围栏调用')
+})
+
 console.log(`\n通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项：` : '，全部通过 ✅'}`)
 if (failures.length) {
   for (const failure of failures) console.log(failure)

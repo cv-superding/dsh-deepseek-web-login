@@ -53,6 +53,50 @@ import { CONTINUE_INSTRUCTION, TOOL_CALL_RETRY_INSTRUCTION, collectImageRefs, im
  *
  * ⚠️ 摘要（sha256）挡不住低熵内容被猜出来，它只是"不存原文"而非"内容不可还原"。
  */
+/**
+ * 🔴 0.6.39：记一行「本轮发出的调用**是不是用 ` ```dsh-tool ` 围栏包裹的**」。
+ *
+ * ## 为什么必须有
+ *
+ * 0.6.38 把协议从裸 JSON 改成围栏，但**没法验证模型听不听话**：
+ * 裸 JSON 走 fallback 路径**同样能执行成功**（功能看起来完全正常），
+ * 而我们的轮次**不落 DSH 会话日志**（走插件 → 网页端）⇒ `~/.dsh/sessions/` 里查不到原文。
+ * ⇒ 唯一能落盘的证据就是这一行。
+ *
+ * ## 为什么单独一个文件（不塞进 `feed-decisions.jsonl`）
+ *
+ * 时序：决策记录在**请求发出前**写，而这个形态要等**响应回来**才知道 ——
+ * 塞进同一条记录只能记成"上一轮的"（字段名会骗人）。分开写就没有那个歧义。
+ * 仿照已有的 `dumpRejectedPayload`（同一个 `diagnostics/` 目录、同样只记结构化事实）。
+ *
+ * ## 口径
+ *
+ * - `fenced` — 模型照 0.6.38 的新协议发围栏
+ * - `bare`   — 发的是裸 JSON/XML（**模型没听话**，但功能正常）
+ * - `none`   — 本轮没有发出任何调用
+ */
+export function noteCallShape(shape: 'fenced' | 'bare' | 'none', logger?: any): void {
+  try {
+    const dir = joinPath(webLoginDir(), 'diagnostics')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const file = joinPath(dir, 'call-shapes.jsonl')
+    const line = JSON.stringify({ at: new Date().toISOString(), shape }) + '\n'
+    let size = 0
+    try {
+      size = statSync(file).size
+    } catch {
+      /* 首次写入 */
+    }
+    // 环形：4MB 上限（与 rejected-meta 一致）—— 每天几轮的话能留很久
+    if (size + Buffer.byteLength(line) > 4_000_000) return
+    appendFileSync(file, line, { encoding: 'utf8', mode: 0o600 })
+  } catch {
+    try {
+      logger?.debug?.('deepseek-web: 调用形态留痕写入失败')
+    } catch {}
+  }
+}
+
 export function dumpRejectedPayload(raw: string, mode: string, reason: string | undefined, logger?: any): void {
   try {
     const dir = joinPath(webLoginDir(), 'diagnostics')
@@ -1226,6 +1270,20 @@ export function createAdapter(deps: AdapterDeps) {
   const usageRounds: {prompt:string; outputChars:number; total?:number}[] = []
     let rejectedProtocol = ''
     let rejectedReason: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' | undefined
+  /**
+   * 🔴 0.6.39：本轮**至少有一个调用是围栏包裹的**（模型照 0.6.38 的新协议发）。
+   *
+   * **为什么必须记**：0.6.38 换了协议格式，但**无法验证模型听不听话** ——
+   * 裸 JSON 走 fallback 路径同样能执行成功，而我们的轮次**不落 DSH 会话日志**
+   * （走插件 → 网页端），`~/.dsh/sessions/` 里查不到原文。
+   * ⇒ 只能在解析时记这一笔，由 `webapi` 写进 `feed-decisions.jsonl`。
+   *
+   * 三态（与 `rejectedProtocol` 同一套模式）：
+   *  - `'fenced'`  = 模型照新协议发了围栏
+   *  - `'bare'`    = 模型没听话，发的是裸 JSON/XML（走 fallback，功能正常但没验证到围栏）
+   *  - `undefined` = 本轮没有发出任何调用（没数据，别当成 false）
+   */
+  let callShape: 'fenced' | 'bare' | undefined
     let echoedTranscript = false
     /** 被回声守卫砍掉后半段时追加的告知字符数（从 usage 估算里扣掉，别当成模型的输出）。 */
     let echoNoticeChars = 0
@@ -1242,7 +1300,9 @@ export function createAdapter(deps: AdapterDeps) {
       return reasoningBlock
     }
 
-    const emitCalls = function* (calls: readonly { id: string; name: string; arguments: string }[]): Generator<any> {
+    const emitCalls = function* (calls: readonly { id: string; name: string; arguments: string }[], fenced?: boolean): Generator<any> {
+      // 🔴 0.6.39：记下这批调用是不是围栏包裹的（`undefined` = 本次没发出调用，不覆盖已有值）。
+      if (calls.length > 0) callShape = fenced ? 'fenced' : 'bare'
       for (const call of calls) {
         const index = nextIndex++
         toolCallCount += 1
@@ -1400,7 +1460,7 @@ export function createAdapter(deps: AdapterDeps) {
             block.text += cleaned.text
             yield { type: 'text-delta', index: block.index, text: cleaned.text }
           }
-          if (out.calls.length > 0) yield* emitCalls(out.calls)
+          if (out.calls.length > 0) yield* emitCalls(out.calls, out.fenced)
           continue
         }
         if (event.kind === 'status') {
@@ -1485,7 +1545,7 @@ export function createAdapter(deps: AdapterDeps) {
           block.text += tailText
           yield { type: 'text-delta', index: block.index, text: tailText }
         }
-        if (drained.calls.length > 0) yield* emitCalls(drained.calls)
+        if (drained.calls.length > 0) yield* emitCalls(drained.calls, drained.fenced)
         if (drained.rejected) {
           // 协议块解析失败：**绝不**把原始 JSON/标记当正文（Web GUI 会把里面的 `$…$` 渲染成
           // KaTeX 行内公式，用户看到的是「一个字符一行」的乱码，且内容毫无意义）。
@@ -1649,7 +1709,10 @@ export function createAdapter(deps: AdapterDeps) {
       ...(reasoningBlock ? { reasoningTokens: Math.min(outputTokens, estimateTokens(reasoningBlock.text)) } : {}) } }
 
     if (toolCallCount > 0) {
-      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      // 🔴 0.6.39：留痕"这批调用是不是围栏包裹的"（`callShape` 由 `emitCalls` 累加得出）。
+      // ⚠️ `undefined` = 本轮没有调用（区别于 'bare'：那是"没听话但执行了"）。
+      noteCallShape(callShape ?? 'none', logger)
+      yield { type: 'finish', reason: { kind: 'tool-calls' }, callShape }
       return
     }    const hasVisibleText = (textBlock?.text?.length ?? 0) > 0
     if (echoedTranscript) {
@@ -1745,6 +1808,9 @@ export function createAdapter(deps: AdapterDeps) {
         )
       }
     }
+    // 🔴 0.6.39：没有工具调用的轮次也记一行 `none` ——
+    // 否则"日志里没有这一轮"与"这轮没有调用"分不开（前者是记录坏了，后者是事实）。
+    noteCallShape('none', logger)
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 

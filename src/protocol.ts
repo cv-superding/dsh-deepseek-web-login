@@ -27,6 +27,23 @@ export interface FilterOutput {
   text: string
   calls: ToolCallRequest[]
   /**
+   * 🔴 本次 `push`/`flush` 里发出的调用**是不是用围栏包着的**（0.6.39 加）。
+   *
+   * **为什么需要这个字段**：0.6.38 把协议改成 ` ```dsh-tool ` 围栏，但**无法验证它是否真的
+   * 被模型遵守** —— 裸 JSON 走 fallback 路径同样能执行成功，而我们的轮次**不落 DSH 会话
+   * 日志**（走插件 → 网页端），所以 `~/.dsh/sessions/` 里查不到原文。
+   * ⇒ 只能**在解析时记一笔**，写进 `feed-decisions.jsonl`，之后一眼能回答
+   * 「模型到底听没听话」。
+   *
+   * 语义：
+   *  - `true`  = 至少一个调用是**围栏包裹**的（模型照新协议）
+   *  - `false` = 至少一个调用是**裸 JSON/XML**（模型没听话，走 fallback）
+   *  - `undefined` = 本次没有发出任何调用
+   *
+   * ⚠️ 统计口径：**一条调用算一次**（多个调用都是围栏才为 true）。
+   */
+  fenced?: boolean
+  /**
    * 捕获到的协议块**无法解析**（raw = 原文，mode = 标记家族）。
    * ⚠️ 这个字段的意义：绝不再把这种残留当正文吐出去 —— 它既不是模型想说的话，
    * 又会被 Web GUI 的 markdown 渲染器当成垃圾（实测 2026-09：泄漏文本里的
@@ -1843,8 +1860,10 @@ export class ToolCallStreamFilter {
           }
           const block = captured.buffer.slice(0, end)
           const calls = parseXmlToolCalls(block)
-          if (calls) out.calls.push(...calls)
-          else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
+          if (calls) {
+            out.calls.push(...calls)
+            if (this.sawCallFence) out.fenced = true // 🔴 0.6.39：与 JSON 路径同口径
+          } else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
           else out.text += stripStrayToolMarkup(block)
           this.capture = null
           this.pending = stripCallFence(captured.buffer.slice(end)) + this.pending
@@ -1864,6 +1883,11 @@ export class ToolCallStreamFilter {
         if (calls) {
           // 未知工具名也照常透出：由运行器给出「未知工具」结果，模型可自行纠正。
           out.calls.push(...calls)
+          // 🔴 0.6.39：记下这个调用**是不是围栏包裹的**。
+          // 判据 = `sawCallFence`（在 `drain()` 里命中开栏时置位，见 1934 附近）——
+          // 它是"本次调用带围栏"的**权威信号**，而且天然跨 `push`：
+          // 开栏到达与 JSON 到达可以不在同一个分块里，逐字符分块尤其如此。
+          if (this.sawCallFence) out.fenced = true
           this.capture = null
           // 🔴 0.6.38：协议改成 ```dsh-tool 包裹后，这里剩下的是**带语言名的闭栏**。
           // 旧的 FENCE_HEAD_RE 只认行首裸围栏（`^[ \t]*\n?```[ \t]*\n?`）⇒ 闭栏剥不掉，
@@ -2287,6 +2311,8 @@ export function drainTextPipeline(
   disclaimers: number
   calls: FilterOutput['calls']
   rejected: FilterOutput['rejected']
+  /** 🔴 0.6.39：轮末这批调用是不是围栏包裹的（`undefined` = 没有调用）。 */
+  fenced: FilterOutput['fenced']
 } {
   const tailGuarded = guard.flush()
   const tailBoiled = boilerplate.flush()
@@ -2300,6 +2326,7 @@ export function drainTextPipeline(
     disclaimers: boilerplate.count + (dedisclaimered.stripped ? 1 : 0),
     calls: tail.calls,
     rejected: tail.rejected,
+    fenced: tail.fenced,
   }
 }
 
