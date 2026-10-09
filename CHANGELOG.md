@@ -2,6 +2,70 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.6.43 — 2026-10-09
+
+**DSH 重启后能续上同一对话线**（会话槽与链落盘）—— 修「只聊了一个窗口，网页端却多出第二个 + 出现『修改』」。
+
+### 起因：用户实锤
+
+> 「我今天 dsh 就只聊了一个会话窗口，然后发现网页版有俩会话窗口，同时有个窗口又用了『修改』」
+> 「不管是重启 dsh，那也应该要续上」
+
+现场（feed-decisions.jsonl）：
+
+```
+15:08:56  chained      d6327951  entries=138   ← 对话进行到第 138 条
+   ↓ 7 分钟空档（DSH 重启）
+15:15:32  new-session  84b66924  entries=140   ← 接着第 140 条
+```
+
+**`entriesLen` 连续** = 同一条对话线被迫换了会话；旧会话因 `sessionCleanup: keep` 留在网页端侧栏。
+换会话必须发根消息⇒ 网页端出现「修改 / 重新生成」+ `n / n`（截图里的 `2/2` 分叉标记）。
+
+### 根因：槽与链都是**纯内存 Map，零持久化**
+
+```
+webapi.ts:2107const reuseSlots   = new Map()   ← 会话复用槽
+webapi.ts:2149  const contextChains = new Map()   ← 投喂链
+```
+
+`grep -E 'read|write|persist'` ⇒空；`grep '重启|restart'` ⇒只有环境变量说明，**压根没考虑过重启**。
+⇒ 重启后① 复用槽命中不到（建新会话）② 链为空（全量重发，实测 promptChars=270954）③ 发根消息（网页端分叉）。
+
+**这不是配置问题**：三个开关（`chained` / `freshSessionOnRestart:false` / `keep`）
+都是「最小封号风险」设的，**没有任何开关能解决重启丢槽**。
+
+### 关于「重命名会不会换掉ID」（用户提问，已核实）
+
+实测 DSH 会话目录 `~/.dsh/sessions/<工作区>/` 里，同一 ID 曾以两个名字共存：
+`session-8ea338bc-…` 与 `8ea338bc-…` ⇒ **重命名只改目录名、ID 恒定**（DSH 用 `randomUUID` 生成）。
+⇒ 槽键 `账号|dsh会话ID` 在重命名前后一致，能续上。
+
+### 改动
+
+- 新增 `resume-state.json`（"原子写：临时文件 + renameSync"，半截文件会把状态搞坏）。
+  - 落 `SessionSlot` 的 `sessionId/turns/at/key` 与 `ChainState` 全部字段。
+  - ⚠️ **`cleanup` 是函数、不恢复** ⇒ 重启前建、没到轮换次数的会话没有删除回调，
+    交给 `sessions-in-use.json` 那条路兜底。**有意取舍：宁可少删也不误删。**
+- 落盘时机：**10 处**变更点（入栈/ 命中 / 链更新 / 五处删除与清空）。
+  ⚠️ 清空类**也必须落盘** —— 否则重启后旧状态又被读回来。
+- 启动时 `restoreResumeState()` 读回。**不做网络请求**（慢且可能失败）；
+  网页端会话真没了会在用的时候拿到 `invalid chat session id`，届时清记录。
+
+### 验证（变异）
+
+新增 `check-resume-after-restart.mjs`：**两个进程**（ESM 同进程只求值一次 ⇒ 同进程测「续上了」是假的），
+判据两条：①重启后不新建会话 ② 重启那一轮带 `parent_message_id`（为 null ⇒ 网页端出「修改」）。
+变异「把 `restoreResumeState` 短路」⇒ 红，报错信息即现场现象（`created=1`）。已实测。
+
+🔴 **三个夹具坑**（都踩过，已写进注释）：
+① `currentContextMode` 是 context-feed.ts 的模块级变量，只有 index.ts 启动时才 apply
+   ⇒ 直接 import webapi.ts 永远是 `full`、链式走不到；
+② assistant 帧必须 `v.response.fragments`，写 `{type:'assistant'}` 会被静默丢弃 ⇒ 拿不到 response_message_id；
+③ 本机 `spawnSync` **一律 EBUSY**（连 `node -e` 都是）⇒ 用例必须用**异步 spawn**。
+
+`tsc` / smoke / 产物 / 隔离 / logic-test 81 / **66/66** 全过。
+
 ## 0.6.42 — 2026-10-09
 
 **PoW 改在浏览器页面上下文里求解** —— 消掉整条链路上最容易被风控识别的特征。

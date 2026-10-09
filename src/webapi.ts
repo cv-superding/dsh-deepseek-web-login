@@ -19,7 +19,7 @@
  *     {"v":"…"} / {"o":"APPEND","v":"…"}        承接上一个 path 的续段
  *     {"p":"response/status","v":"FINISHED"}    状态
  */
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveDshHome, webLoginDir } from './paths.ts'
 import type { WebAuth } from './auth.ts'
@@ -2149,6 +2149,141 @@ function requestSlotKey(auth: WebAuth, params: { dshSessionId?: string; promptPa
 const contextChains = new Map<string, ChainState>()
 /** 最近用过的链归属键 —— 面板只展示"当前那条"，用它定位。 */
 let lastChainKey: string | undefined
+
+/**
+ * 🔴 0.6.43：**会话槽与链的持久化**（重启后必须续上同一对话线）。
+ *
+ * ## 为什么必须有
+ *
+ * `reuseSlots` 与 `contextChains` 都是**纯内存 `Map`** ⇒ **DSH 一重启就全空**。
+ * 后果（2026-10-09 用户实锤，"我就只聊了一个会话窗口"）：
+ *   15:08:56 会话 A `entries=138` →（重启）→ 15:15:32 会话 B `entries=140`
+ *   ① 复用槽命中不到 ⇒ **建新会话**（`reason: new-session`）；
+ *   ② 链为空 ⇒ **全量重发**（实测 `promptChars=270954`）；
+ *   ③ 换会话必须发根消息 ⇒ 网页端出现 **「修改 / 重新生成」+ `n / n`**。
+ * ⇒ 网页端多出一个窗口、对话线上出现"修改"，**全是这一个原因**。
+ * 🔴 这不是配置问题：三个开关（`chained` / `freshSessionOnRestart:false` / `keep`）
+ * 都是"最小封号风险"设的，**没有任何开关能解决重启丢槽**。
+ *
+ * ## 为什么槽键用 DSH 会话 ID 是安全的（2026-10-09 核实）
+ *
+ * 用户问："重命名会不会换掉 ID？" —— 实测 DSH 的会话目录
+ * `~/.dsh/sessions/<工作区>/` 里，同一个 ID 曾以两个名字共存：
+ * `session-8ea338bc-…` 与 `8ea338bc-…` ⇒ **重命名只改目录名、ID 恒定**。
+ * DSH 用 `randomUUID` 生成 ID（`app.asar` 里 105 处），标题不进ID。
+ * ⇒ 槽键 `账号|dsh会话ID` 在重命名前后**保持一致**，能续上。
+ *
+ * ## 落什么、不落什么
+ *
+ * - `SessionSlot`：落`sessionId` / `turns` / `at` / `key`。
+ *   ⚠️ **`cleanup` 是函数、无法序列化** ⇒ 读回后**不恢复**（见 `restorePersistedState`）。
+ *   后果：重启前建、还没到轮换次数的会话，重启后**没有删除回调**；
+ *   它会被当成"上一次退出留下的会话"（`sessions-in-use.json` 里有账），
+ *   交给 `onSessionDelete` 那条路兜底。**这是有意的取舍**：宁可少删也不误删。
+ * - `ChainState`：`head` / `entries` / `parentId` / `sessionId` / `accountKey` 全是数据，可完整恢复。
+ *
+ * ## 写盘纪律
+ *
+ * 原子写（临时文件 + `renameSync`）—— 半截文件读回来会把状态搞坏，
+ * 那比不落盘更糟（会续到一条断掉的链上）。**写入失败绝不抛**，只留标记。
+ */
+interface PersistedState {
+  version: 1
+  savedAt: number
+  slots: { key: string; sessionId: string; turns: number; at: number }[]
+  chains: { key: string; state: ChainState }[]
+}
+
+const PERSIST_FILE = 'resume-state.json'
+/** 链条目可能很长（含整份对话），落盘前截断以免单文件失控。 */
+const PERSIST_MAX_ENTRIES = 400
+/** 超过这个字节数就不再写（避免一个巨型文件反复重写）。 */
+const PERSIST_MAX_BYTES = 4 * 1024 * 1024
+
+function persistStatePath(): string {
+  return join(webLoginDir(), PERSIST_FILE)
+}
+
+/** 把当前内存状态写盘。**永不抛** —— 落盘失败不该让正常请求失败。 */
+function persistResumeState(): void {
+  try {
+    const chains = [...contextChains.entries()]
+      .map(([key, s]) => ({
+        key,
+        state: {
+          head: s.head,
+          entries: s.entries.length > PERSIST_MAX_ENTRIES ? s.entries.slice(-PERSIST_MAX_ENTRIES) : [...s.entries],
+          parentId: s.parentId,
+          sessionId: s.sessionId,
+          accountKey: s.accountKey,
+        },
+      }))
+      .filter(({ state }) => state.entries.length > 0)
+    const payload: PersistedState = {
+      version: 1,
+      savedAt: Date.now(),
+      slots: [...reuseSlots.values()].map((s) => ({ key: s.key, sessionId: s.sessionId, turns: s.turns, at: s.at })),
+      chains,
+    }
+    const text = JSON.stringify(payload)
+    if (text.length > PERSIST_MAX_BYTES) return
+    const file = persistStatePath()
+    mkdirSync(join(webLoginDir(), 'diagnostics'), { recursive: true, mode: 0o700 })
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, file)
+  } catch {
+    /* 落盘失败不影响主流程 */
+  }
+}
+
+/**
+ * 启动时恢复。**只恢复链与槽的"数据"**，不恢复 `cleanup` 回调（函数无法序列化）。
+ *
+ * ⚠️ 为什么不在这里验证网页端会话是否还活着：那是"用的时候才知道"的事
+ * —— 真没了会在 `openCompletion` 里拿到 `invalid chat session id`，
+ * 届时会清掉对应记录（见 `retireSession`）。**启动时不做网络请求**（慢且可能失败）。
+ */
+function restoreResumeState(): void {
+  try {
+    const raw = readFileSync(persistStatePath(), 'utf8')
+    const parsed = JSON.parse(raw) as PersistedState
+    if (parsed?.version !== 1) return
+    for (const slot of parsed.slots ?? []) {
+      if (!slot?.key || !slot.sessionId) continue
+      // ⚠️ 不恢复 cleanup：它只能在本次进程里由 leaseSession 重新挂上。
+      reuseSlots.set(slot.key, { key: slot.key, sessionId: slot.sessionId, turns: slot.turns, at: slot.at })
+    }
+    for (const rec of parsed.chains ?? []) {
+      if (!rec?.key || !rec.state?.sessionId || !Array.isArray(rec.state.entries)) continue
+      if (rec.state.entries.length === 0) continue
+      contextChains.set(rec.key, { ...rec.state, entries: [...rec.state.entries] })
+      lastChainKey = lastChainKey ?? rec.key
+    }
+  } catch {
+    /* 文件不存在/坏了 = 从零开始，与重启前的行为一致 */
+  }
+}
+
+/** 删掉某个归属键的全部持久化记录（会话退役时调用）。 */
+function forgetPersisted(key: string): void {
+  contextChains.delete(key)
+  try {
+    const file = persistStatePath()
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as PersistedState
+    parsed.slots = (parsed.slots ?? []).filter((s) => s.key !== key)
+    parsed.chains = (parsed.chains ?? []).filter((c) => c.key !== key)
+    const text = JSON.stringify(parsed)
+    if (text.length > PERSIST_MAX_BYTES) return
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, file)
+  } catch {
+    /* 读不到就跳过：内存侧已删，下次写盘会覆盖 */
+  }
+}
+
+restoreResumeState()
 /**
  * 最近一次"收尾把会话退役"的原因（0.6.16）。
  *
@@ -2294,6 +2429,7 @@ export function resetContextChain(): void {
   contextChains.clear()
   lastChainKey = undefined
   lastFeedReason = undefined
+  persistResumeState() // 🔴 0.6.43：清干净也要落盘，否则重启后旧状态又被读回来
 }
 
 /** 给状态页看：当前链式投喂是否真的在跑（没用链式就返回 undefined）。 */
@@ -2364,6 +2500,7 @@ async function leaseSession(
   if (!forceNew && slot && slot.turns < limit) {
     slot.turns += 1
     slot.at = Date.now()
+    persistResumeState() // 🔴 0.6.43：计数与时间戳也落盘（重启后不该白赚一次轮换额度）
     return { sessionId: slot.sessionId, reused: true }
   }
   // ⚠️ N04：轮换/切号时，旧槽必须交给**它自己的** cleanup 归还。
@@ -2379,6 +2516,7 @@ async function leaseSession(
     signal.throwIfAborted()
   }
   reuseSlots.set(key, { key, sessionId, turns: 1, at: Date.now(), ...(cleanup ? { cleanup } : {}) })
+  persistResumeState() // 🔴 0.6.43：入栈即落盘 ⇒ 重启后能续上同一条对话线
   // 淘汰最久没用的那些窗口（连同它们的网页端会话一起删）—— 见 MAX_CONVERSATION_SLOTS。
   evictIdleSlots()
   // 落账：这个会话进了复用槽，此刻**还没删**。宿主据此落盘 —— 否则进程被强杀时
@@ -2413,6 +2551,7 @@ function evictIdleSlots(): void {
     reuseSlots.delete(slot.key)
     contextChains.delete(slot.key)
     dropSentRefIds(slot.sessionId)
+    persistResumeState() // 🔴 0.6.43：被淘汰的槽不该在重启后复活
     if (lastChainKey === slot.key) lastChainKey = undefined
   }
 }
@@ -2423,6 +2562,7 @@ export function retireSession(sessionId?: string): void {
     reuseSlots.clear()
     contextChains.clear()
     sentRefIdsBySession.clear()
+    persistResumeState() // 🔴 0.6.43
     lastChainKey = undefined
     return
   }
@@ -2434,6 +2574,7 @@ export function retireSession(sessionId?: string): void {
   for (const [key, chain] of [...contextChains]) {
     if (chain.sessionId === sessionId) contextChains.delete(key)
   }
+  persistResumeState() // 🔴 0.6.43：会话没了，链必须跟着清，否则会续到不存在的父消息上
   if (lastChainKey !== undefined && !contextChains.has(lastChainKey)) lastChainKey = undefined
 }
 
@@ -2453,6 +2594,7 @@ export function disposeSessionReuse(): string | undefined {
   reuseSlots.clear()
   contextChains.clear()
   lastChainKey = undefined
+  persistResumeState() // 🔴 0.6.43
   // 0.1.83：图片的"服务端已知"集合同样归会话所有，会话退役就作废
   sentRefIdsBySession.clear()
   if (slots.length === 0) return undefined
@@ -2471,6 +2613,7 @@ export function resetSessionReuse(): void {
   reuseSlots.clear()
   contextChains.clear()
   lastChainKey = undefined
+  persistResumeState() // 🔴 0.6.43
   // 决策回执的状态也是模块级的（见 lastFeedReason），一并清掉，测试之间才互不干扰
   lastFeedReason = undefined
   // 0.1.83：图片的"服务端已知"集合也是模块级的，一并清掉
@@ -3213,11 +3356,13 @@ export async function* streamWebCompletion(
     if (sentFeed?.next && roundOk && !poisoned && typeof responseMessageId === 'number') {
       contextChains.set(slotKey, { ...sentFeed.next, parentId: responseMessageId })
       lastChainKey = slotKey
+      persistResumeState() // 🔴 0.6.43：链是续不续上的关键，落盘
     } else if (sentChainKey !== undefined && params.promptParts !== undefined) {
       // 0.6.18：没有 promptParts 的请求（session-title / compaction 等内部调用）
       // 不是链式请求，失败/没 ready 也不该把 chat 的链删掉。
       contextChains.delete(sentChainKey)
       if (lastChainKey === sentChainKey) lastChainKey = undefined
+      persistResumeState() // 🔴 0.6.43
     }
     release?.()
   }
