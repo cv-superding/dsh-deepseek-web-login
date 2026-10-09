@@ -31,12 +31,18 @@ DSH（DeepSeek Harness）通过 `ctx.llm` 的 **provider 适配器**接入模型
 
 ```text
 DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ chat.deepseek.com
-                                     │  ├─ PoW（SHA3 WASM 求解）
-                                     │  ├─ chat_session（每次调用临时会话，用完即删）
-                                     │  ├─ chat/completion（SSE patch 流）
+                                     │  ├─ PoW（SHA3 WASM，**在浏览器页面里**求解）
+                                     │  ├─ chat_session（**按 DSH 会话复用，跨重启续上**）
+                                     │  ├─ chat/completion（SSE patch 流，链式只发增量）
                                      │  └─ file/upload_file（图片输入）
                                      └─ 提示词工具协议 ⇄ tool-call 块
 ```
+
+> **⚠️ 0.7.0 起：必须能启动 Edge / Chrome。**
+> PoW 挑战改为**在真实页面上下文里**求解（原因见下方「为什么这样更不容易被限流」）。
+> 找不到浏览器时**会明确报错，不会退回 Node 侧求解** —— 这是刻意的：
+> Node 侧解 PoW 是被公开列为的封号触发条件，退回去等于这个改动没做。
+> 已经用 `DSH_NO_BROWSER_TRANSPORT=1` 显式关掉浏览器传输的环境需要撤销该设置。
 
 <img src="docs/assets/architecture.svg" alt="架构与数据流" width="1000">
 
@@ -50,7 +56,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 | --- | --- | --- |
 | **① 登录捕获**（只做一次） | 开一个**独立 profile** 的浏览器窗口让你登录，把页面自己发出的请求头读一份存下来：`Authorization: Bearer`、域 cookie、反爬头 `x-hif-dliq` / `x-hif-leim`、一批 `x-client-*` | Electron 的 `webRequest.onBeforeSendHeaders` |
 | **② 请求构造**（每次调用） | 自己拼 `POST /api/v0/chat/completion`；PoW 自己解：先要 `create_pow_challenge`，再用 SHA3 WASM 算出答案塞进 `x-ds-pow-response` | 插件自己的 HTTP 客户端 |
-| **③ 发送** | 默认从 **Chromium 网络栈**出去（Electron `net.fetch`），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node | 见下方「传输层」 |
+| **③ 发送** | 默认**交给系统 Edge / Chrome 的网络栈**发出（CDP 驱动真实页面），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node | 见下方「传输层」 |
 | **④ 解析与对接** | 自己解 `response/fragments` 的 SSE 帧、分思考与正文通道；工具调用走**提示词协议**（网页端没有原生 function calling） | 自研解析器 |
 
 **唯一沾到"截获"的只有第 ① 步**，而且那一步是「读一份 + 清掉自己的痕迹」：同一个回调顺手把请求头里的
@@ -74,6 +80,26 @@ Electron 品牌（UA 与 UA-CH）删掉，否则网页端会判「使用环境�
 
 前两条路线的共同点是「**请求是浏览器发的**」，只有本插件是发送方。代价是接口变了要跟着改；
 换来的是不依赖 DOM、可以后台无人值守地跑。
+
+## 为什么这样更不容易被限流
+
+网页端会拦自动化调用，而且公开的同类项目文档里已经列出了触发条件。0.7.0 按其中最可识别的那几条
+做了调整：
+
+| 原本的做法 | 问题 | 现在 |
+|---|---|---|
+| 在 **Node 里** `WebAssembly.instantiate` 求PoW 挑战 | 被明确列为「自动解挑战」的封号触发条件 | **在真实页面里**用官方自己的 wasm 求 |
+| 每次调用**临时建会话、用完即删** | 真人不会这样建删对话（实测曾一天建 182 个会话） | **按 DSH 会话复用**，跨重启续上（`resume-state.json`） |
+| 每轮**全量重发** | 请求体量与节奏都不像真人 | **链式投喂**：只发增量，`parent_message_id` 挂在上一条回答下面 |
+| 固定请求间隔 | 真人打字不是等距的 | 见设置页的请求间隔（可配随机区间） |
+
+**代价（也是 0.7.0 的破坏性变更）**：必须有可用的 Edge / Chrome。
+找不到浏览器时会明确报错—— **不会静默退回 Node 侧解PoW**，因为那样等于这个改动没做，
+只是给了「已经改好了」的错觉。
+
+⚠️ **需要说清的边界**：这些调整**降低**被识别为自动化的概率，**不构成"不会被封"的保证**。
+逆向网页端本身违反服务条款，风险是"判罚多严"而不是"会不会被抓到"。
+稳定性优先请用官方 API，或用已有的付费订阅走 OAuth。
 
 ## 界面预览
 
@@ -99,7 +125,7 @@ DSH「使用统计」里看到的调用量 —— 免费网页通道，当日 10
 | 能力 | 说明 |
 |---|---|
 | 🔐 **网页登录（无 API Key）** | Electron 独立分区窗口里正常登录，插件**旁路捕获**真实 `Authorization`、cookie、`x-hif-*` 指纹头与客户端版本头 |
-| 🧩 **PoW 求解** | `create_pow_challenge` + DeepSeek 自家 `sha3_wasm_bg.*.wasm` 的 `wasm_solve`；WASM 地址**自动发现**（哈希随部署变化），失败自动回退 |
+| 🧩 **PoW 求解** | `create_pow_challenge` + DeepSeek 自家 `sha3_wasm_bg.*.wasm` 的 `wasm_solve`，**在浏览器页面上下文里执行**（0.7.0 起，见下方「为什么这样更不容易被限流」）；WASM 地址**自动发现**（哈希随部署变化），失败自动回退 |
 | 🌊 **流式** | 同时兼容 `response/fragments`（THINK/RESPONSE 片段）与直连 `thinking_content`/`content` 两套 SSE 格式，含 `{o:"APPEND"}` 与裸 `{v}` 续段；按逻辑流去重，快照重放不重复吐字 |
 | 🛠 **工具调用** | 网页端没有原生 function calling → 提示词 JSON 协议 + 流式过滤器（跨包标记、围栏、多调用、假阳性回退）→ 合成 `tool-call` 块并给出 `finish: tool-calls`；工具定义按 5.6 万字符预算整段下发，超预算时**列出被省略的工具名**并要求模型别猜参数 |
 | 🛡 **格式漂移双保险** | ① 指令层显式禁止 XML/DSML 标记并说明后果（实测模型会主动拒绝该格式）；② 解析层同时容忍 JSON 与 XML/DSML 两族（`\|DSML\|` 前缀、`dsml-` 连字符、裸 `<invoke>`、CDATA） |
@@ -237,7 +263,7 @@ prompt 字符上限默认 400,000（可配）—— 这个数字同时是**风�
 | `cleanupBatch` | `6~10`（随机） | deferred：攒批阈值的**区间**（个）。这一轮具体攒几个 = 每次清理时在区间内随机抽 |
 | `cleanupDelayMs` | `60000~120000`（随机） | deferred：最长等待的**区间**（毫秒）。每轮清理重抽 |
 | `cleanupGapMs` | `800~2500`（随机） | deferred：**相邻两个删除请求之间**的间隔区间（毫秒）。每删一个重抽 |
-| `transport` | **`chromium`** | 传输层：`chromium`＝Electron 的 `net.fetch`（指纹与真实浏览器一致）/ `node`＝Node 原生 fetch |
+| `transport` | **`chromium`** | 传输层：`chromium`＝**系统浏览器进程代理**（拉起 Edge/Chrome，CDP 驱动页面发请求）/ `node`＝Node 原生 fetch |
 | `contextMode` | **`full`** | 上下文投喂：`full`＝每轮重发全量 prompt / `chained`＝只发增量 + 把上一条回答当父消息（见下节） |
 | `probeIntervalMs` | `1800000` | 登录态主动探活间隔（毫秒），`0`＝关闭。只读 `users/current`，零额度 |
 
@@ -349,9 +375,14 @@ prompt 字符上限默认 400,000（可配）—— 这个数字同时是**风�
 | **默认：net.fetch（Electron 43）** | `t13d1516h2_8daaf6152771_806a8c22fdea` | **`8daaf6152771`** | h2 |
 
 Node 的请求在 **TLS 层**就能被判定为非浏览器（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE），
-而且这几项**调参修不了**。改用 Electron 的 `net.fetch` 后走 Chromium 内置网络栈，
-cipher 列表哈希与 Chrome 逐字节一致 —— 且**零新依赖**（不用 uTLS / curl-impersonate）。
-唯一残留差异是扩展数 16 vs 17（内置 Chromium 150 vs 本机 Chrome 152，版本差异，属正常）。
+而且这几项**调参修不了**。
+
+> **⚠️ 0.7.0 更新：实际走的是「系统浏览器进程代理」，不是 Electron 的 `net.fetch`。**
+> 官方端是 `ELECTRON_RUN_AS_NODE=1` 的子进程，**取不到 `electron.net.fetch`**，
+> 所以浏览器传输层改为拉起**系统的 Edge / Chrome**、用 CDP（`Runtime.addBinding`）把请求
+> 交给真实页面发出，响应分块回传。上表的 `net.fetch` 一行是**当时的对比数据**，
+> 结论仍然成立（Node 的 TLS 指纹确实区分得出来），但**现在不是靠 Electron 实现的**。
+> 代价就是上面那条：**必须有可用的 Edge / Chrome**。
 
 设置页「传输层（指纹）」卡可以直接切换，并带一个**零额度的一键测试**
 （回显指纹 / 流式 / 鉴权三项结论）。
@@ -468,7 +499,10 @@ cipher 列表哈希与 Chrome 逐字节一致 —— 且**零新依赖**（不�
 - `temperature` / `stop` / `max_tokens` 网页端无对应字段，会被忽略；usage 为**估算值**（网页端不返回 token 计数）
 - 免费额度有频控；`429` 会带上 `providerRetryAfterMs` 交给 DSH 的重试策略
 - `describe_image` 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它
-- **默认走 Chromium 网络栈**（Electron 的 `net.fetch`），TLS/HTTP2 指纹与真实浏览器一致；
+- **必须能启动 Edge / Chrome**（0.7.0 起）：PoW 改为在真实页面里求解，官方端是
+  `ELECTRON_RUN_AS_NODE=1` 子进程拿不到 `electron.net.fetch`，只能拉起系统浏览器、用 CDP 驱动页面发请求。
+  找不到浏览器会**明确报错**（不会静默退回 Node 侧解PoW —— 那是刻意的，见「为什么这样更不容易被限流」）
+- **默认走系统浏览器的网络栈**（CDP 驱动真实页面），TLS/HTTP2 指纹与真实浏览器一致；
   但它会跟随**系统代理**，梯子关着而系统代理仍指向它时会连不上 —— 设置页「传输层（指纹）」切回 Node 即可
 
 ## 测试与验证
