@@ -1,5 +1,5 @@
 // 量：围栏示例让协议指令长了多少？在 maxChars=5000 的极小预算下会不会挤掉工具定义。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 const messages = []
 for (let i = 0; i < 400; i += 1) messages.push({ role: 'user', content: [{ type: 'text', text: `消息 ${i} `.repeat(20) }] })

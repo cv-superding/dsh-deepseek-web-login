@@ -2,7 +2,7 @@
 // 设计原则：判为泄漏时必须打印上屏原文，避免"只报结论看不到证据"（前面两次探针都栽在这）。
 //   1) push() 返回值类型两条通道不同（字符串 / FilterOutput）—— 之前混用导致假泄漏。
 //   2) 现场形态是 <｜｜DSML｜｜ calls>（DSML 后有空格），不是 <｜｜DSML｜｜>。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 const PREFIXES = {
   '全角双竖线（★现场）': '｜｜DSML｜｜',

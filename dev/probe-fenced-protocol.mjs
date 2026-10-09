@@ -1,7 +1,7 @@
 // 决定性实验：把「裸 JSON」改成「围栏包裹的 JSON」，解析器能不能照样提取出调用？
 // 关键：FENCE_HEAD_RE / FENCE_TAIL_RE 已存在 ⇒ 解析器本来就剥围栏。
 // 这一步只验证"改动是否可行"，不改正文。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 const fenced = [
   '我先查一下当前时间。',

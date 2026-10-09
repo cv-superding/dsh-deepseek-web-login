@@ -1,7 +1,7 @@
 // 针对性审查：0.6.38 之后，**思考通道**里模型自己写 "tool_calls" 字面时，
 // 我的净化器会不会把正常推理内容吞掉？
 // 真机证据：reasoning 块里有 10 处含 tool_calls 字面（模型在复盘自己的调用）。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 // 从真机取一条含 tool_calls 的 reasoning 原文（用户提供过类似场景，这里用已知形态）
 const REAL_REASONING = [

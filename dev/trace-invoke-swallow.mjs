@@ -3,7 +3,9 @@
 import { readFileSync } from 'node:fs'
 
 const src = readFileSync(
-  'F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts',
+  // 🔴 相对路径：曾硬编码 `F:/Code/...`（本机路径）⇒ 在 CI runner / 别人机器上不存在，
+  // readFileSync 直接抛 ENOENT。用相对路径才能跨机器（Windows / Linux 都认）。
+  new URL('../src/protocol.ts', import.meta.url),
   'utf8',
 )
 const body = src.slice(

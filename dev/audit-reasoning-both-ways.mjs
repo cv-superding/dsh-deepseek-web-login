@@ -2,7 +2,7 @@
 //   正向：句中复盘的 JSON 不许被吞（已验）
 //   🔴 反向：真正要执行的调用（独立成段）**必须仍被拦住**，否则标记会漏到网页端 ——
 //   那正是 0.6.28 建立这道网要防的事，不能为了"别误吞"把它拆了。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 const CALL = '{"tool_calls":[{"name":"read","arguments":{"path":"a.txt"}}]}'
 const MARKUP = /```|tool_calls|DSML|<\/?\s*(calls|invoke|parameter)/i

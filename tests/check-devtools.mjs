@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -44,6 +44,47 @@ const PROBES = [
   'replay-turn-prompts.mjs',
   'dump-turn-input.mjs',
 ]
+
+/**
+ * 🔴 0.7.1：探针里**不许出现本机绝对路径**（这个 bug 让 CI 从 2026-10-02 一直红到今天）。
+ *
+ * ## 真实经过
+ *
+ * 七个探针把 `await import('file:///F:/Code/Github-Self/…/src/protocol.ts')`
+ * 硬编码进了源码 —— 那是**我本机**的路径。Windows 上跑得通（文件就在那儿），
+ * 所以本地怎么测都绿；CI runner 上那个路径不存在 ⇒ 6 个探针全部
+ * `ERR_MODULE_NOT_FOUND` ⇒ `check-devtools` 8 过 6 失败 ⇒ 整个跑批 exit 1。
+ *
+ * 🔴 **为什么之前查不出来**：Windows 上「干净克隆 + 跑批」也是全绿（66/66），
+ * 而且**最后一次绿（0.6.36）与第一个红（0.6.37）在本地都通过** ——
+ * 差异只在 Linux/macOS runner 上，本机根本复现不了。
+ *
+ * ## 判据
+ *
+ * 扫 `dev/*.mjs` 找 `file:///<盘符>/…` 与裸的 `X:/…` 绝对路径字面量。
+ * 反向验证：把某个探针改回绝对路径 ⇒ 本条会红。已实测。
+ *
+ * ⚠️ 只扫 `dev/`：探针是排查主力、本机手写，最容易带上绝对路径。
+ * `tests/` 与 `src/` 由 `check-test-isolation`（DSH_HOME）与产物守卫覆盖。
+ */
+test('探针里不许硬编码本机绝对路径（会让 CI runner 全部起不来）', () => {
+  const offenders = []
+  for (const probe of PROBES) {
+    const p = join(ROOT, 'dev', probe)
+    if (!existsSync(p)) continue
+    const s = readFileSync(p, 'utf8')
+    // `file:///F:/…` 或 `'F:/…'` / `"F:/…"`（Windows 盘符开头）
+    const m = s.match(/(['"])file:\/\/\/[A-Za-z]:[^'"]*\1|(['"])[A-Za-z]:\/(?:Users|Code|Program)[^'"]*\2/)
+    if (m) offenders.push(`${probe}: ${m[0].slice(0, 70)}`)
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `这些探针硬编码了本机绝对路径，在 CI runner / 别人机器上必然起不来：\n  ${offenders.join('\n  ')}\n` +
+      `修法：用相对路径（探针都在 dev/ 下 ⇒ '../src/xxx.ts'），` +
+      `或 new URL('../src/xxx.ts', import.meta.url)`,
+  )
+})
 
 test('dev/ 下所有探针脚本都在（别被清理掉）', () => {
   const missing = PROBES.filter((p) => !existsSync(join(DEV, p)))

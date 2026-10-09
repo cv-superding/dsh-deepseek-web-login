@@ -2,6 +2,45 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.7.1 — 2026-10-09
+
+**修好 CI：从 2026-10-02 起一直红的发布链路**（根因是探针里硬编码了本机绝对路径）。
+
+### 根因
+
+七个 `dev/*.mjs` 探针把本机路径写进了源码：
+
+```js
+await import('file:///F:/Code/Github-Self/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+```
+
+Windows 上跑得通（文件就在那儿）⇒ **本地怎么测都绿**；
+CI runner 上那个路径不存在 ⇒ 6 个探针全部 `ERR_MODULE_NOT_FOUND` ⇒
+`check-devtools` 8 过 6 失败 ⇒ 跑批 exit 1 ⇒ CI 与 Release 全红。
+
+### 为什么拖了这么久才定位
+
+拿到 job 日志（`actions/runs/{id}/logs` 需要 token）后一眼看见：
+
+```
+[test] 65/66 个用例文件通过
+  FAIL check-devtools.mjs
+```
+
+🔴 **在此之前我花了两轮（40+30 分钟）在本地复现，全是白费**：
+干净克隆 66/66 全绿、最后一次绿（0.6.36）与第一个红（0.6.37）在本地都通过。
+差异只在 Linux/macOS runner 上，**本机根本复现不了**。
+⇒ 教训：**「CI 红但本地绿」第一件事是要日志，不是本地重造那一步。**
+
+### 改动
+
+- 7 个探针改用相对路径（`../src/protocol.ts`）。`trace-invoke-swallow.mjs` 读文件用
+  `new URL(…, import.meta.url)`，Windows / Linux 都认。
+- `check-devtools` 新增守卫「探针里不许硬编码本机绝对路径」，扫 `dev/*.mjs` 的
+  `file:///<盘符>/…` 与裸 `X:/…` 字面量。变异验证：把探针改回绝对路径 ⇒ 打红。
+
+`tsc` / 产物 / 隔离 / **66/66** 全过。
+
 ## 0.7.0 — 2026-10-09
 
 **要求系统 Edge / Chrome**（唯一的破坏性变更），并按「更不容易被限流」重做四处：PoW 在页面内求解、会话跨重启复用、链式增量，以及把 README 里已经过时的实现描述同步为现状。

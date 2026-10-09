@@ -1,6 +1,6 @@
 // 用用户截图里的**一字未改**原文实测两条通道。
 // 截图里那段在「已思考」块中 ⇒ 走思考通道；工具确实执行了 ⇒ 同一段既被执行又泄漏。
-const M = await import('file:///F:/Code/Github-Self/dsh-fix/dsh-login-web/dsh-deepseek-web-login1/src/protocol.ts')
+const M = await import('../src/protocol.ts')
 
 // ↓↓↓ 截图原文（把换行保留：网页端按行宽折行显示，实际 SSE 里是一整行）
 const RAW =
