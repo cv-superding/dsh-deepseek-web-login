@@ -310,8 +310,14 @@ const checks = {
     host.includes('资源超过字节上限'),
   // 审计 N05 的核心：下载/编译失败必须连「已解析的地址」一起清，
   // 否则会一直对着坏地址打，"保留 discovery 能力"等于没用
-  'host WASM 失效时连地址缓存一起清':
-    host.includes('resolvedWasmUrl?.url === url') && host.includes('resolvedWasmUrl = null'),
+  // 🔴 0.6.42：wasm 已不再在 Node 侧加载 ⇒ `loadWasmModule`/`wasmModuleCache` 随之退役、
+  //   被 tree-shake 出产物 ⇒ 原来那条「失效时清缓存」在**产物里**已无从断言（判据失效）。
+  //   现在守的是**还活着的那一半**：地址缓存（`resolvedWasmUrl`）仍在，
+  //   且「地址发现」这条路（discoverWasmUrl）不能因为不做 Node 求解就一起被砍掉 ——
+  //   页面内求解仍然需要 wasm 地址。
+  'wasm 地址发现仍可用（页面内求解也要它；Node 侧加载已退役）':
+    /discoverWasmUrl|find\(decode\(await readOfficialResource/.test(srcWebapi) &&
+    /resolvedWasmUrl/.test(srcWebapi),
   // 审计 N02：迟到的 /status 校验只能刷元信息，不能切号/复活已删账号。
   // 断言调用点特征 —— 注意 `item.token === auth.token` 这类比较在产物里有 3 处
   // （upsertAccount 内部也有），只拿它做断言会被库内部代码骗过；
@@ -1140,6 +1146,51 @@ const checks = {
 
   '脚手架丢弃有留痕（判据缺失就永远查不了：历史上 14 次无法区分）':
     /scaffolding-discards\.jsonl/.test(srcWebapi) && /outcome: 'sent' \| 'failed'/.test(srcWebapi),
+
+  // ── 0.6.42：PoW 必须**在浏览器页面里**解（Node 侧解 = 主要封号特征）──────────
+  // 依据：`xiaoY233/DeepSeek-Free-API` 的 Disclaimers 明列
+  //   "Challenge Solving Patterns: Automated challenge solving detected"。
+  //
+  // ⚠️ 这些断言守的是「**代码里没有 Node 侧求解路径**」，而不是「页面内能算出答案」——
+  //   后者需要真实浏览器 + 真实 wasm，本仓库的离线用例跑不了。
+  //   能跑真机验证的是：装 0.6.42 后正常对话几轮，看是否还报「PoW 必须在浏览器页面内求解」。
+  //
+  // 🔴 反向验证：把 `solvePoW` 改回调用 `solvePoW(challenge, wasmUrl)` ⇒ 下面两条会红。
+  'PoW 不在 Node 侧求解（无 WebAssembly.instantiate 的活路径）':
+    (() => {
+      // 判据 = 活代码里没有 `WebAssembly.instantiate`。
+      // `solvePoW_removedForReference` 是**留档的注释块**，必须排除掉，
+      // 否则"留着旧实现当文档"会被误判成"还在用"（或反过来）。
+      const body = srcWebapi
+        .replace(/async function solvePoW_removedForReference[\s\S]*?\n}\n/, '')
+      return !/WebAssembly\.(instantiate|compile)/.test(body) ||
+        // 只允许出现在 loadWasmModule 的缓存路径里（它现在只服务白名单校验/discoverWasmUrl）
+        !/await WebAssembly\.(instantiate|compile)\s*\(/.test(body.replace(/WebAssembly\.compile\(await readOfficialResource[\s\S]{0,40}?\)\)/, ''))
+    })(),
+
+  'PoW 无浏览器时显式报错（不静默退回 Node —— 那等于这个改动没做）':
+    (() => {
+      const i = srcWebapi.indexOf('async function solvePow(')
+      if (i < 0) return false
+      // 🔴 判据方向：**扫整个 `solvePow` 函数体**，而不是"报错文案之后的那一段"。
+      //   真实风险是**任何位置**出现 Node 侧求解 —— 我第一版写成
+      //   `报错文案[\s\S]{0,400}?await solvePoW\(`，结果变异把 Node 调用加在
+      //   `if (systemBrowserAvailable())` 分支里（报错文案**之前**）⇒ 守卫静默放过。
+      //   变异验证抓到的正是这个漏洞。
+      const body = srcWebapi.slice(i, srcWebapi.indexOf('\n}\n', i) + 2)
+      // 函数体里除了 `solvePowInPage` 之外不许再调任何 PoW 求解器（词边界：`solvePoW_xxx(` 也算）
+      const calls = body.match(/solvePoW\w*\s*\(/g) ?? []
+      const nonInPage = calls.filter((c) => !/solvePowInPage\s*\(/.test(c))
+      return nonInPage.length === 0 && /PoW 必须在浏览器页面内求解/.test(body)
+    })(),
+
+  '页面内求解走 CDP Runtime.evaluate + 独立 binding（不复用传输层通道）':
+    /solvePowInPage/.test(host) && /Runtime\.evaluate/.test(host) &&
+    /__dshPowSolveResult/.test(host) &&
+    // prefix 拼法必须与 Node 版**逐字一致**（少一个下划线 ⇒ 服务端判失败 ⇒ 挑战重发）。
+    // ⚠️ 判 `host` 而不是 `srcWebapi`：源码里是模板字符串拼接（`${...}`），
+    // 产物里才是 `String(input.salt) + "_" + String(input.expireAt) + "_"`。
+    /String\(input\.salt\)\s*\+\s*"_"\s*\+\s*String\(input\.expireAt\)\s*\+\s*"_"/.test(host),
 }
 
 let failed = 0

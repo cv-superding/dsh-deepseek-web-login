@@ -2,6 +2,77 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.6.42 — 2026-10-09
+
+**PoW 改在浏览器页面上下文里求解** —— 消掉整条链路上最容易被风控识别的特征。
+
+### 起因：封号风险调研
+
+`xiaoY233/DeepSeek-Free-API` 的 Disclaimers 把封号触发条件列得很明确，其中一条直接命中本项目：
+
+> Challenge Solving Patterns: Automated challenge solving detected
+
+本项目此前在 **Node 侧** `WebAssembly.instantiate()` 加载 DeepSeek 的
+`sha3_wasm_bg.*.wasm` 并调用 `wasm_solve` 求答案（`webapi.ts` 的 `solvePoW`），
+再用 `activeFetch` 自己发 `POST /api/v0/chat/create_pow_challenge`。
+
+**官方网页端是在页面上下文里解的。** 而本项目本来就已经把请求跑在真实浏览器里
+（CDP `Runtime.evaluate` + `Runtime.addBinding`）⇒ 让官方自己的 wasm 在官方自己的
+页面里跑，是可行且改动不大的。
+
+### 改动
+
+**`browser-transport.ts`**
+- `solvePowInPage()`：`Runtime.evaluate` 在页面里 `fetch` + `WebAssembly.instantiate`
+  + 调 `wasm_solve`，答案经**新增的独立 binding**（`__dshPowSolveResult`）回传。
+- `handlePowBindingEvent()`：解析 `requestId + ':ok:' + 答案`。
+  ⚠️ 用 `indexOf` 找分隔符而不是 `split` —— 错误消息里可能含 `:`（如 `solve code=0`）。
+- `POW_BINDING` 与传输层的 `BINDING_NAME` **分开注册**：后者负载是 JSON，
+  混在一个通道里会让两边的解析器互相误判。
+
+**`webapi.ts`**
+- 新增 `solvePow()` 作为**唯一入口**：浏览器可用 ⇒ 走页面内；不可用 ⇒ **显式报错**。
+- 旧的 Node 侧实现保留为 `solvePoW_removedForReference`（**注释块形式**），
+  留档 prefix 拼法 `${salt}_${expire_at}_`（少一个下划线 ⇒ 服务端判失败），
+  并明确写「不要因为 Node 侧也能算就加回来」。
+- 新增 `resetWasmUrlCache()`（单测用：`resolvedWasmUrl` 是模块级缓存）。
+
+### 为什么没有「失败就退回 Node 侧」
+
+那等于这个改动没做，却给了「已经改好了」的错觉。**浏览器不可用就报错**，
+让调用方与用户都看得见。⚠️ **这是有意的行为变更**：原来没有浏览器也能跑，现在必须有。
+
+### 测试：删掉两条、改掉四条、新增三条
+
+**删除 `check-round2` 的两条 N05** —— 它们守「失效地址被清掉并重新 discovery」，
+触发者是 Node 侧下载失败；PoW 改到页面内后那条链在 Node 侧**不可观测**。
+硬留会变成「看着绿、其实不测东西」的虚守卫。我试过三种写法来保住它，**全部失败**：
+① 断言 `homeHits` 增长 → 永远红（第二轮在 `solvePow` 就先抛错了）；
+② 断言 `probes` 增长 → 正常版也红（第一轮探测成功就缓存，第二轮命中缓存是**正确行为**）；
+③ 断言 `probesAfterSecond >= 1` → 能过但**几乎恒真** = 虚守卫。
+⇒ 如实记为缺口，等浏览器集成用例来验。
+
+**新增一条真能测的**（替身）：无浏览器时 `createPowHeader` 必须抛错，
+且报错要说清「没有浏览器」。判据是**行为**不是文本 ——
+变异「把报错文案换掉」⇒ 打红，且报错信息直接复现了变异文案。
+
+**新增 `check-test-isolation` 的第二条守卫**：会走浏览器传输的用例必须钉
+`DSH_NO_BROWSER_TRANSPORT`。⚠️ 这条守卫改了**四次**才不误报，全是同一个毛病：
+判据没对准「真的会发生什么」（详见代码注释里的四轮记录）。
+⚠️ 且已写明它的**能力边界**：只守将来的新用例，**对已有用例无能为力**
+（变异删掉 `check-round2` 的开关它没报红，因为该文件已不再调 `createPowHeader`）。
+
+### 已知影响
+
+`check-round2` 从 **300s 超时挂住** 回到 **5s** —— 之前是我的改动让它去真启浏览器。
+
+### 验证
+
+- `check-bundle` 新增三条产物守卫；变异验证时被守卫**自身的两个漏洞**打到：
+  ① 方向错（查「报错文案之后」而真实风险在 `if` 之前）；
+  ② 词边界不足（`/await solvePoW\(/` 匹配不到 `solvePoW_removedForReference(`）⇒ 改成扫整个函数体。
+- `tsc` / smoke / 产物 / 隔离 / 诊断 / logic-test 81 / **65/65** 全过。
+
 ## 0.6.41 — 2026-10-04
 
 修「发一句话网页端建俩窗口」在**出错路径**上漏掉的那个窗口，并补上缺失的判据。

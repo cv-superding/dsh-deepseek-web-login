@@ -24,7 +24,7 @@ const {
   upsertAccount,
   MAX_IMPORT_ACCOUNTS,
 } = await import('../src/accounts.ts')
-const { setFetchImpl, resetSessionReuse, streamWebCompletion } = await import('../src/webapi.ts')
+const { setFetchImpl, resetSessionReuse, resetWasmUrlCache, streamWebCompletion } = await import('../src/webapi.ts')
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
 const { existsSync } = await import('node:fs')
@@ -393,9 +393,20 @@ const n05Json = (obj) =>
 /**
  * 跑两轮 PoW：第一轮「探测通过（地址进缓存）+ 下载按 makeDownload 失败」，
  * 第二轮把探测也变成 404（= 资源整体失效），看会不会重新请求首页走 discovery。
+ *
+ * 🔴 0.6.42：PoW 已改在**浏览器页面内**求解（`solvePowInPage`），
+ * 而那条路会 `launchBrowserTransport()` **真启一个 Edge/Chrome** ——
+ * 离线用例绝不能因此去启浏览器（实测会让本文件从 4s 变成 300s 超时挂住）。
+ * ⇒ 这里用 `DSH_NO_BROWSER_TRANSPORT=1` 强制关闭浏览器，
+ * `solvePow` 会走"无浏览器即报错"那条分支（本用例不关心 PoW 答案，只关心**地址缓存**）。
  */
 async function n05Run(makeDownload) {
-  const { createPowHeader, DS_BASE } = await import('../src/webapi.ts')
+  process.env.DSH_NO_BROWSER_TRANSPORT = '1'
+  // 🔴 0.6.42：必须清地址缓存 —— 它是**模块级**的，上一轮命中过就会跳过探测
+  //   （旧实现靠 Node 侧下载顺带清缓存；PoW 改到页面内后那条路没了）。
+  resetWasmUrlCache()
+  try {
+  const { createPowHeader, resolveWasmUrl, DS_BASE } = await import('../src/webapi.ts')
   let homeHits = 0
   let probes = 0
   let downloads = 0
@@ -445,8 +456,20 @@ async function n05Run(makeDownload) {
     userAgent: 'ua',
     capturedAt: '2026-09-13T00:00:00.000Z',
   }
+  // 🔴 0.6.42：改测「地址解析与缓存」这一层，直接调 `resolveWasmUrl`。
+  //
+  // 为什么：走 `createPowHeader` 会在 `solvePow`（无浏览器 ⇒ 显式报错）那里先抛错，
+  // **第二轮根本到不了 `resolveWasmUrl`** ⇒ 观测点选错、断言永远红。
+  //
+  // ⚠️⚠️ **第一轮之前清一次缓存就够了，不要每轮都清** ——
+  // 我第一版在 `tryOne` 里每次都 `resetWasmUrlCache()`，结果**把被测行为消掉了**：
+  // 变异"让坏地址也被缓存"照样全绿（变异验证抓到的）。
+  // 「第二轮是否重新探测」正是靠**不清**才能观测到。
+  resetWasmUrlCache()
   const tryOne = async () => {
     try {
+      await resolveWasmUrl(auth)
+      // 拿到地址不算成功 —— 还得这个地址在第二轮是坏的（makeDownload 决定的）
       await createPowHeader(auth, '/api/v0/chat/completion')
       return false
     } catch {
@@ -455,33 +478,123 @@ async function n05Run(makeDownload) {
   }
   const firstFailed = await tryOne()
   const homeAfterFirst = homeHits
+  const probesAfterFirst = probes
   broken = true // 资源整体失效：探测与下载都拿不到
   const secondFailed = await tryOne()
   const homeAfterSecond = homeHits
   setFetchImpl(undefined)
-  return { firstFailed, secondFailed, homeAfterFirst, homeAfterSecond, probes, downloads }
+  return { firstFailed, secondFailed, homeAfterFirst, homeAfterSecond, probes, downloads, probesAfterFirst, probesAfterSecond: probes }
+  } finally {
+    delete process.env.DSH_NO_BROWSER_TRANSPORT
+  }
 }
 
+/**
+ * 🔴 0.6.42：这两条用例**改了要验的东西**，因为「Node 侧下载 wasm」这条路已不存在。
+ *
+ * ## 原意图
+ * 「坏掉的 wasm 地址必须被清掉、重新 discovery，不能永久卡住」。
+ *
+ * ## 为什么不测"重新 discovery"了
+ * 旧实现里清缓存的**触发者是 Node 侧下载失败**（`loadWasmModule` 的 catch 回调）。
+ * 现在 wasm 由**页面内** `fetch` 加载，Node 侧不再下载 ⇒
+ * "下载失败 → 清缓存 → 重新 discovery"这条链在 Node 侧**不再可观测**，
+ * 硬造一个假观测点只会得到一个"看着绿、其实没测"的守卫。
+ *
+ * ## 现在测的是仍真实存在的那部分
+ * ① 探测确实发生了（`probes >= 1`）—— 证明没有"直接用兜底地址跳过探测"；
+ * ② 探测失败时**没有把坏地址写进缓存** —— 判据是「第二轮仍会重新探测」。
+ *
+ * ⚠️ 一条**踩过的坑**（别重犯）：我一度把 ② 写成
+ *   `homeHits` 增长（= "重新请求首页做 discovery"）。但 0.6.42 之后
+ *   `solvePow` 在无浏览器时**先抛错**，第二轮根本走不到 `resolveWasmUrl` ⇒
+ *   那个断言永远红。**不是代码坏了，是观测点选错了。**
+ *   现在改判 `probes`（探测次数），它不依赖后续流程走多远。
+ */
 function assertN05(r, label) {
-  assert.ok(r.firstFailed, `${label}：第一轮必须失败（下载/编译坏了）——自证确实走到了这条路径`)
+  // ⚠️ 0.6.42 后这两条用例**能守的东西变少了**，如实记录而不是硬凑守卫：
+  //
+  // 原来守的是「**失效地址必须被清掉、重新 discovery**」，触发者是 Node 侧下载失败
+  // （`loadWasmModule` 的 catch 回调）。PoW 改到页面内后 Node 侧不再下载 ⇒ 那条链
+  // 在 Node 侧**不可观测**。
+  //
+  // 我试过三种写法来"保住"它，**全部失败或变成虚守卫**（都实测过）：
+  //  ① 断言 `homeHits` 增长（重新 discovery）→ **永远红**：第二轮在 `solvePow`
+  //     就先抛错了，压根到不了 `resolveWasmUrl`；
+  //  ② 断言 `probes` 增长（重新探测）→ **正常版也红**：第一轮探测成功就缓存了，
+  //     第二轮命中缓存是**正确行为**，不是 bug；
+  //  ③ 断言 `probesAfterSecond >= 1` → 能过，但**几乎恒真** = 虚守卫（0.6.28 的教训）。
+  //
+  // ⇒ 结论：**"失效地址会被清掉"这条不变量，在 0.6.42 后本仓库已无法离线验证。**
+  //   保留下面两条真断言（探测确实发生、两轮都以失败告终），
+  //   并把"失效地址重试"列为**待补的缺口**，而不是留一个看着绿却不测东西的守卫。
+  //   真要验它，需要一条能控制"页面内 fetch 返回 404"的浏览器集成用例（不在离线套件内）。
+  assert.ok(r.firstFailed, `${label}：第一轮必须失败（无浏览器 ⇒ solvePow 显式报错）——自证走到了这条路径`)
   assert.ok(r.probes >= 1, `${label}：自证探测发生过（probes=${r.probes}）`)
-  assert.ok(r.downloads >= 1, `${label}：自证下载发生过（downloads=${r.downloads}）`)
-  assert.equal(r.homeAfterFirst, 0, `${label}：第一轮探测通过，不该走 discovery（说明地址真的进了缓存）`)
-  assert.ok(r.secondFailed, `${label}：第二轮也必须失败（地址仍然坏）`)
-  assert.ok(
-    r.homeAfterSecond > r.homeAfterFirst,
-    `${label}：失效地址必须被清掉、重新请求首页做 discovery，实际 homeHits=${r.homeAfterSecond}（基线 ${r.homeAfterFirst}）`,
-  )
+  assert.ok(r.secondFailed, `${label}：第二轮也必须失败（不会静默用一个坏地址当成功）`)
 }
 
-await test('N05：WASM 下载 404 后必须重新走 discovery（不能卡在坏地址上）', async () => {
-  assertN05(await n05Run(() => new Response('gone', { status: 404 })), '下载 404')
-})
+// 🔴 0.6.42：**原两条 N05 用例已删除**，理由记录在 `assertN05` 上方的注释里。
+// 一句话版本：PoW 改到页面内解之后，"失效地址会被清掉并重新 discovery"这条不变量
+// 在本仓库**已无法离线验证**（Node 侧不再下载 wasm，没有触发点）。
+// 硬留两条只会变成"看着绿、其实不测东西"的虚守卫（0.6.28 的教训：变异打不红＝白写）。
+//
+// 待补的缺口（需要浏览器集成用例，不在离线套件内）：
+//   页面内 `fetch(wasmUrl)` 返回 404 / 实例化失败时，必须清掉 `resolvedWasmUrl` 并重新 discovery。
 
-await test('N05：WASM 编译失败后同样要清地址缓存', async () => {
-  // HTTP 200 但字节不是合法 wasm → WebAssembly.compile reject（走的是同一条清理回调）
-  assertN05(await n05Run(() => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })), '编译失败')
+/**
+ * 🔴 0.6.42：替掉原两条 N05 的**真能测**的用例。
+ *
+ * 守的是 PoW 改到页面内之后、**仍然重要且现在真的失效就会出事**的那条：
+ * 「没有浏览器时必须**显式报错**，不许悄悄退回 Node 侧求解」。
+ *
+ * 为什么这条值得守：整个改动的目的就是消掉"Node 侧解 PoW"这个封号特征。
+ * 如果某天有人为了"让它在无浏览器环境也能跑"而加一条 `catch → solvePoW(...)` 兜底，
+ * 整件事就白做了、而且**表面全绿** —— 这正是要防的那种"看不见的回归"。
+ *
+ * 判据是**行为**（调用真的会抛），不是文本形状。
+ */
+await test('N05（0.6.42 替身）：没有浏览器时 PoW 显式报错，绝不退回 Node 侧求解', async () => {
+  const prev = process.env.DSH_NO_BROWSER_TRANSPORT
+  process.env.DSH_NO_BROWSER_TRANSPORT = '1'
+  try {
+    resetWasmUrlCache()
+    const { createPowHeader } = await import('../src/webapi.ts')
+    let seen = null
+    setFetchImpl(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/v0/chat/create_pow_challenge')) {
+        return new Response(JSON.stringify({ code: 0, data: { biz_data: { challenge: {
+          algorithm: 'sha3', challenge: 'abc', salt: 'salt', signature: 'sig',
+          difficulty: 1, expire_at: 1700000000,
+        } } } }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.endsWith('.wasm')) return new Response(N05_MINIMAL_WASM, { status: 200 })
+      return new Response('', { status: 404 })
+    })
+    const auth = {
+      token: 'tok', cookie: '', hifDliq: '', hifLeim: '', wasmUrl: '',
+      userAgent: 'ua', capturedAt: '2026-09-13T00:00:00.000Z',
+    }
+    try {
+      await createPowHeader(auth, '/api/v0/chat/completion')
+      seen = null
+    } catch (error) {
+      seen = error?.message ? error.message : String(error)
+    }
+    assert.ok(seen, '没有浏览器时必须抛错（而不是悄悄用 Node 侧算出答案）')
+    assert.match(
+      String(seen),
+      /PoW 必须在浏览器页面内求解/,
+      `报错必须说清是"没有浏览器"，实测：${String(seen).slice(0, 120)}`,
+    )
+  } finally {
+    setFetchImpl(undefined)
+    if (prev === undefined) delete process.env.DSH_NO_BROWSER_TRANSPORT
+    else process.env.DSH_NO_BROWSER_TRANSPORT = prev
+  }
 })
+// 现在先守住**仍可测且仍重要**的那部分：见下面这条。
 
 // ── 第二轮审计 N02（高）：迟到的 /status 校验仍会把当前账号切回去 ────────────────
 // 根因：`const check = await validateAuth(auth)` 之后走的是 `writeAuth({ ...auth, user: check.user })`，

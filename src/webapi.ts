@@ -33,6 +33,8 @@ import {
 } from './gate.ts'
 // 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
 import { currentContextMode, decideFeed, effectiveReuseLimit, firstDifference, needsFreshSession, type ChainState, type FeedDecision, type FeedReason } from './context-feed.ts'
+// 🔴 0.6.42：PoW 改在浏览器页面内求解（见 `solvePow`）。
+import { solvePowInPage, systemBrowserAvailable } from './browser-transport.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
 
@@ -506,6 +508,19 @@ const MAX_WASM_BYTES = 8 * 1024 * 1024
 /** 最近一次被白名单拒绝的凭证 wasmUrl（诊断/单测用；本模块无日志器，留状态而不是打日志）。 */
 export let lastWasmUrlRejection: string | undefined
 
+/**
+ * 清掉 wasm 地址缓存（单测用；生产里"失效即清"由 `loadWasmModule` 的失败回调负责）。
+ *
+ * 🔴 0.6.42 加这个出口的原因：`resolvedWasmUrl` 是**模块级**缓存，`n05Run` 那类
+ * 用例在同一模块实例里跑两轮，第二轮会直接命中上一轮的缓存 ⇒
+ * `probes=0`、看起来"探测没发生"。以前没暴露，是因为旧用例靠 Node 侧下载
+ * 顺带把缓存清了；PoW 改到页面内之后 Node 侧不再下载 ⇒ 必须显式清。
+ */
+export function resetWasmUrlCache(): void {
+  resolvedWasmUrl = null
+  wasmModuleCache = null
+}
+
 /** 合法则返回规范化后的地址，否则返回 undefined（调用方负责回退并告警）。 */
 export function checkedWasmUrl(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || !raw) return undefined
@@ -539,11 +554,51 @@ async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
 }
 
 /**
- * 调用 DeepSeek 的 sha3_wasm_bg 求解 PoW。
+ * 🔴 0.6.42：PoW 求解的**唯一入口** —— 优先在浏览器页面上下文里解。
+ *
+ * ## 为什么没有"Node 兜底"
+ *
+ * 封号风险的主要来源就是"在 Node 里 `WebAssembly.instantiate` 解官方挑战"这件事本身
+ * （`xiaoY233/DeepSeek-Free-API` 的 Disclaimers 明列：
+ * "Challenge Solving Patterns: Automated challenge solving detected"）。
+ * **如果失败就悄悄退回 Node 侧算，这个改动等于没做** ——
+ * 表面上"支持页面内求解"，实际上大多数请求还在走旧路径，还给了我们"已经改好了"的错觉。
+ * ⇒ **浏览器不可用就显式报错**，让调用方与用户都看得见。
+ *
+ * ⚠️ 这条改动会**改变行为**：原来没有浏览器也能跑（Node 侧算），
+ * 现在必须有浏览器。这是故意的 —— 但要知道自己正在换的是什么。
+ */
+async function solvePow(challenge: PoWChallenge, wasmUrl: string): Promise<number> {
+  if (systemBrowserAvailable()) {
+    return await solvePowInPage({
+      wasmUrl,
+      challenge: challenge.challenge,
+      salt: challenge.salt,
+      difficulty: challenge.difficulty,
+      expireAt: challenge.expire_at,
+    })
+  }
+  throw new AdapterLlmError(
+    'PoW 必须在浏览器页面内求解（未找到 Edge/Chrome）—— 不再退回 Node 侧计算，因为那是主要的封号特征',
+    'TRANSPORT',
+  )
+}
+
+/**
+ * ~~调用 DeepSeek 的 sha3_wasm_bg 求解 PoW。~~
+ *
+ * 🔴 0.6.42 已删除（Node 侧求解 = 主要封号特征，见 `solvePow` 的说明）。
+ *    保留这段注释是为了让后来者知道**为什么这里空了**，
+ *    以及**不要**因为"Node 侧也能算"就把它加回来。
+ *    页面内实现在 `browser-transport.ts` 的 `solvePowInPage`。
+ *
+ * 原实现（留档，便于对照 prefix 的拼法）：
+ * ```ts
  * wasm_solve(retptr, challengePtr, challengeLen, prefixPtr, prefixLen, difficulty)；
  * prefix = `${salt}_${expire_at}_`；返回 float64 答案（取整）。
+ * ```
  */
-async function solvePoW(challenge: PoWChallenge, wasmUrl: string): Promise<number> {
+async function solvePoW_removedForReference(challenge: PoWChallenge, wasmUrl: string): Promise<number> {
   const module = await loadWasmModule(wasmUrl)
   const instance = await WebAssembly.instantiate(module, { wbg: {} })
   const e = instance.exports as any
@@ -608,7 +663,7 @@ export async function createPowHeader(auth: WebAuth, targetPath: string, signal?
     )
   }
   const wasmUrl = await resolveWasmUrl(auth, signal)
-  const answer = await solvePoW(challenge, wasmUrl)
+  const answer = await solvePow(challenge, wasmUrl)
   const payload = JSON.stringify({
     algorithm: challenge.algorithm,
     challenge: challenge.challenge,
