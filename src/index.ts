@@ -44,6 +44,7 @@ import {
   DEFAULT_AUTO_SWITCH_MINUTES,
   type GateSettings,
 } from './gate.ts'
+import { setHostLanguage } from './ui-language.ts'
 import { decideAutoSwitch, freshThrottledIds, hasFailoverCandidate, isThrottleSwitchAllowed, type SwitchableAccount } from './auto-switch.ts'
 import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
@@ -932,6 +933,17 @@ export function apply(ctx: any, config: Config = {}): void {
           const route = url.pathname.slice(API_PREFIX.length) || '/'
 
           try {
+            // Язык интерфейса: панель хранит выбор в localStorage, но имена моделей
+            // и имя провайдера отдаёт **хост** в штатный селектор DSH. Без этого
+            // запроса названия моделей там остались бы китайскими (0.7.2).
+            if (req.method === 'POST' && route === '/ui') {
+              const body = await readJsonBody(req)
+              const applied = setHostLanguage(body?.language)
+              logger.info?.(`deepseek-web: язык интерфейса переключён на "${applied}"`)
+              sendJson(res, 200, { ok: true, language: applied })
+              return
+            }
+
             // 请求节流设置（设置页的开关与滑块）——读写都即时生效，并持久化到 gate.json
             if (req.method === 'GET' && route === '/gate') {
               sendJson(res, 200, {

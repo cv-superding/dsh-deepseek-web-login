@@ -13,6 +13,7 @@ import { join as joinPath } from 'node:path'
 import { webLoginDir } from './paths.ts'
 import { AdapterLlmError, httpErrorCode, maskIdentifier, readAuth, hasUsableAuth, type WebAuth } from './auth.ts'
 import { staleAuthMessage } from './probe.ts'
+import { hostT } from './ui-language.ts'
 import { createRequestGate, DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MAX_REF_IMAGES, DEFAULT_MIN_REQUEST_INTERVAL_MS, type RequestGate } from './gate.ts'
 import { summarizeCookieLife, type CookieLifeSummary } from './cookies.ts'
 import {
@@ -556,8 +557,11 @@ function modelInfoFor(provider: string, spec: ModelSpec, requestedId?: string) {
   return {
     provider,
     id: requestedId ?? spec.id,
-    name: spec.name,
-    description: spec.description,
+    // Имя и описание уходят в **штатный** селектор моделей DSH, а он рисуется
+    // хостом, а не нашей панелью. Поэтому переводим здесь, на host-стороне
+    // (`hostT` читает язык, который панель записала через `POST /ui`).
+    name: hostT(spec.name),
+    description: hostT(spec.description),
     // 图片输入走「上传成文件 + ref_file_ids」通道（网页端看图的实际机制），
     // 已实测：上传左红右蓝 PNG 后模型准确答出「左红色，右=蓝色」。
     inputModalities: ['text', 'image'] as const,
@@ -772,7 +776,8 @@ export function createAdapter(deps: AdapterDeps) {
 
   const adapter = {
     providerInfo(provider: string) {
-      return { id: provider, name: 'DeepSeek 网页版（免费）' }
+      // Имя провайдера тоже показывается в штатных списках DSH — переводим на host-стороне.
+      return { id: provider, name: hostT('DeepSeek 网页版（免费）') }
     },
 
     /**

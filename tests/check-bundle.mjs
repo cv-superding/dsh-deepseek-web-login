@@ -708,7 +708,9 @@ const checks = {
     client.includes('dsw-grouphead') &&
     client.includes('dsw-groupsel') &&
     client.includes('dsw-accounts-collapsed-groups') &&
-    client.includes('new Option("未分组", "")'),
+    // 0.7.0 起分组文案走 i18n，字面量被 T(...) 包住 —— 判据认两种形态，
+    // 但「未分组」这个**原文**必须还在（翻译层不许吃掉 key）。
+    /new Option\((?:T\()?"未分组"\)?, ""\)/.test(client),
   'client 按钮文案：重登 / 备注 / 校验全部 / 新建分组':
     client.includes('"重登"') &&
     client.includes('"备注"') &&
