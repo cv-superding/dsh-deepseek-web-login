@@ -14,6 +14,7 @@ import {
 } from '../file-picker.ts'
 import { describeCookieLife, summarizeCookieLife } from '../cookies.ts'
 import { accountsSignature, shouldSyncAccounts } from '../account-sync.ts'
+import { t, tf, getLocale, setLocale, onLocaleChange, LOCALES, type LocaleId } from './i18n.ts'
 
 type ClientContext = {
   slots: any
@@ -148,6 +149,13 @@ font-size:13px;line-height:1.6;color:var(--fg);max-width:760px;padding:2px 0 12p
    原来是 14px/500，跟 13px 的正文只差 1px，整页因此没有"起点"。 */
 .dsw-title{margin:0 0 4px;font-size:15px;font-weight:600;line-height:1.4;letter-spacing:-.01em;color:var(--fg)}
 .dsw-sub{margin:0 0 var(--sp-5);font-size:12px;line-height:1.65;color:var(--fg2);max-width:64ch}
+.dsw-title-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 4px}
+.dsw-title-row .dsw-title{margin:0;flex:1;min-width:0}
+.dsw-lang{display:flex;align-items:center;gap:6px;flex-shrink:0;font-size:12px;color:var(--fg-muted,var(--fb-muted))}
+.dsw-lang-label{opacity:.85;white-space:nowrap}
+.dsw-lang-select{font:inherit;font-size:12px;padding:4px 10px;border-radius:var(--r-sm,6px);border:1px solid var(--border,var(--fb-border));background:var(--bg2,var(--fb-bg2,var(--fb-bg)));color:var(--fg,var(--fb-fg));cursor:pointer;min-width:7.5em}
+.dsw-lang-select:focus-visible{outline:2px solid var(--accent,var(--fb-accent));outline-offset:1px}
+
 /* provider 名带连字符，万一折行会断成 deepseek- / web（看着像故障）—— 整词不拆 */
 .dsw-nobreak{white-space:nowrap}
 /* 分组不再用"七个一模一样的描边盒子"。
@@ -376,22 +384,22 @@ function relTime(input?: string | null): string {
   const at = new Date(input).getTime()
   if (!Number.isFinite(at)) return ''
   const diff = Date.now() - at
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  return `${Math.floor(diff / 86_400_000)} 天前`
+  if (diff < 60_000) return t('刚刚')
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} ${t('分钟前')}`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} ${t('小时前')}`
+  return `${Math.floor(diff / 86_400_000)} ${t('天前')}`
 }
 
 /** 倒计时：还剩 2 小时 13 分 / 已解除。 */
 function countdown(untilMs?: number | null): string {
   if (!untilMs || !Number.isFinite(untilMs)) return ''
   const left = untilMs - Date.now()
-  if (left <= 0) return '已解除'
+  if (left <= 0) return t('已解除')
   const totalMinutes = Math.ceil(left / 60_000)
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
-  if (hours > 0) return `剩余 ${hours} 小时 ${minutes} 分`
-  return `剩余 ${minutes} 分`
+  if (hours > 0) return tf('剩余 {0} 小时 {1} 分', hours, minutes)
+  return tf('剩余 {0} 分', minutes)
 }
 
 function el(tag: string, cls?: string, text?: string): HTMLElement {
@@ -404,10 +412,18 @@ function el(tag: string, cls?: string, text?: string): HTMLElement {
 /** 面板本体：命令式 DOM（生态既有插件同款做法），挂在 React 容器里。 */
 function Panel(): any {
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const [localeEpoch, setLocaleEpoch] = useState(0)
+
+  useEffect(() => {
+    const onChanged = () => setLocaleEpoch((n) => n + 1)
+    window.addEventListener('dsw-locale-changed', onChanged)
+    return () => window.removeEventListener('dsw-locale-changed', onChanged)
+  }, [])
 
   useEffect(() => {
     const root = hostRef.current
     if (!root) return
+    root.replaceChildren() // clear previous locale render
     let disposed = false
     let timer: number | undefined
 
@@ -415,7 +431,7 @@ function Panel(): any {
     style.textContent = styles
 
     const page = el('div', 'dsw-page')
-    const title = el('h3', 'dsw-title', 'DeepSeek 网页登录（免费模型）')
+    const title = el('h3', 'dsw-title', t('DeepSeek 网页登录（免费模型）'))
     // 副标题的宽度是"预算"问题，不是随便写的：
     // 上一版（78 字）单行要 558px，而宿主面板的内容宽约 560px —— 正好压在折行边界上。
     // 「账号」页比「模型」页高，面板因此出现纵向滚动条，内容宽度少十几像素，
@@ -423,11 +439,31 @@ function Panel(): any {
     // 现在这版约 467px，留 ~90px 余量，切标签/缩放窗口都不会再翻行。
     // ⚠️ 以后改这句话，请保持单行宽度 ≲ 470px（量法：white-space:nowrap 的 span 取 getBoundingClientRect）。
     const sub = el('p', 'dsw-sub')
-    sub.append('用 chat.deepseek.com 的登录态驱动 DSH，不需要 API Key（provider：')
+    sub.append(t('用 chat.deepseek.com 的登录态驱动 DSH，不需要 API Key（provider：'))
     sub.append(el('span', 'dsw-nobreak', 'deepseek-web'))
     sub.append('）')
 
-    page.append(style, title, sub)
+    // Language switcher — top-right of the title row so it is always visible
+    const titleRow = el('div', 'dsw-title-row')
+    const langBar = el('div', 'dsw-lang')
+    langBar.append(el('span', 'dsw-lang-label', t('界面语言')))
+    const langSel = document.createElement('select')
+    langSel.className = 'dsw-lang-select'
+    langSel.setAttribute('aria-label', t('界面语言'))
+    for (const loc of LOCALES) {
+      const opt = document.createElement('option')
+      opt.value = loc.id
+      opt.textContent = loc.label
+      if (loc.id === getLocale()) opt.selected = true
+      langSel.append(opt)
+    }
+    langSel.addEventListener('change', () => {
+      setLocale(langSel.value as LocaleId)
+    })
+    langBar.append(langSel)
+    titleRow.append(title, langBar)
+
+    page.append(style, titleRow, sub)
 
     // ── 操作反馈：常驻在标签栏之上 ──────────────────────────────
     // 拆成标签页后，在「账号」页点按钮的反馈若落在别的页里就等于看不见，所以它不归属任何一页。
@@ -446,13 +482,13 @@ function Panel(): any {
     //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
     const TAB_KEYS = ['account', 'model', 'token', 'gate', 'transport', 'context', 'about'] as const
     const TAB_LABELS: Record<string, string> = {
-      account: '账号',
-      model: '模型',
-      token: 'Token 统计',
-      gate: '防风控',
-      transport: '传输层',
-      context: '上下文',
-      about: '关于',
+      account: t('账号'),
+      model: t('模型'),
+      token: t('Token 统计'),
+      gate: t('防风控'),
+      transport: t('传输层'),
+      context: t('上下文'),
+      about: t('关于'),
     }
     const accountPane = el('div', 'dsw-pane')
     const modelPane = el('div', 'dsw-pane')
@@ -505,7 +541,7 @@ function Panel(): any {
     //   账号库    我有哪些号 / 怎么加、切、删、导入导出
     // 子页签用**分段胶囊**，与一级的下划线标签在视觉上分层。
     const ACCT_KEYS = ['status', 'library'] as const
-    const ACCT_LABELS: Record<string, string> = { status: '登录状态', library: '账号库' }
+    const ACCT_LABELS: Record<string, string> = { status: t('登录状态'), library: t('账号库') }
     const acctStatusPane = el('div', 'dsw-pane')
     const acctLibraryPane = el('div', 'dsw-pane')
     const acctPanes: Record<string, HTMLElement> = { status: acctStatusPane, library: acctLibraryPane }
@@ -538,8 +574,8 @@ function Panel(): any {
     const loginCard = el('div', 'dsw-card')
     const loginHead = el('div', 'dsw-cardhead')
     const loginTitle = el('div')
-    loginTitle.append(el('span', 'name', '登录状态'))
-    const badge = el('span', 'dsw-badge off', '⚪ 未登录')
+    loginTitle.append(el('span', 'name', t('登录状态')))
+    const badge = el('span', 'dsw-badge off', t('⚪ 未登录'))
     loginTitle.append(badge)
     loginHead.append(loginTitle)
     loginCard.append(loginHead)
@@ -564,53 +600,53 @@ function Panel(): any {
       const text = countdown(activeLimitUntilMs)
       limitRow.style.display = ''
       limitRow.textContent =
-        text === '已解除'
-          ? `账号级限制已解除（${shortTime(activeLimitUntilMs)}）。`
-          : `⚠️ 账号级限制：${text}（${shortTime(activeLimitUntilMs)} 解除，期间生成会被拒）`
+        text === t('已解除')
+          ? tf('账号级限制已解除（{0}）。', shortTime(activeLimitUntilMs))
+          : tf('⚠️ 账号级限制：{0}（{1} 解除，期间生成会被拒）', text, shortTime(activeLimitUntilMs))
     }
 
     // ── 账号卡（退出 / 换号）──
     // 为什么要单独一张卡：退出登录以前只作为一个按钮塞在「手动粘贴 Token」那张卡的角落里，
     // 用户根本找不到（实测反馈）。退出账号是高频操作，必须显眼、且要能换号。
     const accountCard = el('div', 'dsw-card')
-    accountCard.append(el('div', 'dsw-cardhead', '当前账号'))
+    accountCard.append(el('div', 'dsw-cardhead', t('当前账号')))
     const accountLine = el('div', 'dsw-kv')
     accountCard.append(accountLine)
     const accountActions = el('div', 'dsw-row')
     accountActions.style.marginTop = '8px'
-    const logoutBtn = el('button', 'dsw-btn danger', '退出当前账号') as HTMLButtonElement
-    const switchBtn = el('button', 'dsw-btn ghost', '退出并登录其它账号') as HTMLButtonElement
+    const logoutBtn = el('button', 'dsw-btn danger', t('退出当前账号')) as HTMLButtonElement
+    const switchBtn = el('button', 'dsw-btn ghost', t('退出并登录其它账号')) as HTMLButtonElement
     accountActions.append(logoutBtn, switchBtn)
     accountCard.append(accountActions)
     const accountHint = el(
       'p',
       'dsw-hint',
-      '⚠️ 「退出」= 把该账号从账号库移除，不是"只登出"：本地凭证与浏览器登录态会一起清掉。' +
-        '想留住它就先「导出备份」；只是想换个号用，去「账号库 → 登录新账号」。',
+      t('⚠️ 「退出」= 把该账号从账号库移除，不是"只登出"：本地凭证与浏览器登录态会一起清掉。') +
+        t('想留住它就先「导出备份」；只是想换个号用，去「账号库 → 登录新账号」。'),
     )
     accountCard.append(accountHint)
 
     const loginActions = el('div', 'dsw-row')
     loginActions.style.marginTop = '10px'
-    const browserBtn = el('button', 'dsw-btn', '浏览器窗口登录') as HTMLButtonElement
-    const externalBtn = el('button', 'dsw-btn ghost', '用我的默认浏览器登录') as HTMLButtonElement
-    const recoverBtn = el('button', 'dsw-btn ghost', '从已登录窗口恢复') as HTMLButtonElement
-    const refreshBtn = el('button', 'dsw-btn ghost', '刷新状态') as HTMLButtonElement
+    const browserBtn = el('button', 'dsw-btn', t('浏览器窗口登录')) as HTMLButtonElement
+    const externalBtn = el('button', 'dsw-btn ghost', t('用我的默认浏览器登录')) as HTMLButtonElement
+    const recoverBtn = el('button', 'dsw-btn ghost', t('从已登录窗口恢复')) as HTMLButtonElement
+    const refreshBtn = el('button', 'dsw-btn ghost', t('刷新状态')) as HTMLButtonElement
     loginActions.append(browserBtn, externalBtn, recoverBtn, refreshBtn)
     loginCard.append(loginActions)
     loginCard.append(
       el(
         'p',
         'dsw-hint',
-        '「用我的默认浏览器登录」= 用系统浏览器打开 chat.deepseek.com（网页端若提示「使用环境异常」，走这条）。' +
-          '外部浏览器的登录态插件抓不到，所以要用 F12 控制台取 token 粘到下面那张卡（命令已备好）。',
+        t('「用我的默认浏览器登录」= 用系统浏览器打开 chat.deepseek.com（网页端若提示「使用环境异常」，走这条）。') +
+          t('外部浏览器的登录态插件抓不到，所以要用 F12 控制台取 token 粘到下面那张卡（命令已备好）。'),
       ),
     )
     loginCard.append(
       el(
         'p',
         'dsw-hint',
-        '「从已登录窗口恢复」= 复用上次登录过的窗口分区直接取凭证（免重新登录），凭证丢失时用它救急。',
+        t('「从已登录窗口恢复」= 复用上次登录过的窗口分区直接取凭证（免重新登录），凭证丢失时用它救急。'),
       ),
     )
     acctStatusPane.append(loginCard, accountCard)
@@ -646,9 +682,10 @@ function Panel(): any {
         set textContent(value: string) {
           text = value ?? ''
           node.textContent = text
-          node.className = /失败|错误|无法|不对|⚠️/.test(text)
+          // Language-agnostic: emoji markers + common error/success stems in zh/ru/en
+          node.className = /失败|错误|无法|不对|⚠️|❌|не уда|ошиб|failed|error|unable/i.test(text)
             ? 'dsw-msg err'
-            : /^(✅|已切换|已移除|已捕获|已保存|已原地)/.test(text)
+            : /^(✅|已切换|已移除|已捕获|已保存|已原地|Переключ|Удал|Захв|Сохран|Switched|Removed|Captured|Saved)/.test(text)
               ? 'dsw-msg ok'
               : 'dsw-hint dsw-gate-msg'
         },
@@ -657,7 +694,7 @@ function Panel(): any {
 
     const accountsCard = el('div', 'dsw-card')
     const accountsHead = el('div', 'dsw-cardhead')
-    accountsHead.append(el('span', 'name', '账号库'))
+    accountsHead.append(el('span', 'name', t('账号库')))
     const accountsBadge = el('span', 'dsw-badge off', '—')
     accountsHead.append(accountsBadge)
     accountsCard.append(accountsHead)
@@ -665,63 +702,62 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '💡 保存过的账号都在本机，点「切换」即时生效、不用重新登录 —— 切换后从下一次请求开始生效。',
+        t('💡 保存过的账号都在本机，点「切换」即时生效、不用重新登录 —— 切换后从下一次请求开始生效。'),
       ),
     )
 
     const accountsList = el('ul', 'dsw-accounts')
     accountsCard.append(accountsList)
-    const accountsEmpty = el('p', 'dsw-hint', '账号库是空的 —— 用上面的「登录」或「手动粘贴 Token」添加一个。')
+    const accountsEmpty = el('p', 'dsw-hint', t('账号库是空的 —— 用上面的「登录」或「手动粘贴 Token」添加一个。'))
     accountsCard.append(accountsEmpty)
 
     const accountsIOPanel = el('div', 'dsw-row')
     accountsIOPanel.style.marginTop = '10px'
     // 「登录新账号」：以前账号库**根本没有"再加一个号"的入口** ——
     // 两个退出按钮都会先把这个号从库里删掉，所以库永远攒不到第二个账号。
-    const addAccountBtn = el('button', 'dsw-btn', '登录新账号（添加）') as HTMLButtonElement
-    const exportBtn = el('button', 'dsw-btn ghost', '导出备份…') as HTMLButtonElement
-    const importBtn = el('button', 'dsw-btn ghost', '导入备份…') as HTMLButtonElement
+    const addAccountBtn = el('button', 'dsw-btn', t('登录新账号（添加）')) as HTMLButtonElement
+    const exportBtn = el('button', 'dsw-btn ghost', t('导出备份…')) as HTMLButtonElement
+    const importBtn = el('button', 'dsw-btn ghost', t('导入备份…')) as HTMLButtonElement
     // 「校验全部」：对库里每个账号做一次**只读探活**（零额度）—— 自动探活 30 分钟才一次，
     // 而"我刚在浏览器里动过这个号，它现在到底还行不行"是随时会冒出来的问题。
     // 以前只能等，或者切过去试（那要发一次生成请求、烧额度）。
     //
     // ⚠️ 命名避开「刷新状态」：那个名字已经被「当前账号」卡片上的按钮占了
     //（它刷的是 `/status`，只看当前那个号）—— 两个同名按钮在同一个面板里会互相误导。
-    const refreshAccountsBtn = el('button', 'dsw-btn ghost', '校验全部') as HTMLButtonElement
-    refreshAccountsBtn.title = '对每个账号做一次只读校验（零额度）：刷新登录态、补上账号名、清掉已恢复的失败标记'
+    const refreshAccountsBtn = el('button', 'dsw-btn ghost', t('校验全部')) as HTMLButtonElement
+    refreshAccountsBtn.title = t('对每个账号做一次只读校验（零额度）：刷新登录态、补上账号名、清掉已恢复的失败标记')
     // 「一键重登」（0.6.14，0.6.15 挪到这里）：用本机存的邮箱密码依次自动重登 ——
     // ⚠️ 位置很重要：第一版挂在"防风控"页的设置卡里，用户在「账号库」里根本找不到
     //（2026-10-01 反馈）。它和「登录新账号」是同一类动作（弄到可用凭证），就该放一起。
-    const reloginAllBtn = el('button', 'dsw-btn', '一键重登') as HTMLButtonElement
+    const reloginAllBtn = el('button', 'dsw-btn', t('一键重登')) as HTMLButtonElement
     reloginAllBtn.title =
-      '用本机保存的邮箱密码，把所有匹配得到的账号依次自动重登。' +
-      '每个号会起一次无头浏览器（无窗口、跑完即杀），所以是串行的、需要等一会儿。'
-    const newGroupBtn = el('button', 'dsw-btn ghost', '新建分组') as HTMLButtonElement
-    newGroupBtn.title = '给账号分类，只影响列表的显示方式 —— 不参与切号、也不影响会话复用与清理'
+      t('用本机保存的邮箱密码，把所有匹配得到的账号依次自动重登。') +
+      t('每个号会起一次无头浏览器（无窗口、跑完即杀），所以是串行的、需要等一会儿。')
+    const newGroupBtn = el('button', 'dsw-btn ghost', t('新建分组')) as HTMLButtonElement
+    newGroupBtn.title = t('给账号分类，只影响列表的显示方式 —— 不参与切号、也不影响会话复用与清理')
     accountsIOPanel.append(addAccountBtn, reloginAllBtn, exportBtn, importBtn, refreshAccountsBtn, newGroupBtn)
     accountsCard.append(accountsIOPanel)
     // 「一键重登」的点击处理：结果走**全局提示条**（常驻在标签栏之上）——
     // 这样在子标签之间切换也看得见，不用在卡片里再塞一个 hint 元素。
     reloginAllBtn.addEventListener('click', () => {
       reloginAllBtn.disabled = true
-      showMessage('正在自动重登（每个号起一次无头浏览器，请稍候）…')
+      showMessage(t('正在自动重登（每个号起一次无头浏览器，请稍候）…'))
       void api('/login/relogin-all', { method: 'POST', body: '{}' })
         .then((result: any) => {
           const rows: any[] = Array.isArray(result?.results) ? result.results : []
           if (rows.length === 0) {
-            showMessage(result?.error ?? '没有可重登的账号', 'err')
+            showMessage(result?.error ?? t('没有可重登的账号'), 'err')
             return
           }
           const failed = rows.filter((r) => !r.ok)
+          const failDetail = failed.map((r) => `${r.display}（${String(r.message ?? '').slice(0, 40)}）`).join('　')
           showMessage(
-            `重登完成 ${result?.okCount ?? 0}/${rows.length}` +
-              (failed.length
-                ? `；失败：${failed.map((r) => `${r.display}（${String(r.message ?? '').slice(0, 40)}）`).join('　')}`
-                : `：${rows.map((r) => r.display).join('　')}`),
+            tf('重登完成 {0}/{1}', result?.okCount ?? 0, rows.length) +
+              (failed.length ? tf('；失败：{0}', failDetail) : `：${rows.map((r) => r.display).join('　')}`),
             failed.length ? '' : 'ok',
           )
         })
-        .catch((error: any) => showMessage(`重登失败：${error?.message ?? error}`, 'err'))
+        .catch((error: any) => showMessage(tf('重登失败：{0}', error?.message ?? error), 'err'))
         .finally(() => {
           reloginAllBtn.disabled = false
         })
@@ -734,9 +770,9 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '💡 「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——' +
-          '加完在列表里点「切换」即可使用。某个账号标着「需要重新登录」时，用它自己那行上的按钮修 ——' +
-          '那条路不清浏览器登录态，能复用就直接复用。导出/导入会弹系统对话框，自己选位置和文件。',
+        t('💡 「登录新账号」会先清掉上次的浏览器登录态（库里已有的账号不受影响），登录后新账号只入库、不切换当前账号 ——') +
+          t('加完在列表里点「切换」即可使用。某个账号标着「需要重新登录」时，用它自己那行上的按钮修 ——') +
+          t('那条路不清浏览器登录态，能复用就直接复用。导出/导入会弹系统对话框，自己选位置和文件。'),
       ),
     )
     const accountsMsg = createMsgNode()
@@ -745,7 +781,7 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '⚠️ 导出的备份文件就是可完整登录的凭证（等同于账号本身）—— 别分享、别提交到仓库。',
+        t('⚠️ 导出的备份文件就是可完整登录的凭证（等同于账号本身）—— 别分享、别提交到仓库。'),
       ),
     )
     acctLibraryPane.append(accountsCard)
@@ -761,7 +797,7 @@ function Panel(): any {
       const collapsed = collapsedGroups.has(key)
       const head = el('div', 'dsw-grouphead')
       const toggle = el('span', 'gtoggle', collapsed ? '▸' : '▾')
-      toggle.title = collapsed ? '展开' : '折叠'
+      toggle.title = collapsed ? t('展开') : t('折叠')
       toggle.addEventListener('click', () => {
         if (collapsedGroups.has(key)) collapsedGroups.delete(key)
         else collapsedGroups.add(key)
@@ -770,14 +806,14 @@ function Panel(): any {
         redrawAccounts()
       })
       head.append(toggle, el('span', 'gname', String(section?.name ?? '')))
-      head.append(el('span', 'gcount', `${Array.isArray(section?.accounts) ? section.accounts.length : 0} 个`))
+      head.append(el('span', 'gcount', tf('{0} 个', Array.isArray(section?.accounts) ? section.accounts.length : 0)))
       head.append(el('span', 'gspacer'))
       if (section?.groupId) {
-        const renameGroupBtn = el('button', 'dsw-btn ghost', '改名') as HTMLButtonElement
+        const renameGroupBtn = el('button', 'dsw-btn ghost', t('改名')) as HTMLButtonElement
         renameGroupBtn.addEventListener('click', () => {
           const input = el('input', 'dsw-labelinput') as HTMLInputElement
           input.value = String(section.name ?? '')
-          input.placeholder = '分组名'
+          input.placeholder = t('分组名')
           head.append(input)
           input.focus()
           let settled = false
@@ -795,16 +831,16 @@ function Panel(): any {
           })
           input.addEventListener('blur', commit)
         })
-        const deleteGroupBtn = el('button', 'dsw-btn danger', '删除') as HTMLButtonElement
-        deleteGroupBtn.title = '只删分组本身；组里的账号会回到「未分组」，账号与凭证都不动'
+        const deleteGroupBtn = el('button', 'dsw-btn danger', t('删除')) as HTMLButtonElement
+        deleteGroupBtn.title = t('只删分组本身；组里的账号会回到「未分组」，账号与凭证都不动')
         let armed = false
         deleteGroupBtn.addEventListener('click', () => {
           if (!armed) {
             armed = true
-            deleteGroupBtn.textContent = '确认删除？'
+            deleteGroupBtn.textContent = t('确认删除？')
             window.setTimeout(() => {
               armed = false
-              deleteGroupBtn.textContent = '删除'
+              deleteGroupBtn.textContent = t('删除')
             }, 4000)
             return
           }
@@ -819,7 +855,7 @@ function Panel(): any {
       const items: any[] = Array.isArray(data?.accounts) ? data.accounts : []
       const groups: any[] = Array.isArray(data?.groups) ? data.groups : []
       const sections: any[] = Array.isArray(data?.sections) ? data.sections : []
-      accountsBadge.textContent = `${items.length} 个`
+      accountsBadge.textContent = tf('{0} 个', items.length)
       accountsBadge.className = `dsw-badge ${items.length ? 'on' : 'off'}`
       accountsEmpty.hidden = items.length > 0
       accountsList.textContent = ''
@@ -849,14 +885,14 @@ function Panel(): any {
       void (async () => {
         // 这里刻意不写死"会复用登录态" —— 宿主在「这条账号已被标记失效」时会走清理路径
         // （0.1.75），该说什么由它随响应返回（下面用 prep.hint），免得界面与实际行为对不上。
-        accountsMsg.textContent = `正在校验「${title}」并准备登录窗口……`
-        paintRowMsg(id, '正在校验登录态并准备登录窗口……', 'info')
+        accountsMsg.textContent = tf('正在校验「{0}」并准备登录窗口……', title)
+        paintRowMsg(id, t('正在校验登录态并准备登录窗口……'), 'info')
         try {
           const prep = await api('/login/relogin', { method: 'POST', body: JSON.stringify({ id }) })
           // 0.6.6：宿主会先做一次只读探活 —— 凭证还能用的话到这里就结束了，
           // **不会打开浏览器**（这是「一键重登」那一半：网络抖动过后的号，一点就好）。
           if (prep?.alreadyValid) {
-            const text = String(prep.hint ?? '这条账号校验通过，不需要重新登录')
+            const text = String(prep.hint ?? t('这条账号校验通过，不需要重新登录'))
             accountsMsg.textContent = text
             paintRowMsg(id, `✅ ${text}`, 'ok')
             await loadAccounts()
@@ -864,7 +900,7 @@ function Panel(): any {
           }
           if (prep?.ok === false) {
             // 网络类失败走到这里：只报原因，**不清登录态、不开窗口**（重登此时必然白敲）。
-            const text = String(prep?.error ?? '未知原因')
+            const text = String(prep?.error ?? t('未知原因'))
             accountsMsg.textContent = text
             paintRowMsg(id, `⚠️ ${text}`, 'warn')
             return
@@ -872,28 +908,28 @@ function Panel(): any {
           boostUntil = Date.now() + 300_000
           const opened = String(
             prep?.hint ??
-              '登录窗口已打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次……',
+              t('登录窗口已打开：如果浏览器里还留着这个账号的登录态会立刻复用，否则在里面重新登录一次……'),
           )
           accountsMsg.textContent = opened
           paintRowMsg(id, opened, 'info')
           const result = await api('/login/browser', { method: 'POST', body: '{}' })
           if (result?.started === false) {
-            const text = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
+            const text = tf('打开登录窗口失败：{0}（可改用「手动粘贴 Token」）', result?.reason ?? t('未知原因'))
             accountsMsg.textContent = text
             paintRowMsg(id, `❌ ${text}`, 'err')
             return
           }
           const done = result?.relogin
-            ? `「${title}」的凭证已原地更新（同一条记录、当前账号未变），旧的失败标记也清掉了。`
+            ? tf('「{0}」的凭证已原地更新（同一条记录、当前账号未变），旧的失败标记也清掉了。', title)
             : result?.added
-              ? `「${title}」已加入账号库 —— 当前使用的账号没有改变。`
-              : '已捕获并保存凭证。'
+              ? tf('「{0}」已加入账号库 —— 当前使用的账号没有改变。', title)
+              : t('已捕获并保存凭证。')
           accountsMsg.textContent = done
           await loadAccounts()
           // 重建列表后在**新的那一行**写结果（顺序反了会被冲掉）。
           paintRowMsg(id, `✅ ${done}`, 'ok')
         } catch (error: any) {
-          const message = `重新登录失败：${error?.message ?? error}`
+          const message = tf('重新登录失败：{0}', error?.message ?? error)
           accountsMsg.textContent = message
           paintRowMsg(id, `❌ ${message}`, 'err')
         } finally {
@@ -909,13 +945,13 @@ function Panel(): any {
       title.append(el('span', undefined, item.title || item.id))
       // 「邮箱 / 手机号」标志（0.6.13）：多号并存时一眼看出这号是哪种标识
       // （判据在主机侧 `identifierKindOf`，判不出来就不显示 —— 不瞎猜）。
-      if (item.identifierKind === 'email') title.append(el('span', 'dsw-badge kind', '邮箱'))
-      else if (item.identifierKind === 'mobile') title.append(el('span', 'dsw-badge kind', '手机号'))
-      if (item.isActive) title.append(el('span', 'dsw-badge on', '✅ 当前'))
-      if (item.unverified) title.append(el('span', 'dsw-badge off', '❔ 未校验'))
+      if (item.identifierKind === 'email') title.append(el('span', 'dsw-badge kind', t('邮箱')))
+      else if (item.identifierKind === 'mobile') title.append(el('span', 'dsw-badge kind', t('手机号')))
+      if (item.isActive) title.append(el('span', 'dsw-badge on', t('✅ 当前')))
+      if (item.unverified) title.append(el('span', 'dsw-badge off', t('❔ 未校验')))
       const limited = item.limit && Number.isFinite(item.limit.untilMs) && item.limit.untilMs > Date.now()
       if (limited) {
-        title.append(el('span', 'dsw-badge off', `⏳ 受限至 ${shortTime(item.limit.untilMs)}`))
+        title.append(el('span', 'dsw-badge off', tf('⏳ 受限至 {0}', shortTime(item.limit.untilMs))))
       }
       // 徽章从「校验失败」改成**明确的行动指令**：原来只写"失败"，用户不知道该干嘛，
       // 也看不出这号还能不能用。
@@ -923,8 +959,8 @@ function Panel(): any {
       // 网络类失败（断网 / 超时 / 机器休眠）凭证往往是好的。以前两者共用一个字段，
       // 一次休眠就把整库标成"需要重新登录"，点「重登」还会清掉浏览器登录态 ⇒
       // 用户被迫重敲手机号 + 验证码（2026-09-29 现场，9 个账号同时变红）。
-      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', '❌ 需要重新登录'))
-      else if (item.lastCheckError) title.append(el('span', 'dsw-badge off', '⚠️ 未能校验（网络）'))
+      if (item.lastVerifyError) title.append(el('span', 'dsw-badge err', t('❌ 需要重新登录')))
+      else if (item.lastCheckError) title.append(el('span', 'dsw-badge off', t('⚠️ 未能校验（网络）')))
       main.append(title)
 
       // 元信息只留"什么时候捕获的 / 上次校验是什么时候"。
@@ -932,8 +968,8 @@ function Panel(): any {
       // ② 整段 cookie 摘要（`5 项 · 3 会话级 · 2 持久级 · thumbcache 还剩 399 天`）——
       // 又长又误导（天数跟几小时就失效的真实寿命差两个数量级）。
       const meta: string[] = []
-      if (item.capturedAt) meta.push(`${shortTime(item.capturedAt)} 捕获`)
-      meta.push(item.lastVerifiedAt ? `最近校验 ${relTime(item.lastVerifiedAt)}` : '尚未校验')
+      if (item.capturedAt) meta.push(tf('{0} 捕获', shortTime(item.capturedAt)))
+      meta.push(item.lastVerifiedAt ? tf('最近校验 {0}', relTime(item.lastVerifiedAt)) : t('尚未校验'))
       main.append(el('div', 'dsw-account-meta', meta.join(' · ')))
 
       // 探活失败 → 不只报状态，给一条可执行的路径。
@@ -947,7 +983,7 @@ function Panel(): any {
           el(
             'div',
             'dsw-account-fix',
-            `⚠️ ${relTime(item.lastVerifyError.at)}校验失败（登录态已失效）：${item.lastVerifyError.message}`,
+            tf('⚠️ {0}校验失败（登录态已失效）：{1}', relTime(item.lastVerifyError.at), item.lastVerifyError.message),
           ),
         )
       } else if (item.lastCheckError) {
@@ -957,7 +993,7 @@ function Panel(): any {
           el(
             'div',
             'dsw-account-fix',
-            `⚠️ ${relTime(item.lastCheckError.at)}未能校验（网络问题，账号未必失效）：${item.lastCheckError.message}`,
+            tf('⚠️ {0}未能校验（网络问题，账号未必失效）：{1}', relTime(item.lastCheckError.at), item.lastCheckError.message),
           ),
         )
       }
@@ -973,32 +1009,32 @@ function Panel(): any {
       // 文案从「重新登录」缩成「重登」：动作列现在要放下切换/备注/归组/移除，太长会挤成两行。
       // 0.6.6：网络类失败也给这个按钮 —— 点它**先探活**，能用就直接恢复（不必敲密码）。
       if (item.lastVerifyError || item.lastCheckError) {
-        const reloginBtn = el('button', 'dsw-btn dsw-preset', '重登') as HTMLButtonElement
+        const reloginBtn = el('button', 'dsw-btn dsw-preset', t('重登')) as HTMLButtonElement
         reloginBtn.title =
-          '点一下会先做一次只读校验：凭证还能用就立刻恢复（不打开浏览器、不用敲密码）；' +
-          '只有确认授权失效（401/过期）时才会清掉登录态、让你重新登录一次。' +
-          '捕获后原地更新这条记录，不新增、也不切换当前账号'
+          t('点一下会先做一次只读校验：凭证还能用就立刻恢复（不打开浏览器、不用敲密码）；') +
+          t('只有确认授权失效（401/过期）时才会清掉登录态、让你重新登录一次。') +
+          t('捕获后原地更新这条记录，不新增、也不切换当前账号')
         reloginBtn.addEventListener('click', () => reloginAccount(item.id, item.title || item.id))
         actions.append(reloginBtn)
       }
       if (item.isActive) {
-        actions.append(el('span', 'dsw-hint', '使用中'))
+        actions.append(el('span', 'dsw-hint', t('使用中')))
       } else {
-        const useBtn = el('button', 'dsw-btn ghost dsw-preset', '切换') as HTMLButtonElement
+        const useBtn = el('button', 'dsw-btn ghost dsw-preset', t('切换')) as HTMLButtonElement
         useBtn.addEventListener('click', () => void switchToAccount(item.id, useBtn))
         actions.append(useBtn)
       }
 
       // 文案叫「备注」而不是「重命名」：它写的是 `label`（备注名），**不是**改显示名 ——
       // 原来的名字让人以为是重命名账号本身，结果 7 个账号的 label 一直是空的（功能没人发现）。
-      const renameBtn = el('button', 'dsw-btn ghost dsw-preset', '备注') as HTMLButtonElement
+      const renameBtn = el('button', 'dsw-btn ghost dsw-preset', t('备注')) as HTMLButtonElement
       let editing = false
       renameBtn.addEventListener('click', () => {
         if (editing) return
         editing = true
         const input = el('input', 'dsw-labelinput') as HTMLInputElement
         input.value = item.label || ''
-        input.placeholder = '备注名，如「工作号」'
+        input.placeholder = t('备注名，如「工作号」')
         main.append(input)
         input.focus()
         let settled = false
@@ -1021,24 +1057,24 @@ function Panel(): any {
       // 归组用**下拉**而不是拖拽：这套面板是手写 DOM，拖拽的命中判定、与轮询重建的冲突
       // 都太容易出坑；下拉最少点击，而且天然幂等（"设成某个值"而不是"挪到某个位置"）。
       const groupSel = el('select', 'dsw-groupsel') as HTMLSelectElement
-      groupSel.title = '放进某个分组（只影响显示方式，不影响切号与会话复用）'
-      groupSel.append(new Option('未分组', ''))
+      groupSel.title = t('放进某个分组（只影响显示方式，不影响切号与会话复用）')
+      groupSel.append(new Option(t('未分组'), ''))
       for (const group of groups) groupSel.append(new Option(String(group?.name ?? ''), String(group?.id ?? '')))
       groupSel.value = String(item.groupId ?? '')
       groupSel.addEventListener('change', () => void assignAccountGroup(item.id, groupSel.value))
       actions.append(groupSel)
 
       // 移除要二次确认：凭证一旦删掉就找不回来了（不保留明文归档，见 accounts.ts）
-      const removeBtn = el('button', 'dsw-btn danger dsw-preset', '移除') as HTMLButtonElement
+      const removeBtn = el('button', 'dsw-btn danger dsw-preset', t('移除')) as HTMLButtonElement
       let armed = false
       removeBtn.addEventListener('click', () => {
         if (!armed) {
           armed = true
-          removeBtn.textContent = '确认移除？'
+          removeBtn.textContent = t('确认移除？')
           removeBtn.classList.add('armed')
           window.setTimeout(() => {
             armed = false
-            removeBtn.textContent = '移除'
+            removeBtn.textContent = t('移除')
             removeBtn.classList.remove('armed')
           }, 4_000)
           return
@@ -1075,7 +1111,7 @@ function Panel(): any {
       try {
         applyAccounts(await api('/accounts'))
       } catch (error: any) {
-        accountsMsg.textContent = `账号库读取失败：${error?.message ?? error}`
+        accountsMsg.textContent = tf('账号库读取失败：{0}', error?.message ?? error)
       } finally {
         accountsSyncedAt = Date.now()
       }
@@ -1111,12 +1147,12 @@ function Panel(): any {
       try {
         const result = await api(path, { method: 'POST', body: JSON.stringify(body) })
         if (result?.ok === false) {
-          accountsMsg.textContent = `分组操作失败：${result?.error ?? '未知原因'}`
+          accountsMsg.textContent = tf('分组操作失败：{0}', result?.error ?? t('未知原因'))
           return
         }
         accountsMsg.textContent = okText
       } catch (error: any) {
-        accountsMsg.textContent = `分组操作失败：${error?.message ?? error}`
+        accountsMsg.textContent = tf('分组操作失败：{0}', error?.message ?? error)
       } finally {
         await loadAccounts()
       }
@@ -1126,14 +1162,14 @@ function Panel(): any {
       groupApi(
         '/accounts/group/assign',
         { id, groupId },
-        groupId ? '已归组。' : '已移出分组（回到「未分组」）。',
+        groupId ? t('已归组。') : t('已移出分组（回到「未分组」）。'),
       )
 
     const renameAccountGroup = (id: string, name: string): Promise<void> =>
-      groupApi('/accounts/group/rename', { id, name }, `分组已改名为「${name.trim()}」。`)
+      groupApi('/accounts/group/rename', { id, name }, tf('分组已改名为「{0}」。', name.trim()))
 
     const deleteAccountGroup = (id: string): Promise<void> =>
-      groupApi('/accounts/group/delete', { id }, '分组已删除；组里的账号回到「未分组」（账号本身没动）。')
+      groupApi('/accounts/group/delete', { id }, t('分组已删除；组里的账号回到「未分组」（账号本身没动）。'))
 
     /** 「新建分组」的内联输入框（与「备注」同款交互：Enter 提交、Esc 取消、失焦也提交）。 */
     let newGroupInput: HTMLInputElement | null = null
@@ -1143,7 +1179,7 @@ function Panel(): any {
         return
       }
       const input = el('input', 'dsw-labelinput') as HTMLInputElement
-      input.placeholder = '分组名，如「工作号」'
+      input.placeholder = t('分组名，如「工作号」')
       accountsIOPanel.append(input)
       input.focus()
       newGroupInput = input
@@ -1158,7 +1194,7 @@ function Panel(): any {
         const name = input.value
         dismiss()
         if (!name.trim()) return
-        void groupApi('/accounts/group/create', { name }, `已创建分组「${name.trim()}」。`)
+        void groupApi('/accounts/group/create', { name }, tf('已创建分组「{0}」。', name.trim()))
       }
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') commit()
@@ -1176,27 +1212,27 @@ function Panel(): any {
     const refreshAccountStates = async (): Promise<void> => {
       refreshAccountsBtn.disabled = true
       const original = refreshAccountsBtn.textContent
-      refreshAccountsBtn.textContent = '校验中…'
-      accountsMsg.textContent = '正在逐个校验账号（只读、零额度，串行进行，请稍候）……'
+      refreshAccountsBtn.textContent = t('校验中…')
+      accountsMsg.textContent = t('正在逐个校验账号（只读、零额度，串行进行，请稍候）……')
       try {
         const result = await api('/accounts/refresh', { method: 'POST', body: '{}' })
         if (result?.ok === false) {
-          accountsMsg.textContent = `刷新失败：${result?.error ?? '未知原因'}`
+          accountsMsg.textContent = tf('刷新失败：{0}', result?.error ?? t('未知原因'))
           return
         }
         const failed = Number(result?.failed ?? 0)
         // 汇总必须分开说（0.6.6）：把"网络没通"也叫"需要重登"会把人骗去重敲一遍密码。
         const authFailed = Number(result?.authFailed ?? 0)
         const transportFailed = Number(result?.transportFailed ?? 0)
-        const summary = [`${Number(result?.passed ?? 0)} 个正常`]
-        if (authFailed > 0) summary.push(`${authFailed} 个登录态已失效（需要重登）`)
-        if (transportFailed > 0) summary.push(`${transportFailed} 个网络没通、未能校验（账号未必失效）`)
+        const summary = [tf('{0} 个正常', Number(result?.passed ?? 0))]
+        if (authFailed > 0) summary.push(tf('{0} 个登录态已失效（需要重登）', authFailed))
+        if (transportFailed > 0) summary.push(tf('{0} 个网络没通、未能校验（账号未必失效）', transportFailed))
         if (failed === 0) summary.length = 0
         accountsMsg.textContent = failed > 0
-          ? `已校验 ${result?.checked ?? 0} 个账号：${summary.join('、')}。`
-          : `已校验 ${result?.checked ?? 0} 个账号：全部正常。`
+          ? tf('已校验 {0} 个账号：{1}。', result?.checked ?? 0, summary.join('、'))
+          : tf('已校验 {0} 个账号：全部正常。', result?.checked ?? 0)
       } catch (error: any) {
-        accountsMsg.textContent = `刷新失败：${error?.message ?? error}`
+        accountsMsg.textContent = tf('刷新失败：{0}', error?.message ?? error)
       } finally {
         refreshAccountsBtn.disabled = false
         refreshAccountsBtn.textContent = original
@@ -1233,14 +1269,14 @@ function Panel(): any {
       const originalLabel = btn?.textContent ?? ''
       if (btn) {
         btn.disabled = true
-        btn.textContent = '切换中…'
+        btn.textContent = t('切换中…')
       }
-      paintRowMsg(id, '正在校验登录态并切换……', 'info')
-      accountsMsg.textContent = '切换中……'
+      paintRowMsg(id, t('正在校验登录态并切换……'), 'info')
+      accountsMsg.textContent = t('切换中……')
       try {
         const result = await api('/accounts/switch', { method: 'POST', body: JSON.stringify({ id }) })
         if (!result?.ok) {
-          const message = `切换失败：${result?.error ?? '未知原因'}`
+          const message = tf('切换失败：{0}', result?.error ?? t('未知原因'))
           paintRowMsg(id, `❌ ${message}`, 'err')
           accountsMsg.textContent = message
           return
@@ -1254,11 +1290,11 @@ function Panel(): any {
           paintRowMsg(id, text, 'warn')
           accountsMsg.textContent = text
         } else {
-          paintRowMsg(id, '✅ 已切换（下一次请求生效）', 'ok')
-          accountsMsg.textContent = '已切换（下一次请求生效）'
+          paintRowMsg(id, t('✅ 已切换（下一次请求生效）'), 'ok')
+          accountsMsg.textContent = t('已切换（下一次请求生效）')
         }
       } catch (error: any) {
-        const message = `切换失败：${error?.message ?? error}`
+        const message = tf('切换失败：{0}', error?.message ?? error)
         paintRowMsg(id, `❌ ${message}`, 'err')
         accountsMsg.textContent = message
       } finally {
@@ -1273,14 +1309,14 @@ function Panel(): any {
       try {
         const result = await api('/accounts/remove', { method: 'POST', body: JSON.stringify({ id }) })
         if (!result?.ok) {
-          accountsMsg.textContent = `移除失败：${result?.error ?? '未知原因'}`
+          accountsMsg.textContent = tf('移除失败：{0}', result?.error ?? t('未知原因'))
           return
         }
-        accountsMsg.textContent = '已移除该账号（凭证已删除）'
+        accountsMsg.textContent = t('已移除该账号（凭证已删除）')
         await loadAccounts()
         await refresh(true)
       } catch (error: any) {
-        accountsMsg.textContent = `移除失败：${error?.message ?? error}`
+        accountsMsg.textContent = tf('移除失败：{0}', error?.message ?? error)
       }
     }
 
@@ -1294,32 +1330,32 @@ function Panel(): any {
     addAccountBtn.addEventListener('click', () => {
       void (async () => {
         addAccountBtn.disabled = true
-        accountsMsg.textContent = '正在准备登录窗口（会清掉上次的浏览器登录态，不影响账号库里的账号）……'
+        accountsMsg.textContent = t('正在准备登录窗口（会清掉上次的浏览器登录态，不影响账号库里的账号）……')
         try {
           const prep = await api('/login/add', { method: 'POST', body: '{}' })
           if (prep?.ok === false) {
-            accountsMsg.textContent = `准备失败：${prep?.error ?? '未知原因'}`
+            accountsMsg.textContent = tf('准备失败：{0}', prep?.error ?? t('未知原因'))
             return
           }
           // 登录窗口是"打开后等用户操作"的，这里会一直等到捕获到凭证或超时；
           // 期间保持轮询更密一点，万一捕获是异步落地的也能及时刷出来。
           boostUntil = Date.now() + 300_000
-          accountsMsg.textContent = '登录窗口已打开：请在窗口里登录另一个账号（不要登当前这个，否则只是刷新凭证）……'
+          accountsMsg.textContent = t('登录窗口已打开：请在窗口里登录另一个账号（不要登当前这个，否则只是刷新凭证）……')
           const result = await api('/login/browser', { method: 'POST', body: '{}' })
           if (result?.started === false) {
-            accountsMsg.textContent = `打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用「手动粘贴 Token」）`
+            accountsMsg.textContent = tf('打开登录窗口失败：{0}（可改用「手动粘贴 Token」）', result?.reason ?? t('未知原因'))
             return
           }
           if (result?.added) {
             accountsMsg.textContent = result.created
-              ? '已把新账号加入账号库 —— 当前账号没有改动，点列表里的「切换」才会用它。'
-              : '这个账号本来就在库里（凭证已更新）—— 当前账号未改动。'
+              ? t('已把新账号加入账号库 —— 当前账号没有改动，点列表里的「切换」才会用它。')
+              : t('这个账号本来就在库里（凭证已更新）—— 当前账号未改动。')
           } else {
-            accountsMsg.textContent = '已捕获并保存凭证。'
+            accountsMsg.textContent = t('已捕获并保存凭证。')
           }
           await loadAccounts()
         } catch (error: any) {
-          accountsMsg.textContent = `添加账号失败：${error?.message ?? error}`
+          accountsMsg.textContent = tf('添加账号失败：{0}', error?.message ?? error)
         } finally {
           addAccountBtn.disabled = false
           await refresh(false).catch(() => undefined)
@@ -1330,30 +1366,30 @@ function Panel(): any {
     exportBtn.addEventListener('click', () => {
       void (async () => {
         exportBtn.disabled = true
-        accountsMsg.textContent = '导出中……'
+        accountsMsg.textContent = t('导出中……')
         try {
           // 先弹系统「另存为」，内容在用户选完位置后再取（顺序见 file-picker.ts 的注释）。
           const outcome = await saveWithPicker(suggestedExportName(), async () => {
             const data = await api('/accounts/export-json', { method: 'POST', body: '{}' })
-            if (!data?.ok) throw new Error(data?.error ?? '读取备份内容失败')
+            if (!data?.ok) throw new Error(data?.error ?? t('读取备份内容失败'))
             const { ok: _ok, ...backup } = data
             return JSON.stringify(backup, null, 2)
           })
 
           if (outcome.kind === 'saved') {
-            accountsMsg.textContent = `已保存：${outcome.name}（含明文凭证，请妥善保管）`
+            accountsMsg.textContent = tf('已保存：{0}（含明文凭证，请妥善保管）', outcome.name)
           } else if (outcome.kind === 'cancelled') {
-            accountsMsg.textContent = '已取消导出。'
+            accountsMsg.textContent = t('已取消导出。')
           } else {
             // 系统「另存为」不可用 → 回退到宿主写插件目录（功能不因此失效，只是不能选位置）
             const result = await api('/accounts/export', { method: 'POST', body: '{}' })
-            const why = outcome.kind === 'unsupported' ? '当前环境不支持系统另存为' : `系统另存为失败（${outcome.reason}）`
+            const why = outcome.kind === 'unsupported' ? t('当前环境不支持系统另存为') : tf('系统另存为失败（{0}）', outcome.reason)
             accountsMsg.textContent = result?.ok
-              ? `${why}，已改为保存到插件目录：${result.path}`
-              : `导出失败：${result?.error ?? '未知原因'}`
+              ? tf('{0}，已改为保存到插件目录：{1}', why, result.path)
+              : tf('导出失败：{0}', result?.error ?? t('未知原因'))
           }
         } catch (error: any) {
-          accountsMsg.textContent = `导出失败：${error?.message ?? error}`
+          accountsMsg.textContent = tf('导出失败：{0}', error?.message ?? error)
         } finally {
           exportBtn.disabled = false
         }
@@ -1363,17 +1399,17 @@ function Panel(): any {
     importBtn.addEventListener('click', () => {
       void (async () => {
         importBtn.disabled = true
-        accountsMsg.textContent = '请选择备份文件……'
+        accountsMsg.textContent = t('请选择备份文件……')
         try {
           const file = await pickJsonFile()
           if (!file) {
-            accountsMsg.textContent = '已取消导入。'
+            accountsMsg.textContent = t('已取消导入。')
             return
           }
-          accountsMsg.textContent = `正在读取 ${file.name}……`
+          accountsMsg.textContent = tf('正在读取 {0}……', file.name)
           const source = await readImportSource(file)
           if (source.kind === 'unreadable') {
-            accountsMsg.textContent = `读取失败：${source.name} 不是有效的 JSON 备份（${source.reason}）`
+            accountsMsg.textContent = tf('读取失败：{0} 不是有效的 JSON 备份（{1}）', source.name, source.reason)
             return
           }
           // 拿到真实路径时只把**路径**交给宿主（宿主自己读文件，凭证不进 HTTP）；
@@ -1381,11 +1417,11 @@ function Panel(): any {
           const body = source.kind === 'path' ? { path: source.path } : { payload: source.payload }
           const result = await api('/accounts/import', { method: 'POST', body: JSON.stringify(body) })
           accountsMsg.textContent = result?.ok
-            ? `导入完成（${source.name}）：新增 ${result.imported} / 更新 ${result.updated} / 跳过 ${result.skipped}`
-            : `导入失败：${result?.error ?? '未知原因'}`
+            ? tf('导入完成（{0}）：新增 {1} / 更新 {2} / 跳过 {3}', source.name, result.imported, result.updated, result.skipped)
+            : tf('导入失败：{0}', result?.error ?? t('未知原因'))
           if (result?.ok) await loadAccounts()
         } catch (error: any) {
-          accountsMsg.textContent = `导入失败：${error?.message ?? error}`
+          accountsMsg.textContent = tf('导入失败：{0}', error?.message ?? error)
         } finally {
           importBtn.disabled = false
         }
@@ -1394,12 +1430,12 @@ function Panel(): any {
 
     // ── 手动 token 卡 ──
     const tokenCard = el('div', 'dsw-card')
-    tokenCard.append(el('div', 'dsw-cardhead', '手动粘贴 Token（可选路径）'))
+    tokenCard.append(el('div', 'dsw-cardhead', t('手动粘贴 Token（可选路径）')))
     tokenCard.append(
       el(
         'p',
         'dsw-hint',
-        '在浏览器打开 chat.deepseek.com 并登录 → F12 控制台执行下面一行 → 把结果粘贴到输入框：',
+        t('在浏览器打开 chat.deepseek.com 并登录 → F12 控制台执行下面一行 → 把结果粘贴到输入框：'),
       ),
     )
     const snippet = el('code', 'dsw-code', "JSON.parse(localStorage.getItem('userToken')).value")
@@ -1408,28 +1444,28 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '（新版网页端 token 存在 {"value": …} 包装里；若上面那行报错，改成 localStorage.getItem(\'userToken\') 直接复制整串，插件会自动解包）',
+        t('（新版网页端 token 存在 {"value": …} 包装里；若上面那行报错，改成 localStorage.getItem(\'userToken\') 直接复制整串，插件会自动解包）'),
       ),
     )
     const tokenInput = el('textarea', 'dsw-area') as HTMLTextAreaElement
-    tokenInput.placeholder = '粘贴 token（包装 JSON 或裸 token 都行；可选：下一行粘贴 Cookie，格式 name=value; name2=value2）'
+    tokenInput.placeholder = t('粘贴 token（包装 JSON 或裸 token 都行；可选：下一行粘贴 Cookie，格式 name=value; name2=value2）')
     tokenCard.append(tokenInput)
     const tokenActions = el('div', 'dsw-row')
     tokenActions.style.marginTop = '8px'
-    const tokenBtn = el('button', 'dsw-btn', '保存并验证') as HTMLButtonElement
+    const tokenBtn = el('button', 'dsw-btn', t('保存并验证')) as HTMLButtonElement
     tokenActions.append(tokenBtn)
     tokenCard.append(tokenActions)
     acctLibraryPane.append(tokenCard)
 
     // ── 测试卡 ──
     const testCard = el('div', 'dsw-card')
-    testCard.append(el('div', 'dsw-cardhead', '连通性测试'))
-    testCard.append(el('p', 'dsw-hint', '直接经适配器发一次最小请求（会消耗一点网页端额度）：'))
+    testCard.append(el('div', 'dsw-cardhead', t('连通性测试')))
+    testCard.append(el('p', 'dsw-hint', t('直接经适配器发一次最小请求（会消耗一点网页端额度）：')))
     const testActions = el('div', 'dsw-row')
     testActions.style.marginTop = '6px'
     const modelSelect = el('select', 'dsw-input') as HTMLSelectElement
     modelSelect.style.maxWidth = '220px'
-    const testBtn = el('button', 'dsw-btn', '发送测试') as HTMLButtonElement
+    const testBtn = el('button', 'dsw-btn', t('发送测试')) as HTMLButtonElement
     testActions.append(modelSelect, testBtn)
     testCard.append(testActions)
     const testOut = el('div', 'dsw-msg')
@@ -1438,7 +1474,7 @@ function Panel(): any {
 
     // ── 模型卡 ──
     const modelsCard = el('div', 'dsw-card')
-    modelsCard.append(el('div', 'dsw-cardhead', '可用模型（网页免费）'))
+    modelsCard.append(el('div', 'dsw-cardhead', t('可用模型（网页免费）')))
     const modelsList = el('ul', 'dsw-models')
     modelsCard.append(modelsList)
     const modelsHint = el('p', 'dsw-hint', '')
@@ -1510,12 +1546,12 @@ function Panel(): any {
         renderContextStatus?.(String(cfg.contextMode), cfg.contextChain)
       }
 
-      badge.textContent = loggedIn ? (status.auth.unverified ? '❔ 已捕获（未校验）' : '✅ 已登录') : '⚪ 未登录'
+      badge.textContent = loggedIn ? (status.auth.unverified ? t('❔ 已捕获（未校验）') : t('✅ 已登录')) : t('⚪ 未登录')
       badge.className = `dsw-badge ${loggedIn ? (status.auth.unverified ? 'off' : 'on') : 'off'}`
       if (loggedIn && !status.auth.unverified) {
         const valid = status.validation
         if (valid && !valid.ok) {
-          badge.textContent = '❌ 登录态校验失败'
+          badge.textContent = t('❌ 登录态校验失败')
           badge.className = 'dsw-badge err'
         }
       }
@@ -1526,19 +1562,19 @@ function Panel(): any {
       probeIntervalMs = Number(status.config?.probeIntervalMs ?? 0)
       renderVersion({ current: status.config?.version, probeIntervalMs })
       renderPaths(status.paths)
-      rows.push(['适配器注册', (status.registeredProviders ?? []).includes(status.provider) ? `✅ ${status.provider} 已注册到 llm` : `⚠️ 未在 llm 中找到 ${status.provider}`])
+      rows.push([t('适配器注册'), (status.registeredProviders ?? []).includes(status.provider) ? `✅ ${tf('{0} 已注册到 llm', status.provider)}` : tf('⚠️ 未在 llm 中找到 {0}', status.provider)])
       if (loggedIn) {
-        rows.push(['账号', status.auth.display || '（未获取到账号信息）'])
-        rows.push(['捕获时间', status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : '未知'])
+        rows.push([t('账号'), status.auth.display || t('（未获取到账号信息）')])
+        rows.push([t('捕获时间'), status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : t('未知')])
         // 凭证来源与完整度：以前这里对缺失项写「未捕获（可能仍可用）」，读起来像风险提示，
         // 实际含义只是「你走的是手动粘贴 token 那条路」。实测（2026-09-11）：
         // 只有 Bearer token、没有 cookie / x-hif-* 时，校验、PoW、真实生成全部通过 ——
         // 所以这里如实说明「缺什么」以及「已证实不影响使用」，而不是留一句模糊的警告。
         const manualTokenMode = !status.auth.hasCookie && !status.auth.hasFingerprint
         if (manualTokenMode) {
-          rows.push(['凭证来源', '手动粘贴 token'])
+          rows.push([t('凭证来源'), t('手动粘贴 token')])
         } else {
-          rows.push(['凭证来源', '浏览器登录捕获'])
+          rows.push([t('凭证来源'), t('浏览器登录捕获')])
         }
         // Cookie 一行说清「有没有 + 构成」。**不再单列"还剩多少天"**
         // （2026-10-01 用户反馈）：那个天数来自持久级 cookie（实测 399 天），
@@ -1546,12 +1582,12 @@ function Panel(): any {
         rows.push([
           'Cookie',
           status.auth.hasCookie
-            ? `✅ 已捕获${status.auth.cookieLife ? ` · ${describeCookieLife(status.auth.cookieLife)}` : ''}`
-            : '未捕获（手动 token 模式本就没有；不影响请求）',
+            ? `${t('✅ 已捕获')}${status.auth.cookieLife ? ` · ${describeCookieLife(status.auth.cookieLife)}` : ''}`
+            : t('未捕获（手动 token 模式本就没有；不影响请求）'),
         ])
-        rows.push(['指纹头', status.auth.hasFingerprint ? '✅ 已捕获' : '未捕获（不影响请求）'])
-        rows.push(['token 长度', `${status.auth.tokenLength ?? 0} 字符`])
-        if (status.validation) rows.push(['服务端校验', status.validation.ok ? '通过' : `失败：${status.validation.error ?? ''}`])
+        rows.push([t('指纹头'), status.auth.hasFingerprint ? t('✅ 已捕获') : t('未捕获（不影响请求）')])
+        rows.push([t('token 长度'), tf('{0} 字符', status.auth.tokenLength ?? 0)])
+        if (status.validation) rows.push([t('服务端校验'), status.validation.ok ? t('通过') : tf('失败：{0}', status.validation.error ?? '')])
 
         // 主动探活（后台定时做的，与上面这次"按需校验"是两件事）：
         // 目的就是**在任务跑到一半之前**发现登录态失效。
@@ -1559,20 +1595,20 @@ function Panel(): any {
         const verifyError = status.auth?.lastVerifyError
         if (verifyError) {
           rows.push([
-            '登录态探活',
-            `❌ ${relTime(verifyError.at)}失败：${verifyError.message}（可能已过期，建议重新登录）`,
+            t('登录态探活'),
+            tf('❌ {0}失败：{1}（可能已过期，建议重新登录）', relTime(verifyError.at), verifyError.message),
           ])
         } else if (verifiedAt) {
-          rows.push(['登录态探活', `✅ ${relTime(verifiedAt)}通过（后台定时校验，零额度）`])
+          rows.push([t('登录态探活'), tf('✅ {0}通过（后台定时校验，零额度）', relTime(verifiedAt))])
         }
         // 让用户能确认「防风控」到底生效成什么样（值来自配置，改配置后重启生效）
         const interval = status.config?.minRequestIntervalMs
         if (interval !== undefined) {
           rows.push([
-            '请求节流',
+            t('请求节流'),
             status.config?.allowConcurrent
-              ? `⚠️ 允许并发 · 间隔 ${interval}ms（并发生成有账号级限制风险，不建议）`
-              : `串行（一次只发一条）· 间隔 ${interval}ms`,
+              ? tf('⚠️ 允许并发 · 间隔 {0}ms（并发生成有账号级限制风险，不建议）', interval)
+              : tf('串行（一次只发一条）· 间隔 {0}ms', interval),
           ])
         }
       } else {
@@ -1580,46 +1616,46 @@ function Panel(): any {
         // 2026-09-11 起宿主是 utility 进程，但真实浏览器登录是可用的）
         const available = status.loginCapability
         rows.push([
-          '登录方式',
+          t('登录方式'),
           available
             ? available.canOpenWindow
-              ? '插件自开窗口（Electron 主进程，带指纹伪装）'
+              ? t('插件自开窗口（Electron 主进程，带指纹伪装）')
               : available.browser
-                ? `用真实浏览器登录（${available.browser} + 调试协议，自动读取凭证）`
-                : '未找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 token'
+                ? tf('用真实浏览器登录（{0} + 调试协议，自动读取凭证）', available.browser)
+                : t('未找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 token')
             : electron
-              ? '可开浏览器窗口'
-              : '请用「用我的默认浏览器登录」+ 手动粘贴 token',
+              ? t('可开浏览器窗口')
+              : t('请用「用我的默认浏览器登录」+ 手动粘贴 token'),
         ])
       }
       if (status.lastLoginResult) {
-        rows.push(['最近结果', `${status.lastLoginResult.message} · ${new Date(status.lastLoginResult.at).toLocaleTimeString()}`])
+        rows.push([t('最近结果'), `${status.lastLoginResult.message} · ${new Date(status.lastLoginResult.at).toLocaleTimeString()}`])
       }
       if (status.loginWindowOpen && status.loginProgress?.captured) {
         const captured = status.loginProgress.captured
         rows.push([
-          '捕获进度',
-          `token ${captured.token ? '✓' : '…'} / cookie ${captured.cookie ? '✓' : '…'} / 指纹 ${captured.fingerprint ? '✓' : '…'}`,
+          t('捕获进度'),
+          tf('token {0} / cookie {1} / 指纹 {2}', captured.token ? '✓' : '…', captured.cookie ? '✓' : '…', captured.fingerprint ? '✓' : '…'),
         ])
       }
       if (status.loginProgress?.lastError && status.loginWindowOpen) {
-        rows.push(['窗口提示', status.loginProgress.lastError])
+        rows.push([t('窗口提示'), status.loginProgress.lastError])
       }
       if (status.fingerprint && status.fingerprint.stripped.length > 0) {
-        rows.push(['指纹清理', `已剔除 ${status.fingerprint.stripped.length} 个 Electron 头：${status.fingerprint.stripped.join(', ')}`])
+        rows.push([t('指纹清理'), tf('已剔除 {0} 个 Electron 头：{1}', status.fingerprint.stripped.length, status.fingerprint.stripped.join(', '))])
       } else if (status.loginWindowOpen) {
-        rows.push(['指纹清理', '窗口已打开（尚未命中需要清理的头）'])
+        rows.push([t('指纹清理'), t('窗口已打开（尚未命中需要清理的头）')])
       }
       if (status.fingerprint?.pageUa) {
         const bad = /electron/i.test(status.fingerprint.pageUa)
-        rows.push(['页面看到 UA', `${bad ? '⚠️ 仍含 Electron：' : '✅ '}${status.fingerprint.pageUa}`])
+        rows.push([t('页面看到 UA'), `${bad ? t('⚠️ 仍含 Electron：') : '✅ '}${status.fingerprint.pageUa}`])
       }
       if (status.fingerprint?.pageBrands?.length) {
         const dirty = status.fingerprint.pageBrands.filter((b) => /electron|dsh/i.test(b))
-        rows.push(['页面品牌', `${dirty.length ? `⚠️ ${dirty.join(', ')}` : '✅ '}${status.fingerprint.pageBrands.join(', ')}`])
+        rows.push([t('页面品牌'), `${dirty.length ? `⚠️ ${dirty.join(', ')}` : '✅ '}${status.fingerprint.pageBrands.join(', ')}`])
       }
       if (status.fingerprint?.pageWebdriver !== undefined) {
-        rows.push(['webdriver', status.fingerprint.pageWebdriver ? '⚠️ true（自动化痕迹）' : '✅ false'])
+        rows.push(['webdriver', status.fingerprint.pageWebdriver ? t('⚠️ true（自动化痕迹）') : '✅ false'])
       }
       // ⚠️ 0.1.82：这一段必须在 renderKv 之前 —— 此前 `renderKv(rows)` 在它上面，
       // 「宿主进程」这一行 push 进去时表格已经画完了 ⇒ **那行永远不显示**，
@@ -1628,43 +1664,43 @@ function Panel(): any {
       const capability = status.loginCapability
       if (capability) {
         const mode = capability.canOpenWindow
-          ? '可开 Electron 窗口'
+          ? t('可开 Electron 窗口')
           : capability.browser
-            ? `无窗口 API（${capability.processType} 进程）→ 用真实浏览器`
-            : `无窗口 API（${capability.processType} 进程）且未找到 Edge/Chrome`
-        rows.push(['宿主进程', `${capability.processType} · ${mode}`])
+            ? tf('无窗口 API（{0} 进程）→ 用真实浏览器', capability.processType)
+            : tf('无窗口 API（{0} 进程）且未找到 Edge/Chrome', capability.processType)
+        rows.push([t('宿主进程'), `${capability.processType} · ${mode}`])
       }
       renderKv(rows)
 
       if (!browserBtn.dataset.busy) browserBtn.disabled = false
       if (capability) {
-        browserBtn.textContent = capability.canOpenWindow ? '浏览器窗口登录' : capability.browser ? `用 ${capability.browser} 登录` : '浏览器窗口登录'
+        browserBtn.textContent = capability.canOpenWindow ? t('浏览器窗口登录') : capability.browser ? tf('用 {0} 登录', capability.browser) : t('浏览器窗口登录')
         browserBtn.disabled = !capability.canOpenWindow && !capability.browser
         browserBtn.title = capability.canOpenWindow
-          ? '插件自己开窗口（带指纹伪装）'
+          ? t('插件自己开窗口（带指纹伪装）')
           : capability.browser
-            ? `拉起真实的 ${capability.browser}（独立 profile）完成登录，插件通过调试协议读取登录态`
-            : '既不能开窗口也没找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token'
+            ? tf('拉起真实的 {0}（独立 profile）完成登录，插件通过调试协议读取登录态', capability.browser)
+            : t('既不能开窗口也没找到 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token')
       } else {
         browserBtn.disabled = !electron
-        browserBtn.textContent = windowOpen ? '登录窗口已打开' : '浏览器窗口登录'
-        browserBtn.title = electron ? '' : '当前宿主无法开窗：请用「用我的默认浏览器登录」+ 手动粘贴 Token'
+        browserBtn.textContent = windowOpen ? t('登录窗口已打开') : t('浏览器窗口登录')
+        browserBtn.title = electron ? '' : t('当前宿主无法开窗：请用「用我的默认浏览器登录」+ 手动粘贴 Token')
       }
 
       // 账号卡：显示当前账号 + 退出按钮可用性
       accountLine.textContent = ''
       if (loggedIn) {
-        accountLine.append(el('div', 'k', '账号'), el('div', undefined, status.auth.display || '（未获取到账号信息）'))
+        accountLine.append(el('div', 'k', t('账号')), el('div', undefined, status.auth.display || t('（未获取到账号信息）')))
         accountLine.append(
-          el('div', 'k', '登录时间'),
-          el('div', undefined, status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : '未知'),
+          el('div', 'k', t('登录时间')),
+          el('div', undefined, status.auth.capturedAt ? new Date(status.auth.capturedAt).toLocaleString() : t('未知')),
         )
       } else {
-        accountLine.append(el('div', 'k', '状态'), el('div', undefined, '未登录（没有可退出的账号）'))
+        accountLine.append(el('div', 'k', t('状态')), el('div', undefined, t('未登录（没有可退出的账号）')))
       }
       logoutBtn.disabled = !loggedIn
       switchBtn.disabled = !loggedIn || !electron
-      switchBtn.title = electron ? '' : '当前不是 Electron 桌面端：请先「退出当前账号」，再手动粘贴另一个账号的 token'
+      switchBtn.title = electron ? '' : t('当前不是 Electron 桌面端：请先「退出当前账号」，再手动粘贴另一个账号的 token')
 
       // 模型下拉
       if (modelSelect.options.length !== status.models.length) {
@@ -1672,7 +1708,7 @@ function Panel(): any {
         for (const model of status.models) {
           const option = document.createElement('option')
           option.value = model.id
-          option.textContent = model.name
+          option.textContent = t(model.name)
           modelSelect.append(option)
         }
       }
@@ -1680,19 +1716,19 @@ function Panel(): any {
       modelsList.textContent = ''
       for (const model of status.models) {
         const item = el('li')
-        item.append(el('div', 'name', model.name))
+        item.append(el('div', 'name', t(model.name)))
         const ctxLabel = model.contextWindow >= 1_048_576
           ? `${(model.contextWindow / 1_048_576).toFixed(0)}M`
           : `${Math.round(model.contextWindow / 1024)}K`
-        item.append(el('div', 'id', `${model.id} · thinking ${model.thinking ? '开' : '关'} · 上下文 ${ctxLabel} token（标称）`))
-        item.append(el('div', 'id', model.description))
+        item.append(el('div', 'id', `${model.id} · ${tf('thinking {0} · 上下文 {1} token（标称）', model.thinking ? t('开') : t('关'), ctxLabel)}`))
+        item.append(el('div', 'id', t(model.description)))
         modelsList.append(item)
       }
       modelsHint.textContent =
-        `两条是同一个「快速模式」的思考开关两档预设（也可在模型选择器的推理强度里切换）。` +
-        `图片输入直接可用（走网页端文件上传通道）。每次调用会新建并删除临时会话；` +
-        `prompt 字符上限 ${status.config?.maxPromptChars ?? 0}（服务端硬上限 2621440 字符，` +
-        `另附件 token 预算 890880 —— 后者常被误读成「上下文窗口」）。`
+        t('两条是同一个「快速模式」的思考开关两档预设（也可在模型选择器的推理强度里切换）。') +
+        t('图片输入直接可用（走网页端文件上传通道）。每次调用会新建并删除临时会话；') +
+        tf('prompt 字符上限 {0}（服务端硬上限 2621440 字符，', status.config?.maxPromptChars ?? 0) +
+        t('另附件 token 预算 890880 —— 后者常被误读成「上下文窗口」。')
     }
 
     const refresh = async (light = true): Promise<void> => {
@@ -1701,7 +1737,7 @@ function Panel(): any {
         if (disposed) return
         applyStatus(status)
       } catch (error: any) {
-        showMessage(`状态读取失败：${error?.message ?? error}`, 'err')
+        showMessage(tf('状态读取失败：{0}', error?.message ?? error), 'err')
       }
     }
 
@@ -1709,7 +1745,7 @@ function Panel(): any {
     // 这三项直接决定会不会被账号级限流（实测双窗口并发 6 分钟内被限制 1 天），
     // 所以不该只藏在配置文件里 —— 界面上直接可调，改完即时生效并落盘。
     const gateCard = el('div', 'dsw-card')
-    gateCard.append(el('div', 'dsw-cardhead', '请求节流（防风控）'))
+    gateCard.append(el('div', 'dsw-cardhead', t('请求节流（防风控）')))
 
     const rangeInput = (): HTMLInputElement => {
       const input = el('input', 'dsw-range') as HTMLInputElement
@@ -1725,19 +1761,19 @@ function Panel(): any {
     const concInput = el('input') as HTMLInputElement
     concInput.type = 'checkbox'
     const concTrack = el('span', 'dsw-switch-track')
-    concLabel.append(concInput, concTrack, el('span', undefined, '允许并发（同一账号同时发两条）'))
+    concLabel.append(concInput, concTrack, el('span', undefined, t('允许并发（同一账号同时发两条）')))
     concRow.append(concLabel)
     gateCard.append(concRow)
 
     const minRow = el('div', 'dsw-gate-row')
-    minRow.append(el('span', 'dsw-gate-label', '间隔下限'))
+    minRow.append(el('span', 'dsw-gate-label', t('间隔下限')))
     const minRange = rangeInput()
     const minValue = el('span', 'dsw-gate-value', '—')
     minRow.append(minRange, minValue)
     gateCard.append(minRow)
 
     const maxRow = el('div', 'dsw-gate-row')
-    maxRow.append(el('span', 'dsw-gate-label', '间隔上限'))
+    maxRow.append(el('span', 'dsw-gate-label', t('间隔上限')))
     const maxRange = rangeInput()
     const maxValue = el('span', 'dsw-gate-value', '—')
     maxRow.append(maxRange, maxValue)
@@ -1754,11 +1790,11 @@ function Panel(): any {
     // 转写越长、单次请求越贵。实测同一个会话里单次输入估算从 9.7k token 涨到 293k
     // （180 轮累计约 2900 万），随后账号被限流。间隔只影响"多久发一次"，这个才影响"每次发多少"。
     const promptRow = el('div', 'dsw-gate-row')
-    promptRow.append(el('span', 'dsw-gate-label', 'prompt 上限'))
+    promptRow.append(el('span', 'dsw-gate-label', t('prompt 上限')))
     const promptRange = el('input', 'dsw-range') as HTMLInputElement
     promptRange.type = 'range'
-    promptRange.setAttribute('aria-label', 'prompt 字符上限')
-    promptRange.title = '每次请求最多发送多少字符（含工具目录与全部历史）'
+    promptRange.setAttribute('aria-label', t('prompt 字符上限'))
+    promptRange.title = t('每次请求最多发送多少字符（含工具目录与全部历史）')
     const promptValue = el('span', 'dsw-gate-value', '—')
     promptRow.append(promptRange, promptValue)
     gateCard.append(promptRow)
@@ -1766,25 +1802,25 @@ function Panel(): any {
     gateCard.append(promptHint)
 
     /** 字符数 → 「万字符」。界面上出现一长串 0 没人看得出差别。 */
-    const fmtChars = (n: number): string => `${Number.isFinite(n) ? (n / 10_000).toFixed(n % 10_000 === 0 ? 0 : 1) : '—'} 万字符`
+    const fmtChars = (n: number): string => `${Number.isFinite(n) ? (n / 10_000).toFixed(n % 10_000 === 0 ? 0 : 1) : '—'} ${t('万字符')}`
 
     const paintPromptCap = (): void => {
       const chars = Number(promptRange.value)
       promptValue.textContent = fmtChars(chars)
-      const level = chars >= 1_200_000 ? '偏高' : chars >= 600_000 ? '中等' : '保守'
+      const level = chars >= 1_200_000 ? t('偏高') : chars >= 600_000 ? t('中等') : t('保守')
       promptHint.textContent =
-        `每次请求最多发送 ${fmtChars(chars)}（${level}）。` +
-        '网页端是无状态的，每一轮都会把整段对话历史重新发一遍：' +
-        '上限越大，模型越不容易「忘事」，但单次消耗的 token 也越多。' +
-        '长任务建议调小，或拆成多个会话（新会话从零开始，单次最省）。'
+        tf('每次请求最多发送 {0}（{1}）。', fmtChars(chars), level) +
+        t('网页端是无状态的，每一轮都会把整段对话历史重新发一遍：') +
+        t('上限越大，模型越不容易「忘事」，但单次消耗的 token 也越多。') +
+        t('长任务建议调小，或拆成多个会话（新会话从零开始，单次最省）。')
     }
     // 把「底部那两个数字到底怎么来的」直接写在界面上：
     // 否则「缓存命中 0%」会被当成"真的没命中"，而它其实只是我们没有上报。
     const tokenNote = el('p', 'dsw-hint', '')
     tokenNote.textContent =
-      '💡 说明：DSH 底部的 token 数目前是按字符估算的（网页端只回一个「本消息累计 token」，' +
-      '我们还没接进来）；「缓存命中 0%」是因为网页端不提供缓存信息、我们也就没有上报 —— ' +
-      '不代表真的没命中。'
+      t('💡 说明：DSH 底部的 token 数目前是按字符估算的（网页端只回一个「本消息累计 token」，') +
+      t('我们还没接进来）；「缓存命中 0%」是因为网页端不提供缓存信息、我们也就没有上报 —— ') +
+      t('不代表真的没命中。')
     gateCard.append(tokenNote)
 
     promptRange.addEventListener('input', paintPromptCap)
@@ -1799,11 +1835,11 @@ function Panel(): any {
     // 而图还留在历史里 ⇒ **该会话此后每一轮都失败**，用户只能丢掉全部上下文。
     // 所以按时间只带最近的 N 张，更早的略过。
     const imgRow = el('div', 'dsw-gate-row')
-    imgRow.append(el('span', 'dsw-gate-label', '图片上限'))
+    imgRow.append(el('span', 'dsw-gate-label', t('图片上限')))
     const imgRange = el('input', 'dsw-range') as HTMLInputElement
     imgRange.type = 'range'
-    imgRange.setAttribute('aria-label', '单次请求的图片数量上限')
-    imgRange.title = '一次请求最多带多少张历史图片（0 = 不限制）'
+    imgRange.setAttribute('aria-label', t('单次请求的图片数量上限'))
+    imgRange.title = t('一次请求最多带多少张历史图片（0 = 不限制）')
     const imgValue = el('span', 'dsw-gate-value', '—')
     imgRow.append(imgRange, imgValue)
     gateCard.append(imgRow)
@@ -1812,12 +1848,12 @@ function Panel(): any {
 
     const paintImageCap = (): void => {
       const count = Number(imgRange.value)
-      imgValue.textContent = count === 0 ? '不限制' : `${count} 张`
+      imgValue.textContent = count === 0 ? t('不限制') : tf('{0} 张', count)
       imgHint.textContent =
         count === 0
-          ? '不限制（不推荐）：历史里不同图片数超过 40 张左右后，网页端会以 code 10 拒绝整轮，且该会话此后每轮都失败。'
-          : `一次请求最多带最近的 ${count} 张图片，更早的在本次请求里略过 —— 这是正常的长度控制，不是错误。` +
-            '网页端能引用的图片数上限实测在 40~52 之间，默认值留了足够余量。'
+          ? t('不限制（不推荐）：历史里不同图片数超过 40 张左右后，网页端会以 code 10 拒绝整轮，且该会话此后每轮都失败。')
+          : tf('一次请求最多带最近的 {0} 张图片，更早的在本次请求里略过 —— 这是正常的长度控制，不是错误。', count) +
+            t('网页端能引用的图片数上限实测在 40~52 之间，默认值留了足够余量。')
     }
     imgRange.addEventListener('input', paintImageCap)
     imgRange.addEventListener('change', () => {
@@ -1833,13 +1869,13 @@ function Panel(): any {
     // 用**档位滑块**而不是连续值：32K→1M 是 32 倍跨度，线性拖动时前四分之三的行程都挤在
     // 低档位，手感很差。每一格翻倍则正好符合直觉（档位由后端 CONTEXT_WINDOW_OPTIONS 给）。
     const ctxRow = el('div', 'dsw-gate-row')
-    ctxRow.append(el('span', 'dsw-gate-label', '上下文'))
+    ctxRow.append(el('span', 'dsw-gate-label', t('上下文')))
     const ctxRange = el('input', 'dsw-range') as HTMLInputElement
     ctxRange.type = 'range'
     ctxRange.min = '0'
     ctxRange.step = '1'
-    ctxRange.setAttribute('aria-label', '对外声明的上下文窗口大小')
-    ctxRange.title = '告诉 DSH 这个模型能装多少上下文；调小会让它更早压缩历史'
+    ctxRange.setAttribute('aria-label', t('对外声明的上下文窗口大小'))
+    ctxRange.title = t('告诉 DSH 这个模型能装多少上下文；调小会让它更早压缩历史')
     const ctxValue = el('span', 'dsw-gate-value', '—')
     ctxRow.append(ctxRange, ctxValue)
     gateCard.append(ctxRow)
@@ -1875,11 +1911,11 @@ function Panel(): any {
       ctxValue.textContent = formatCtxWindow(tokens)
       ctxHint.textContent =
         tokens >= 1_048_576
-          ? '当前按 DeepSeek 标称的 1M 声明 —— DSH 会认为「还装得下」，尽量不压缩历史。' +
-            '如果你的任务都很短，可以调小以省下每轮重发的体量。'
-          : `声明 ${formatCtxWindow(tokens)}：DSH 会更早压缩/截断历史，每轮重发的转写因此更短。` +
-            '这只是「声明值」，不改模型真实能力；调小只是让 DSH 早点动手。' +
-            '想彻底压住单次体量，上面的「prompt 上限」也要一起调。'
+          ? t('当前按 DeepSeek 标称的 1M 声明 —— DSH 会认为「还装得下」，尽量不压缩历史。') +
+            t('如果你的任务都很短，可以调小以省下每轮重发的体量。')
+          : tf('声明 {0}：DSH 会更早压缩/截断历史，每轮重发的转写因此更短。', formatCtxWindow(tokens)) +
+            t('这只是「声明值」，不改模型真实能力；调小只是让 DSH 早点动手。') +
+            t('想彻底压住单次体量，上面的「prompt 上限」也要一起调。')
     }
     ctxRange.addEventListener('input', paintContextWindow)
     ctxRange.addEventListener('change', () => {
@@ -1893,14 +1929,14 @@ function Panel(): any {
     //   遇限流就换 ⇒ 同一个出口 IP 上多号交替活跃，更像"有组织的规避"。
     // 所以这里**只看时间**（受限/失效的号会被跳过，但不会因为它受限就提前切）。
     const swRow = el('div', 'dsw-gate-row')
-    swRow.append(el('span', 'dsw-gate-label', '自动换号'))
+    swRow.append(el('span', 'dsw-gate-label', t('自动换号')))
     const swRange = el('input', 'dsw-range') as HTMLInputElement
     swRange.type = 'range'
     swRange.min = '0'
     swRange.max = '120'
     swRange.step = '1'
-    swRange.setAttribute('aria-label', '自动切换账号的间隔（分钟），0 表示关闭')
-    swRange.title = '每隔这么久换到账号库里的下一个可用账号；0 = 关闭'
+    swRange.setAttribute('aria-label', t('自动切换账号的间隔（分钟），0 表示关闭'))
+    swRange.title = t('每隔这么久换到账号库里的下一个可用账号；0 = 关闭')
     // 借用成对滑块的宽度（能装下「120 分钟」），不新增样式
     const swValue = el('span', 'dsw-gate-pair-value', '—')
     swRow.append(swRange, swValue)
@@ -1915,16 +1951,16 @@ function Panel(): any {
 
     const paintAutoSwitch = (): void => {
       const minutes = currentSwitchMinutes()
-      swValue.textContent = minutes === 0 ? '关闭' : `${minutes} 分钟`
+      swValue.textContent = minutes === 0 ? t('关闭') : tf('{0} 分钟', minutes)
       const base =
         minutes === 0
-          ? '关闭时不会自动换号 —— 当前账号一直用到你手动切换为止。'
-          : `每 ${minutes} 分钟换到账号库里的下一个可用账号（失效或正在受限的会跳过；可用的不足两个就不换）。` +
-            '换号会让投喂链断掉：下一轮要全量重发，历史图也要重新上传 —— 间隔越短，这个代价出现得越频繁。' +
+          ? t('关闭时不会自动换号 —— 当前账号一直用到你手动切换为止。')
+          : tf('每 {0} 分钟换到账号库里的下一个可用账号（失效或正在受限的会跳过；可用的不足两个就不换）。', minutes) +
+            t('换号会让投喂链断掉：下一轮要全量重发，历史图也要重新上传 —— 间隔越短，这个代价出现得越频繁。') +
             // 2026-10-01：用户两次被"同一个窗口聊着聊着网页端多出一个会话"搞懵，都没意识到中间换过号。
             // 换号必然新开会话（旧会话属于旧账号、新账号看不到），这件事必须写在开关旁边。
-            '另外要注意：每换一次号，网页端就会多出一个新会话（旧会话是在旧账号名下的，' +
-            '新账号看不到它），当前窗口也会从头开始 —— 在意网页端会话数量的，把它设成「关闭」。'
+            t('另外要注意：每换一次号，网页端就会多出一个新会话（旧会话是在旧账号名下的，') +
+            t('新账号看不到它），当前窗口也会从头开始 —— 在意网页端会话数量的，把它设成「关闭」。')
       // 换号那一轮任务会"突然变慢"（全量重发 + 重建会话）。把上一次换号的时间与两端摆出来，
       // 用户看到没来由的卡顿时有地方对原因 —— 否则那只是个无法解释的变慢。
       const last = lastAutoSwitchInfo
@@ -1932,12 +1968,12 @@ function Panel(): any {
       // "任务突然变慢"，但后者意味着这个号刚出事 —— 而且它也解释了"为什么没等满间隔就换了"。
       const why =
         last?.reason === 'recently-throttled'
-          ? '，原账号刚被限流'
+          ? t('，原账号刚被限流')
           : last?.reason === 'current-unusable'
-            ? '，原账号不可用'
+            ? t('，原账号不可用')
             : ''
       swHint.textContent = last
-        ? `${base}上次自动换号：${shortTime(last.at)}（${last.from} → ${last.to}${why}）。`
+        ? tf('{0}上次自动换号：{1}（{2} → {3}{4}）。', base, shortTime(last.at), last.from, last.to, why)
         : base
     }
     swRange.addEventListener('input', paintAutoSwitch)
@@ -1957,7 +1993,7 @@ function Panel(): any {
     const serialInput = el('input') as HTMLInputElement
     serialInput.type = 'checkbox'
     const serialTrack = el('span', 'dsw-switch-track')
-    serialLabel.append(serialInput, serialTrack, el('span', undefined, '允许并行调用工具'))
+    serialLabel.append(serialInput, serialTrack, el('span', undefined, t('允许并行调用工具')))
     serialRow.append(serialLabel)
     gateCard.append(serialRow)
     const serialHint = el('p', 'dsw-hint', '')
@@ -1968,10 +2004,10 @@ function Panel(): any {
     const paintSerialTools = (): void => {
       const batched = serialInput.checked
       serialHint.textContent = batched
-        ? '允许并行：模型可以一次发多个工具调用（同一批最多 3 个），DSH 会并行跑它们 —— 一轮请求推进多步，任务更快。' +
-          '工具在 DSH 侧执行、不发 DeepSeek 请求，所以对网页端不可见。切换后的第一轮会全量重发一次。'
-        : '默认：一次只发一个工具调用，等结果回来再决定下一步 —— 后一步能用上前一步的真实结果，逐步反应更稳。' +
-          '代价是每个工具各占一轮请求，任务总耗时明显变长。切换后的第一轮会全量重发一次。'
+        ? t('允许并行：模型可以一次发多个工具调用（同一批最多 3 个），DSH 会并行跑它们 —— 一轮请求推进多步，任务更快。') +
+          t('工具在 DSH 侧执行、不发 DeepSeek 请求，所以对网页端不可见。切换后的第一轮会全量重发一次。')
+        : t('默认：一次只发一个工具调用，等结果回来再决定下一步 —— 后一步能用上前一步的真实结果，逐步反应更稳。') +
+          t('代价是每个工具各占一轮请求，任务总耗时明显变长。切换后的第一轮会全量重发一次。')
     }
     // 初始按**默认**（串行 ⇒ 开关不勾）画一次，免得读回设置之前闪一下错的状态
     serialInput.checked = false
@@ -1982,12 +2018,12 @@ function Panel(): any {
     })
 
     const cleanupRow = el('div', 'dsw-gate-row')
-    cleanupRow.append(el('span', 'dsw-gate-label', '会话清理'))
+    cleanupRow.append(el('span', 'dsw-gate-label', t('会话清理')))
     const cleanupBtns: Record<string, HTMLButtonElement> = {}
     for (const pair of [
-      ['immediate', '立即'],
-      ['deferred', '延迟（推荐）'],
-      ['keep', '不删'],
+      ['immediate', t('立即')],
+      ['deferred', t('延迟（推荐）')],
+      ['keep', t('不删')],
     ] as const) {
       const key = pair[0]
       const btn = el('button', 'dsw-btn ghost dsw-preset', pair[1]) as HTMLButtonElement
@@ -1999,21 +2035,21 @@ function Panel(): any {
     // 手动清理（0.6.11）：链式投喂下自动清理是关的（会话就是链的载体，自动删等于替你清上下文），
     // 所以必须给一个"现在就把网页端弄干净"的动作。
     const cleanupNowRow = el('div', 'dsw-gate-row')
-    cleanupNowRow.append(el('span', 'dsw-gate-label', '立即清理'))
-    const cleanupNowBtn = el('button', 'dsw-btn ghost', '清掉当前网页端会话') as HTMLButtonElement
+    cleanupNowRow.append(el('span', 'dsw-gate-label', t('立即清理')))
+    const cleanupNowBtn = el('button', 'dsw-btn ghost', t('清掉当前网页端会话')) as HTMLButtonElement
     const cleanupNowHint = el('span', 'dsw-hint', '')
     cleanupNowBtn.addEventListener('click', () => {
       cleanupNowBtn.disabled = true
-      cleanupNowHint.textContent = '清理中…'
+      cleanupNowHint.textContent = t('清理中…')
       void api('/cleanup', { method: 'POST', body: '{}' })
         .then((result: any) => {
           const n = Number(result?.cleared ?? 0)
           cleanupNowHint.textContent = n
-            ? `已退出 ${n} 个网页端会话，队列剩 ${result?.pending ?? 0} 个；下一轮会重新当链首（全量发一次）`
-            : `没有在用会话；队列剩 ${result?.pending ?? 0} 个`
+            ? tf('已退出 {0} 个网页端会话，队列剩 {1} 个；下一轮会重新当链首（全量发一次）', n, result?.pending ?? 0)
+            : tf('没有在用会话；队列剩 {0} 个', result?.pending ?? 0)
         })
         .catch((error: any) => {
-          cleanupNowHint.textContent = `清理失败：${error?.message ?? error}`
+          cleanupNowHint.textContent = tf('清理失败：{0}', error?.message ?? error)
         })
         .finally(() => {
           cleanupNowBtn.disabled = false
@@ -2032,12 +2068,12 @@ function Panel(): any {
     autoReloginLabel.append(
       autoReloginInput,
       autoReloginTrack,
-      el('span', undefined, '到期前自动重登（后台每约 2 小时静默跑一次无头浏览器）'),
+      el('span', undefined, t('到期前自动重登（后台每约 2 小时静默跑一次无头浏览器）')),
     )
     autoReloginInput.addEventListener('change', () => void saveGate({ autoRelogin: autoReloginInput.checked }))
     autoReloginRow.append(autoReloginLabel)
     gateCard.append(autoReloginRow)
-    const autoReloginHint = el('p', 'dsw-hint', '缓存凭证实测寿命约 2 小时；关掉它就用上面的「一键重登」手动刷。')
+    const autoReloginHint = el('p', 'dsw-hint', t('缓存凭证实测寿命约 2 小时；关掉它就用上面的「一键重登」手动刷。'))
     gateCard.append(autoReloginHint)
     const cleanupHint = el('p', 'dsw-hint', '')
     gateCard.append(cleanupHint)
@@ -2062,7 +2098,7 @@ function Panel(): any {
       row.append(el('span', 'dsw-gate-label', label))
       const lo = el('input', 'dsw-range') as HTMLInputElement
       const hi = el('input', 'dsw-range') as HTMLInputElement
-      for (const [input, which] of [[lo, '下限'], [hi, '上限']] as const) {
+      for (const [input, which] of [[lo, t('下限')], [hi, t('上限')]] as const) {
         input.type = 'range'
         input.min = String(bounds.min)
         input.max = String(bounds.max)
@@ -2103,24 +2139,24 @@ function Panel(): any {
     }
 
     const batchPair = rangePair(
-      '攒够数量',
+      t('攒够数量'),
       { min: 1, max: 50 },
       '1',
-      (lo, hi) => `${lo}~${hi} 个`,
+      (lo, hi) => tf('{0}~{1} 个', lo, hi),
       (lo, hi) => void saveGate({ cleanupBatch: { min: lo, max: hi } }),
     )
     const delayPair = rangePair(
-      '最长等待',
+      t('最长等待'),
       { min: 5, max: 600 },
       '5',
-      (lo, hi) => `${lo}~${hi} 秒`,
+      (lo, hi) => tf('{0}~{1} 秒', lo, hi),
       (lo, hi) => void saveGate({ cleanupDelayMs: { min: Math.round(lo * 1000), max: Math.round(hi * 1000) } }),
     )
     const gapPair = rangePair(
-      '删除间隔',
+      t('删除间隔'),
       { min: 0, max: 60 },
       '0.1',
-      (lo, hi) => (hi <= 0 ? '不等待' : `${lo.toFixed(1)}~${hi.toFixed(1)} 秒`),
+      (lo, hi) => (hi <= 0 ? t('不等待') : tf('{0}~{1} 秒', lo.toFixed(1), hi.toFixed(1))),
       (lo, hi) => void saveGate({ cleanupGapMs: { min: Math.round(lo * 1000), max: Math.round(hi * 1000) } }),
     )
     cleanupRanges.append(batchPair.row, delayPair.row, gapPair.row)
@@ -2128,16 +2164,16 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '上面三个都是「下限 ~ 上限」：实际取值每次在区间内随机抽 —— 攒批阈值与最长等待每轮清理重抽、' +
-          '删除间隔每删一个重抽。这样"什么时候动手删"就没有固定规律了。',
+        t('上面三个都是「下限 ~ 上限」：实际取值每次在区间内随机抽 —— 攒批阈值与最长等待每轮清理重抽、') +
+          t('删除间隔每删一个重抽。这样"什么时候动手删"就没有固定规律了。'),
       ),
     )
     cleanupRanges.append(
       el(
         'p',
         'dsw-hint',
-        '「删除间隔」只在逐个删除时起作用：优先走一个请求批量删；若服务端不接受批量删（会自动退化为逐个删），' +
-          '相邻两个删除请求之间就按这个间隔停一下 —— 避免"一下子连发几十个删除请求"。',
+        t('「删除间隔」只在逐个删除时起作用：优先走一个请求批量删；若服务端不接受批量删（会自动退化为逐个删），') +
+          t('相邻两个删除请求之间就按这个间隔停一下 —— 避免"一下子连发几十个删除请求"。'),
       ),
     )
 
@@ -2145,8 +2181,8 @@ function Panel(): any {
       el(
         'p',
         'dsw-hint',
-        '并发默认关闭：DSH 的会话标题生成会与主回答同时发往同一账号，网页端同一账号同时只能生成一条，' +
-          '实测双窗口并发不到 6 分钟即触发账号级限制（1 天）。',
+        t('并发默认关闭：DSH 的会话标题生成会与主回答同时发往同一账号，网页端同一账号同时只能生成一条，') +
+          t('实测双窗口并发不到 6 分钟即触发账号级限制（1 天）。'),
       ),
     )
     const gateMsg = el('p', 'dsw-hint dsw-gate-msg', '')
@@ -2158,19 +2194,19 @@ function Panel(): any {
     // 以及失败分类（限流 / 账号被限制 / 鉴权 / 网络各占多少）。
     const ledgerCard = el('div', 'dsw-card')
     const ledgerHead = el('div', 'dsw-cardhead')
-    ledgerHead.append(el('span', 'name', '调用台账'))
-    const ledgerBadge = el('span', 'dsw-badge off', '近 24 小时')
+    ledgerHead.append(el('span', 'name', t('调用台账')))
+    const ledgerBadge = el('span', 'dsw-badge off', t('近 24 小时'))
     ledgerHead.append(ledgerBadge)
     ledgerCard.append(ledgerHead)
     ledgerCard.append(
-      el('p', 'dsw-hint', '本地记录每次调用的结果（不含任何对话内容与凭证）。用来判断节流是否真的在起作用。'),
+      el('p', 'dsw-hint', t('本地记录每次调用的结果（不含任何对话内容与凭证）。用来判断节流是否真的在起作用。')),
     )
     const ledgerKv = el('div', 'dsw-kv')
     ledgerCard.append(ledgerKv)
     const ledgerSparkBox = el('div')
     ledgerCard.append(ledgerSparkBox)
     const ledgerRow = el('div', 'dsw-row')
-    const ledgerRefreshBtn = el('button', 'dsw-btn ghost', '刷新台账') as HTMLButtonElement
+    const ledgerRefreshBtn = el('button', 'dsw-btn ghost', t('刷新台账')) as HTMLButtonElement
     ledgerRow.append(ledgerRefreshBtn)
     ledgerCard.append(ledgerRow)
     const ledgerMsg = el('p', 'dsw-hint dsw-gate-msg', '')
@@ -2193,38 +2229,38 @@ function Panel(): any {
       return out
     }
 
-    const fmtMs = (ms: number): string => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} 分` : `${(ms / 1000).toFixed(1)} 秒`)
+    const fmtMs = (ms: number): string => (ms >= 60_000 ? tf('{0} 分', (ms / 60_000).toFixed(1)) : tf('{0} 秒', (ms / 1000).toFixed(1)))
 
     const renderLedger = (data: any): void => {
       const calls = Number(data?.calls ?? 0)
-      ledgerBadge.textContent = `近 ${data?.hours ?? 24} 小时`
+      ledgerBadge.textContent = tf('近 {0} 小时', data?.hours ?? 24)
       ledgerBadge.className = `dsw-badge ${calls > 0 ? 'on' : 'off'}`
       ledgerKv.textContent = ''
       ledgerSparkBox.textContent = ''
       if (calls === 0) {
-        ledgerMsg.textContent = '还没有记录 —— 跑一次对话后回来看。'
+        ledgerMsg.textContent = t('还没有记录 —— 跑一次对话后回来看。')
         return
       }
       const push = (key: string, value: string): void => {
         ledgerKv.append(el('div', 'k', key), el('div', undefined, value))
       }
-      push('调用次数', `${calls}（成功 ${data.succeeded ?? 0} / 失败 ${data.failed ?? 0}）`)
+      push(t('调用次数'), tf('{0}（成功 {1} / 失败 {2}）', calls, data.succeeded ?? 0, data.failed ?? 0))
       const gaps = data.gaps
       push(
-        '相邻对话间隔',
+        t('相邻对话间隔'),
         gaps
-          ? `中位 ${fmtMs(gaps.p50)} · p90 ${fmtMs(gaps.p90)} · 最短 ${fmtMs(gaps.min)}（样本 ${gaps.samples}）`
-          : '样本不足',
+          ? tf('中位 {0} · p90 {1} · 最短 {2}（样本 {3}）', fmtMs(gaps.p50), fmtMs(gaps.p90), fmtMs(gaps.min), gaps.samples)
+          : t('样本不足'),
       )
       if (gaps && gaps.min < 1_500) {
-        ledgerMsg.textContent = `⚠️ 出现过 ${fmtMs(gaps.min)} 的极短间隔 —— 检查一下节流是否被关掉了。`
+        ledgerMsg.textContent = tf('⚠️ 出现过 {0} 的极短间隔 —— 检查一下节流是否被关掉了。', fmtMs(gaps.min))
       }
       const failures = data.failures ?? {}
       push(
-        '失败分类',
-        Object.keys(failures).length ? Object.entries(failures).map(([key, count]) => `${key} ${count}`).join(' · ') : '无',
+        t('失败分类'),
+        Object.keys(failures).length ? Object.entries(failures).map(([key, count]) => `${key} ${count}`).join(' · ') : t('无'),
       )
-      push('台账占用', `${data.footprint?.files ?? 0} 个文件 · ${Math.round((data.footprint?.bytes ?? 0) / 1024)} KB`)
+      push(t('台账占用'), tf('{0} 个文件 · {1} KB', data.footprint?.files ?? 0, Math.round((data.footprint?.bytes ?? 0) / 1024)))
       // F3（0.2.0）：按账号用量 —— 多账号场景"哪个号在烧钱/在被限"一目了然。
       const byAccount: any[] = Array.isArray(data.byAccount) ? data.byAccount : []
       if (byAccount.length > 0) {
@@ -2234,10 +2270,10 @@ function Panel(): any {
           return hit ? String(hit.label || hit.display || hit.id) : id
         }
         push(
-          '按账号',
+          t('按账号'),
           byAccount
             .sort((a, b) => (Number(b?.calls) || 0) - (Number(a?.calls) || 0))
-            .map((row) => `${nameOf(row.accountId)} ${row.calls} 次（失败 ${row.failed}）`)
+            .map((row) => tf('{0} {1} 次（失败 {2}）', nameOf(row.accountId), row.calls, row.failed))
             .join(' · '),
         )
       }
@@ -2249,14 +2285,14 @@ function Panel(): any {
         if (count > 0) failedHours.add(index)
       })
       ledgerSparkBox.innerHTML = sparkSvg(hourly, failedHours)
-      ledgerSparkBox.append(el('p', 'dsw-hint', `每小时调用量（最近 1 小时在最右，峰值 ${Math.max(0, ...hourly)} 次）`))
+      ledgerSparkBox.append(el('p', 'dsw-hint', tf('每小时调用量（最近 1 小时在最右，峰值 {0} 次）', Math.max(0, ...hourly))))
     }
 
     const loadLedger = async (): Promise<void> => {
       try {
         renderLedger(await api('/ledger?hours=24'))
       } catch (error: any) {
-        ledgerMsg.textContent = `台账读取失败：${error?.message ?? error}`
+        ledgerMsg.textContent = tf('台账读取失败：{0}', error?.message ?? error)
       }
     }
     ledgerRefreshBtn.addEventListener('click', () => void loadLedger())
@@ -2267,13 +2303,13 @@ function Panel(): any {
     // 这边 90 天、只看烧了多少 token。合并成一份会让两边的保留期互相迁就。
     const fmtTokens = (n: number): string => {
       if (!Number.isFinite(n) || n <= 0) return '0'
-      if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(2)} 亿`
-      if (n >= 10_000) return `${(n / 10_000).toFixed(n >= 1_000_000 ? 0 : 1)} 万`
+      if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(2)} ${t('亿')}`
+      if (n >= 10_000) return `${(n / 10_000).toFixed(n >= 1_000_000 ? 0 : 1)} ${t('万')}`
       return String(Math.round(n))
     }
     const fullNum = (n: number): string => (Number.isFinite(n) ? Math.round(n).toLocaleString('zh-CN') : '0')
 
-    const TOKEN_RANGES: [number, string][] = [[1, '今天'], [7, '近 7 天'], [30, '近 30 天'], [0, '总计']]
+    const TOKEN_RANGES: [number, string][] = [[1, t('今天')], [7, t('近 7 天')], [30, t('近 30 天')], [0, t('总计')]]
     let tokenDays = 30
     const tokenRangeBar = el('div', 'dsw-subtabs')
     tokenRangeBar.setAttribute('role', 'tablist')
@@ -2315,38 +2351,38 @@ function Panel(): any {
         },
       }
     }
-    const sTotal = statCell('总 Token')
-    const sIn = statCell('输入 Token')
-    const sOut = statCell('输出 Token')
-    const sCalls = statCell('调用次数')
+    const sTotal = statCell(t('总 Token'))
+    const sIn = statCell(t('输入 Token'))
+    const sOut = statCell(t('输出 Token'))
+    const sCalls = statCell(t('调用次数'))
     const tokenStats = el('div', 'dsw-stats')
     tokenStats.append(sTotal.node, sIn.node, sOut.node, sCalls.node)
     tokenPane.append(tokenStats)
 
     const trendCard = el('div', 'dsw-card')
     const tokenHead = el('div', 'dsw-cardhead')
-    tokenHead.append(el('span', 'name', '按天用量'))
+    tokenHead.append(el('span', 'name', t('按天用量')))
     const tokenBadge = el('span', 'dsw-badge off', '—')
     tokenHead.append(tokenBadge)
     trendCard.append(tokenHead)
     trendCard.append(
-      el('p', 'dsw-hint', '柱高＝当天的输入 + 输出；虚线＝当天调用次数。鼠标停在柱上可看具体数字。'),
+      el('p', 'dsw-hint', t('柱高＝当天的输入 + 输出；虚线＝当天调用次数。鼠标停在柱上可看具体数字。')),
     )
     const legend = el('div', 'dsw-legend')
     legend.innerHTML =
-      '<span><i style="background:var(--accent)"></i>输入</span>' +
-      '<span><i style="background:color-mix(in srgb,var(--accent) 45%,transparent)"></i>输出</span>' +
-      '<span><i style="background:var(--fg2)"></i>调用次数</span>'
+      '<span><i style="background:var(--accent)"></i>' + t('输入') + '</span>' +
+      '<span><i style="background:color-mix(in srgb,var(--accent) 45%,transparent)"></i>' + t('输出') + '</span>' +
+      '<span><i style="background:var(--fg2)"></i>' + t('调用次数') + '</span>'
     const trendBox = el('div')
     trendCard.append(legend, trendBox)
     tokenPane.append(trendCard)
 
     const rankCard = el('div', 'dsw-card')
     const rankHead = el('div', 'dsw-cardhead')
-    rankHead.append(el('span', 'name', '用量分布'))
+    rankHead.append(el('span', 'name', t('用量分布')))
     const rankTabs = el('div', 'dsw-subtabs')
     let rankKey: 'account' | 'model' = 'account'
-    const RANK_KEYS: ['account' | 'model', string][] = [['account', '按账号'], ['model', '按模型']]
+    const RANK_KEYS: ['account' | 'model', string][] = [['account', t('按账号')], ['model', t('按模型')]]
     const rankBtns: HTMLButtonElement[] = []
     const paintRankTabs = (): void => {
       RANK_KEYS.forEach(([key], index) => {
@@ -2375,7 +2411,7 @@ function Panel(): any {
     tokenPane.append(rankCard)
 
     const tokenRow = el('div', 'dsw-row')
-    const tokenRefreshBtn = el('button', 'dsw-btn ghost', '刷新') as HTMLButtonElement
+    const tokenRefreshBtn = el('button', 'dsw-btn ghost', t('刷新')) as HTMLButtonElement
     tokenRefreshBtn.type = 'button'
     tokenRefreshBtn.addEventListener('click', () => void loadUsage())
     tokenRow.append(tokenRefreshBtn)
@@ -2418,7 +2454,7 @@ function Panel(): any {
       const top = niceMax(maxTok)
       const slot = plotW / n
       const barW = Math.max(1.5, slot * 0.62)
-      let out = `<svg class="dsw-trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="按天用量趋势">`
+      let out = `<svg class="dsw-trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="${t('按天用量趋势')}">`
       for (const ratio of [0, 0.5, 1]) {
         const y = padT + plotH - plotH * ratio
         out += `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"></line>`
@@ -2429,7 +2465,7 @@ function Panel(): any {
         const hIn = ((Number(d?.in) || 0) / top) * plotH
         const hOut = ((Number(d?.out) || 0) / top) * plotH
         const yIn = padT + plotH - hIn
-        out += `<g><title>${d?.date}：总 ${fullNum(tokenOf(d))} · 输入 ${fullNum(Number(d?.in) || 0)} / 输出 ${fullNum(Number(d?.out) || 0)} · 调用 ${Number(d?.calls) || 0} 次</title>`
+        out += `<g><title>${tf('{0}：总 {1} · 输入 {2} / 输出 {3} · 调用 {4}', d?.date, fullNum(tokenOf(d)), fullNum(Number(d?.in) || 0), fullNum(Number(d?.out) || 0), Number(d?.calls) || 0)}</title>`
         if (hIn > 0) {
           out += `<rect class="bar-in" x="${x.toFixed(1)}" y="${yIn.toFixed(1)}" width="${barW.toFixed(1)}" height="${hIn.toFixed(1)}" rx="1"></rect>`
         }
@@ -2471,7 +2507,7 @@ function Panel(): any {
       ranks.textContent = ''
       const items: any[] = Array.isArray(rows) ? rows.slice(0, 8) : []
       if (items.length === 0) {
-        ranks.append(el('div', 'dsw-rank empty', '这段时间还没有用量记录。'))
+        ranks.append(el('div', 'dsw-rank empty', t('这段时间还没有用量记录。')))
         return
       }
       const total = Number(lastUsage?.totals?.total) || 0
@@ -2485,7 +2521,7 @@ function Panel(): any {
           el(
             'div',
             'rk-val',
-            `${fmtTokens(value)}${total > 0 ? ` · ${((value / total) * 100).toFixed(1)}%` : ''} · ${Number(row?.calls) || 0} 次`,
+            `${fmtTokens(value)}${total > 0 ? ` · ${((value / total) * 100).toFixed(1)}%` : ''} · ${tf('{0} 次', Number(row?.calls) || 0)}`,
           ),
         )
         const track = el('div', 'rk-track')
@@ -2506,24 +2542,24 @@ function Panel(): any {
       const total = Number(totals.total) || 0
       const calls = Number(totals.calls) || 0
       const serverCalls = Number(totals.serverCalls) || 0
-      const share = (part: number): string => (total > 0 ? `占总量 ${((part / total) * 100).toFixed(1)}%` : '')
-      sTotal.set(fmtTokens(total), calls > 0 ? `服务端口径 ${serverCalls}/${calls} 次` : '')
+      const share = (part: number): string => (total > 0 ? tf('占总量 {0}%', ((part / total) * 100).toFixed(1)) : '')
+      sTotal.set(fmtTokens(total), calls > 0 ? tf('服务端口径 {0}/{1} 次', serverCalls, calls) : '')
       sIn.set(fmtTokens(Number(totals.in) || 0), share(Number(totals.in) || 0))
       sOut.set(fmtTokens(Number(totals.out) || 0), share(Number(totals.out) || 0))
-      sCalls.set(String(calls), calls > 0 ? `成功 ${Number(totals.ok) || 0} · 失败 ${Number(totals.failed) || 0}` : '')
-      tokenBadge.textContent = tokenDays === 0 ? '全部' : `近 ${tokenDays} 天`
+      sCalls.set(String(calls), calls > 0 ? tf('成功 {0} · 失败 {1}', Number(totals.ok) || 0, Number(totals.failed) || 0) : '')
+      tokenBadge.textContent = tokenDays === 0 ? t('全部') : tf('近 {0} 天', tokenDays)
       tokenBadge.className = `dsw-badge ${total > 0 ? 'on' : 'off'}`
       const series: any[] = Array.isArray(data?.series) ? data.series : []
       trendBox.innerHTML = total > 0 ? trendSvg(series) : ''
       if (total <= 0) {
         tokenMsg.textContent =
           calls > 0
-            ? `有 ${calls} 次调用，但没有可用的 token 数（失败调用或不带用量的响应不算）。`
-            : '这段时间还没有用量记录 —— 跑一次对话后点「刷新」。'
+            ? tf('有 {0} 次调用，但没有可用的 token 数（失败调用或不带用量的响应不算）。', calls)
+            : t('这段时间还没有用量记录 —— 跑一次对话后点「刷新」。')
       } else {
         tokenMsg.textContent =
-          `数据覆盖 ${data?.coverage?.from ?? '—'} ~ ${data?.coverage?.to ?? '—'}（保留 ${data?.keepDays ?? 90} 天）。` +
-          '网页端只在部分响应里给出总量，拿不到时按字符估算，所以这两个数是估算值。'
+          tf('数据覆盖 {0} ~ {1}（保留 {2} 天）。', data?.coverage?.from ?? '—', data?.coverage?.to ?? '—', data?.keepDays ?? 90) +
+          t('网页端只在部分响应里给出总量，拿不到时按字符估算，所以这两个数是估算值。')
       }
       renderRanks(rankKey === 'account' ? data?.byAccount : data?.byModel, rankKey)
     }
@@ -2532,7 +2568,7 @@ function Panel(): any {
       try {
         renderUsage(await api(`/usage?days=${tokenDays}`))
       } catch (error: any) {
-        tokenMsg.textContent = `用量读取失败：${error?.message ?? error}`
+        tokenMsg.textContent = tf('用量读取失败：{0}', error?.message ?? error)
       }
     }
     paneFirstShow.token = () => void loadUsage()
@@ -2542,13 +2578,13 @@ function Panel(): any {
     // 换成 Chromium 网络栈后 cipher 列表哈希与 Chrome **逐字节一致**。所以默认走 Chromium。
     // 但要留开关：Chromium 会跟随**系统代理**（Node 完全无视代理），梯子关着时可能反而连不上。
     const transportCard = el('div', 'dsw-card')
-    transportCard.append(el('div', 'dsw-cardhead', '传输层（指纹）'))
+    transportCard.append(el('div', 'dsw-cardhead', t('传输层（指纹）')))
 
     const transportRow = el('div', 'dsw-gate-row')
-    transportRow.append(el('span', 'dsw-gate-label', '请求从哪出去'))
+    transportRow.append(el('span', 'dsw-gate-label', t('请求从哪出去')))
     const transportBtns: Record<string, HTMLButtonElement> = {}
     for (const pair of [
-      ['chromium', 'Chrome 网络栈（推荐）'],
+      ['chromium', t('Chrome 网络栈（推荐）')],
       ['node', 'Node'],
     ] as const) {
       const key = pair[0]
@@ -2565,7 +2601,7 @@ function Panel(): any {
     transportCard.append(transportProxyHint)
 
     const testRow = el('div', 'dsw-gate-row')
-    const transportTestBtn = el('button', 'dsw-btn ghost', '测试传输层（零额度）') as HTMLButtonElement
+    const transportTestBtn = el('button', 'dsw-btn ghost', t('测试传输层（零额度）')) as HTMLButtonElement
     testRow.append(transportTestBtn)
     transportCard.append(testRow)
 
@@ -2584,13 +2620,13 @@ function Panel(): any {
     // 只发增量、把上一条回答挂成父消息。代价是工具协议只存在于链首那条消息里，
     // 一旦服务端把早期上下文丢掉，模型可能不按约定格式发工具调用 —— 所以默认仍是全量。
     const contextCard = el('div', 'dsw-card')
-    contextCard.append(el('div', 'dsw-cardhead', '上下文投喂方式'))
+    contextCard.append(el('div', 'dsw-cardhead', t('上下文投喂方式')))
     const contextRow = el('div', 'dsw-gate-row')
-    contextRow.append(el('span', 'dsw-gate-label', '每轮发什么'))
+    contextRow.append(el('span', 'dsw-gate-label', t('每轮发什么')))
     const contextBtns: Record<string, HTMLButtonElement> = {}
     for (const pair of [
-      ['full', '每轮全量（默认）'],
-      ['chained', '链式投喂（只发增量）'],
+      ['full', t('每轮全量（默认）')],
+      ['chained', t('链式投喂（只发增量）')],
     ] as const) {
       const key = pair[0]
       const btn = el('button', 'dsw-btn ghost dsw-preset', pair[1]) as HTMLButtonElement
@@ -2613,7 +2649,7 @@ function Panel(): any {
     const freshLabel = el('label', 'dsw-switch')
     const freshInput = el('input', 'dsw-switch-input') as HTMLInputElement
     freshInput.type = 'checkbox'
-    freshLabel.append(freshInput, el('span', 'dsw-switch-track'), el('span', undefined, '重开链时换新会话'))
+    freshLabel.append(freshInput, el('span', 'dsw-switch-track'), el('span', undefined, t('重开链时换新会话')))
     freshRow.append(freshLabel)
     contextCard.append(freshRow)
     const freshHint = el('p', 'dsw-hint', '')
@@ -2621,9 +2657,9 @@ function Panel(): any {
 
     const paintFreshSession = (): void => {
       freshHint.textContent = freshInput.checked
-        ? '开：每次重开链都新建一个网页端会话、旧的弃用 —— 上下文最干净，代价是网页端会多出会话。'
-        : '默认关：一个窗口始终只用一个网页端会话。DSH 每轮都会刷新运行时注入，投喂链几乎每个回合都会重开 ——' +
-          '关掉才能保证"聊十句也只有一个会话"。'
+        ? t('开：每次重开链都新建一个网页端会话、旧的弃用 —— 上下文最干净，代价是网页端会多出会话。')
+        : t('默认关：一个窗口始终只用一个网页端会话。DSH 每轮都会刷新运行时注入，投喂链几乎每个回合都会重开 ——') +
+          t('关掉才能保证"聊十句也只有一个会话"。')
     }
     freshInput.checked = false
     paintFreshSession()
@@ -2643,13 +2679,12 @@ function Panel(): any {
       }
       if (chain) {
         contextStatus.textContent =
-          `链式投喂正在跑：网页端会话 ${String(chain.sessionId ?? '').slice(0, 8)}，` +
-          `链上已发 ${chain.turns} 段，父消息 ${chain.parentId}`
+          tf('链式投喂正在跑：网页端会话 {0}，链上已发 {1} 段，父消息 {2}', String(chain.sessionId ?? '').slice(0, 8), chain.turns, chain.parentId)
       } else {
         contextStatus.textContent =
           mode === 'chained'
-            ? '链式投喂：下一条消息会重新起链（当前没有可续的链，或还没开始用）'
-            : '当前：每轮重发全量 prompt（和以前完全一致）'
+            ? t('链式投喂：下一条消息会重新起链（当前没有可续的链，或还没开始用）')
+            : t('当前：每轮重发全量 prompt（和以前完全一致）')
       }
     }
 
@@ -2658,25 +2693,25 @@ function Panel(): any {
       const hint = String(info?.hint ?? '')
       // 设置文件路径单独一行 —— 想手工改配置的人需要它
       const path = String(info?.settingsPath ?? '')
-      contextHintText.textContent = path ? `${hint}\n配置文件：${path}` : hint
+      contextHintText.textContent = path ? `${hint}\n${tf('配置文件：{0}', path)}` : hint
     }
 
     const saveContextMode = async (mode: 'full' | 'chained'): Promise<void> => {
-      contextMsg.textContent = '切换中……'
+      contextMsg.textContent = t('切换中……')
       try {
         const result = await api('/context-mode', { method: 'POST', body: JSON.stringify({ mode }) })
         if (result?.ok) {
           applyContextCard(result)
           contextMsg.textContent =
-            `已切到${result.mode === 'chained' ? '链式投喂' : '每轮全量'}，即时生效` +
+            tf('已切到{0}，即时生效', result.mode === 'chained' ? t('链式投喂') : t('每轮全量')) +
             (result.persisted === false
-              ? '（未能写入配置，重启后会回到上次保存的值）'
-              : '（已写入配置，重启后仍生效）')
+              ? t('（未能写入配置，重启后会回到上次保存的值）')
+              : t('（已写入配置，重启后仍生效）'))
         } else {
-          contextMsg.textContent = `切换失败：${result?.error ?? '未知原因'}`
+          contextMsg.textContent = tf('切换失败：{0}', result?.error ?? t('未知原因'))
         }
       } catch (error: any) {
-        contextMsg.textContent = `切换失败：${error?.message ?? error}`
+        contextMsg.textContent = tf('切换失败：{0}', error?.message ?? error)
       }
     }
 
@@ -2684,32 +2719,32 @@ function Panel(): any {
     // 单独一个标签而不是塞进别的页：这三块都是"偶尔看一眼"的信息，
     // 混进日常操作的页里只会稀释注意力。
     const aboutCard = el('div', 'dsw-card')
-    aboutCard.append(el('div', 'dsw-cardhead', '版本与更新'))
+    aboutCard.append(el('div', 'dsw-cardhead', t('版本与更新')))
     const versionKv = el('div', 'dsw-kv')
     aboutCard.append(versionKv)
     const updateRow = el('div', 'dsw-row')
     updateRow.style.marginTop = '8px'
-    const updateBtn = el('button', 'dsw-btn ghost', '检查更新') as HTMLButtonElement
+    const updateBtn = el('button', 'dsw-btn ghost', t('检查更新')) as HTMLButtonElement
     updateRow.append(updateBtn)
     aboutCard.append(updateRow)
     const updateMsg = el('p', 'dsw-hint dsw-gate-msg', '')
     aboutCard.append(updateMsg)
     aboutCard.append(
-      el('p', 'dsw-hint', '插件装不了包，所以这里只做"检查 + 给链接"。GitHub 在国内可能连不上，检查失败是正常的。'),
+      el('p', 'dsw-hint', t('插件装不了包，所以这里只做"检查 + 给链接"。GitHub 在国内可能连不上，检查失败是正常的。')),
     )
     aboutPane.append(aboutCard)
 
     const renderVersion = (info: any): void => {
       versionKv.textContent = ''
-      versionKv.append(el('div', 'k', '当前版本'), el('div', undefined, info?.current || '未知'))
+      versionKv.append(el('div', 'k', t('当前版本')), el('div', undefined, info?.current || t('未知')))
       versionKv.append(
-        el('div', 'k', '登录态探活'),
+        el('div', 'k', t('登录态探活')),
         el(
           'div',
           undefined,
           info?.probeIntervalMs > 0
-            ? `每 ${Math.round(info.probeIntervalMs / 60_000)} 分钟一次（只读、零额度）`
-            : '已关闭',
+            ? tf('每 {0} 分钟一次（只读、零额度）', Math.round(info.probeIntervalMs / 60_000))
+            : t('已关闭'),
         ),
       )
     }
@@ -2717,24 +2752,25 @@ function Panel(): any {
     updateBtn.addEventListener('click', () => {
       void (async () => {
         updateBtn.disabled = true
-        updateMsg.textContent = '正在检查……'
+        updateMsg.textContent = t('正在检查……')
         try {
           const result = await api('/update-check', { method: 'POST', body: '{}' })
           if (!result?.ok) {
-            updateMsg.textContent = `检查失败：${result?.error ?? '未知原因'}`
+            updateMsg.textContent = tf('检查失败：{0}', result?.error ?? t('未知原因'))
             return
           }
           const current = result.current
           renderVersion({ current, probeIntervalMs })
           if (result.hasUpdate) {
-            updateMsg.textContent = `发现新版本 ${result.latest}（当前 ${current}）${
-              result.publishedAt ? ` · ${shortTime(result.publishedAt)} 发布` : ''
-            }${result.url ? ` · ${result.url}` : ''}`
+            updateMsg.textContent =
+              tf('发现新版本 {0}（当前 {1}）', result.latest, current) +
+              (result.publishedAt ? tf(' · {0} 发布', shortTime(result.publishedAt)) : '') +
+              (result.url ? ` · ${result.url}` : '')
           } else {
-            updateMsg.textContent = `已是最新版本（${current}）。`
+            updateMsg.textContent = tf('已是最新版本（{0}）。', current)
           }
         } catch (error: any) {
-          updateMsg.textContent = `检查失败：${error?.message ?? error}`
+          updateMsg.textContent = tf('检查失败：{0}', error?.message ?? error)
         } finally {
           updateBtn.disabled = false
         }
@@ -2742,24 +2778,24 @@ function Panel(): any {
     })
 
     const pathsCard = el('div', 'dsw-card')
-    pathsCard.append(el('div', 'dsw-cardhead', '数据位置'))
+    pathsCard.append(el('div', 'dsw-cardhead', t('数据位置')))
     pathsCard.append(
-      el('p', 'dsw-hint', '插件的本地状态都在 DSH 主目录下，不进通用配置面（避免凭证混进 settings/credentials）。'),
+      el('p', 'dsw-hint', t('插件的本地状态都在 DSH 主目录下，不进通用配置面（避免凭证混进 settings/credentials）。')),
     )
     const pathsKv = el('div', 'dsw-kv')
     pathsCard.append(pathsKv)
     pathsCard.append(
-      el('p', 'dsw-hint', '⚠️ 账号库里每个文件都是可完整登录的凭证；导出的备份同样是明文 —— 账号库卡片里的提示请当真。'),
+      el('p', 'dsw-hint', t('⚠️ 账号库里每个文件都是可完整登录的凭证；导出的备份同样是明文 —— 账号库卡片里的提示请当真。')),
     )
     aboutPane.append(pathsCard)
 
     const renderPaths = (paths: any): void => {
       pathsKv.textContent = ''
       const rows: [string, string][] = [
-        ['账号库', paths?.accounts || '（未知）'],
-        ['账号索引', paths?.webLogin ? `${paths.webLogin}/accounts.json` : '（未知）'],
-        ['调用台账', paths?.ledger || '（未知）'],
-        ['导出备份', paths?.webLogin ? `${paths.webLogin}/exports/` : '（未知）'],
+        [t('账号库'), paths?.accounts || t('（未知）')],
+        [t('账号索引'), paths?.webLogin ? `${paths.webLogin}/accounts.json` : t('（未知）')],
+        [t('调用台账'), paths?.ledger || t('（未知）')],
+        [t('导出备份'), paths?.webLogin ? `${paths.webLogin}/exports/` : t('（未知）')],
       ]
       for (const [key, value] of rows) {
         pathsKv.append(el('div', 'k', key), el('div', 'dsw-path', value))
@@ -2767,32 +2803,32 @@ function Panel(): any {
     }
 
     const riskCard = el('div', 'dsw-card')
-    riskCard.append(el('div', 'dsw-cardhead', '关于「自动换号」（默认关闭）'))
+    riskCard.append(el('div', 'dsw-cardhead', t('关于「自动换号」（默认关闭）')))
     riskCard.append(
       el(
         'p',
         'dsw-hint',
-        '💡 账号库支持一键手动切换；「防风控」页的「自动换号」滑块可以让它按时间轮换 —— ' +
-          '但默认是关闭的，因为下面这些理由仍然成立：开它是在拿「降低机器特征」换「摊薄单账号密度」。',
+        t('💡 账号库支持一键手动切换；「防风控」页的「自动换号」滑块可以让它按时间轮换 —— ') +
+          t('但默认是关闭的，因为下面这些理由仍然成立：开它是在拿「降低机器特征」换「摊薄单账号密度」。'),
       ),
     )
     riskCard.append(
       el(
         'p',
         'dsw-hint',
-        '参考项目切的是「CLI 下次启动用哪个账号」——服务端看不到；而我们每次对话都实时发请求。' +
-          '真人不会在几分钟内换一个账号接着发消息，自动换号是极强的机器行为特征，' +
-          '与本插件在传输层指纹、随机间隔、会话清理上「降低机器可识别性」的努力直接冲突。' +
-          '⇒ 所以它默认关闭，而且判据只看时间、不看限流状态（"一被限流就换"更糟：同一出口 IP 上多号交替活跃，更像有组织的规避）。',
+        t('参考项目切的是「CLI 下次启动用哪个账号」——服务端看不到；而我们每次对话都实时发请求。') +
+          t('真人不会在几分钟内换一个账号接着发消息，自动换号是极强的机器行为特征，') +
+          t('与本插件在传输层指纹、随机间隔、会话清理上「降低机器可识别性」的努力直接冲突。') +
+          t('⇒ 所以它默认关闭，而且判据只看时间、不看限流状态（"一被限流就换"更糟：同一出口 IP 上多号交替活跃，更像有组织的规避）。'),
       ),
     )
     riskCard.append(
       el(
         'p',
         'dsw-hint',
-        '另外：同一服务商会把多账号关联起来（同设备 / 同 IP / 同指纹 / 相近的行为模式）。' +
-          '一旦被判定为同一人的多开小号，处置通常比单账号超频更重，而且可能波及全部关联账号。' +
-          '所以账号库的目标是「在自己的多个正常账号之间切换更省事」，不是「靠轮换把限流绕过去」。',
+        t('另外：同一服务商会把多账号关联起来（同设备 / 同 IP / 同指纹 / 相近的行为模式）。') +
+          t('一旦被判定为同一人的多开小号，处置通常比单账号超频更重，而且可能波及全部关联账号。') +
+          t('所以账号库的目标是「在自己的多个正常账号之间切换更省事」，不是「靠轮换把限流绕过去」。'),
       ),
     )
     aboutPane.append(riskCard)
@@ -2809,36 +2845,36 @@ function Panel(): any {
       transportBtns.chromium.disabled = !available
       transportBtns.chromium.title = available
         ? ''
-        : '本环境找不到 Edge/Chrome，也没有 electron.net.fetch，不支持 Chrome 网络栈'
+        : t('本环境找不到 Edge/Chrome，也没有 electron.net.fetch，不支持 Chrome 网络栈')
 
       const parts = [
-        effective === 'chromium' ? '实际生效：Chrome 网络栈' : '实际生效：Node fetch',
+        effective === 'chromium' ? t('实际生效：Chrome 网络栈') : t('实际生效：Node fetch'),
       ]
-      if (info.degraded) parts.push('配置要求 Chrome，但本环境找不到 Edge/Chrome 也没有 electron.net.fetch，已降级为 Node')
+      if (info.degraded) parts.push(t('配置要求 Chrome，但本环境找不到 Edge/Chrome 也没有 electron.net.fetch，已降级为 Node'))
       if (effective === 'chromium') {
-        if (info.viaBrowserProxy) parts.push('通过系统 Edge/Chrome 进程代理')
-        else parts.push('cipher 列表哈希与 Chrome 一致、ALPN 走 h2')
+        if (info.viaBrowserProxy) parts.push(t('通过系统 Edge/Chrome 进程代理'))
+        else parts.push(t('cipher 列表哈希与 Chrome 一致、ALPN 走 h2'))
       }
       transportHint.textContent = parts.join(' · ')
       transportProxyHint.textContent = String(info.hint ?? '')
     }
 
     const saveTransport = async (kind: 'chromium' | 'node'): Promise<void> => {
-      transportMsg.textContent = '切换中……'
+      transportMsg.textContent = t('切换中……')
       try {
         const result = await api('/transport', { method: 'POST', body: JSON.stringify({ transport: kind }) })
         if (result?.ok) {
           applyTransportCard(result)
           transportMsg.textContent =
-            `已切换到 ${result.effective === 'chromium' ? 'Chrome 网络栈' : 'Node fetch'}，即时生效` +
+            tf('已切换到 {0}，即时生效', result.effective === 'chromium' ? t('Chrome 网络栈') : 'Node fetch') +
             (result.persisted === false
-              ? '（未能写入配置，重启后会回到上次保存的值）'
-              : '（已写入配置，重启后仍生效）')
+              ? t('（未能写入配置，重启后会回到上次保存的值）')
+              : t('（已写入配置，重启后仍生效）'))
         } else {
-          transportMsg.textContent = `切换失败：${result?.error ?? '未知原因'}`
+          transportMsg.textContent = tf('切换失败：{0}', result?.error ?? t('未知原因'))
         }
       } catch (error: any) {
-        transportMsg.textContent = `切换失败：${error?.message ?? error}`
+        transportMsg.textContent = tf('切换失败：{0}', error?.message ?? error)
       }
     }
 
@@ -2846,7 +2882,7 @@ function Panel(): any {
       void (async () => {
         transportTestBtn.disabled = true
         transportTestOut.style.display = ''
-        transportTestOut.textContent = '正在探测（指纹 / 流式 / 鉴权）……'
+        transportTestOut.textContent = t('正在探测（指纹 / 流式 / 鉴权）……')
         try {
           const result = await api('/diagnostics/net-fetch', {
             method: 'POST',
@@ -2856,18 +2892,18 @@ function Panel(): any {
           for (const step of result?.results ?? []) {
             const title = String(step.step ?? '')
             if (title.startsWith('①')) {
-              lines.push(`① 指纹  ja4=${step.ja4 ?? '-'}  HTTP=${step.http_version ?? '-'}`)
+              lines.push(tf('① 指纹  ja4={0}  HTTP={1}', step.ja4 ?? '-', step.http_version ?? '-'))
             } else if (title.startsWith('②')) {
               lines.push(
-                `② 流式  ${step.ok ? '支持' : '不支持'}  分片=${step.chunks ?? 0}  abort=${step.abortedEarly ? '生效' : '未生效'}`,
+                tf('② 流式  {0}  分片={1}  abort={2}', step.ok ? t('支持') : t('不支持'), step.chunks ?? 0, step.abortedEarly ? t('生效') : t('未生效')),
               )
             } else if (title.startsWith('③')) {
-              lines.push(`③ 鉴权  HTTP ${step.status ?? '-'}  ${step.ok ? '通过' : (step.error ?? '未通过')}`)
+              lines.push(tf('③ 鉴权  HTTP {0}  {1}', step.status ?? '-', step.ok ? t('通过') : (step.error ?? t('未通过'))))
             }
           }
           transportTestOut.textContent = lines.length ? lines.join('\n') : JSON.stringify(result)
         } catch (error: any) {
-          transportTestOut.textContent = `探测失败：${error?.message ?? error}`
+          transportTestOut.textContent = tf('探测失败：{0}', error?.message ?? error)
         } finally {
           transportTestBtn.disabled = false
         }
@@ -2878,12 +2914,12 @@ function Panel(): any {
       try {
         applyTransportCard(await api('/transport'))
       } catch {
-        transportMsg.textContent = '传输层设置读取失败（宿主未响应）'
+        transportMsg.textContent = t('传输层设置读取失败（宿主未响应）')
       }
       try {
         applyContextCard(await api('/context-mode'))
       } catch {
-        contextMsg.textContent = '上下文设置读取失败（宿主未响应）'
+        contextMsg.textContent = t('上下文设置读取失败（宿主未响应）')
       }
     })()
 
@@ -2910,11 +2946,11 @@ function Panel(): any {
       maxValue.textContent = `${hi}ms`
       intervalHint.textContent =
         lo === hi
-          ? `固定间隔 ${lo}ms（上下限相等）。建议拉开成区间 —— 固定值方差≈0，是明显的「定时器特征」。`
-          : `实际等待在 ${lo}~${hi}ms 之间随机取值（均值约 ${Math.round((lo + hi) / 2)}ms）。`
+          ? tf('固定间隔 {0}ms（上下限相等）。建议拉开成区间 —— 固定值方差≈0，是明显的「定时器特征」。', lo)
+          : tf('实际等待在 {0}~{1}ms 之间随机取值（均值约 {2}ms）。', lo, hi, Math.round((lo + hi) / 2))
 
       presetRow.textContent = ''
-      presetRow.append(el('span', 'dsw-gate-label', '快捷'))
+      presetRow.append(el('span', 'dsw-gate-label', t('快捷')))
       const presets: { min: number; max: number }[] =
         g.presets ?? [{ min: 1_500, max: 2_500 }, { min: 2_000, max: 4_000 }, { min: 5_000, max: 9_000 }]
       for (const preset of presets) {
@@ -2923,7 +2959,7 @@ function Panel(): any {
         const btn = el(
           'button',
           'dsw-btn ghost dsw-preset',
-          `${preset.min}~${preset.max}ms${isDefault ? '（推荐）' : ''}`,
+          `${preset.min}~${preset.max}ms${isDefault ? t('（推荐）') : ''}`,
         ) as HTMLButtonElement
         btn.addEventListener('click', () =>
           void saveGate({ minRequestIntervalMs: preset.min, maxRequestIntervalMs: preset.max }),
@@ -2998,12 +3034,11 @@ function Panel(): any {
       }
       cleanupHint.textContent =
         mode === 'keep'
-          ? '不删：请求最少，但网页端会留下临时会话记录。'
+          ? t('不删：请求最少，但网页端会留下临时会话记录。')
           : mode === 'immediate'
-            ? '立即：调用结束后 1.5 秒删掉（老行为，每轮多一个删除请求）。'
-            : `延迟：这一轮攒够 ${g.cleanup?.batchSize ?? 8} 个、或最多等 ` +
-              `${Math.round((g.cleanup?.delayMs ?? 90_000) / 1000)} 秒就集中清理，并优先用一个请求批量删 ——` +
-              '减少「每轮建一个立刻删一个」的机器特征。上面三个区间决定"这一轮具体攒几个 / 等多久"。'
+            ? t('立即：调用结束后 1.5 秒删掉（老行为，每轮多一个删除请求）。')
+            : tf('延迟：这一轮攒够 {0} 个、或最多等 {1} 秒就集中清理，并优先用一个请求批量删 ——', g.cleanup?.batchSize ?? 8, Math.round((g.cleanup?.delayMs ?? 90_000) / 1000)) +
+              t('减少「每轮建一个立刻删一个」的机器特征。上面三个区间决定"这一轮具体攒几个 / 等多久"。')
     }
 
     const saveGate = async (patch: {
@@ -3025,31 +3060,34 @@ function Panel(): any {
       cleanupDelayMs?: { min: number; max: number }
       cleanupGapMs?: { min: number; max: number }
     }): Promise<void> => {
-      gateMsg.textContent = '保存中……'
+      gateMsg.textContent = t('保存中……')
       try {
         const result = await api('/gate', { method: 'POST', body: JSON.stringify(patch) })
         if (result?.ok) {
           applyGate(result)
+          const gapTxt = result.cleanup?.gapRange
+            ? tf('删除间隔 {0}~{1}s', (result.cleanup.gapRange.min / 1000).toFixed(1), (result.cleanup.gapRange.max / 1000).toFixed(1))
+            : t('删除间隔关')
+          const batchTxt = result.cleanup?.batchRange
+            ? tf('（阈值 {0}~{1} 个 · 等待 {2}~{3}s · {4}）',
+                result.cleanup.batchRange.min, result.cleanup.batchRange.max,
+                Math.round((result.cleanup.delayRange?.min ?? 0) / 1000),
+                Math.round((result.cleanup.delayRange?.max ?? 0) / 1000),
+                gapTxt)
+            : ''
           gateMsg.textContent =
-            `已生效：${result.allowConcurrent ? '允许并发（不推荐）' : '串行'} · ` +
-            `间隔 ${result.minRequestIntervalMs}~${result.maxRequestIntervalMs}ms · ` +
-            `清理 ${result.sessionCleanup ?? result.cleanup?.mode ?? '-'}` +
-            (result.cleanup?.batchRange
-              ? `（阈值 ${result.cleanup.batchRange.min}~${result.cleanup.batchRange.max} 个 · ` +
-                `等待 ${Math.round((result.cleanup.delayRange?.min ?? 0) / 1000)}~` +
-                `${Math.round((result.cleanup.delayRange?.max ?? 0) / 1000)}s · ` +
-                (result.cleanup.gapRange
-                  ? `删除间隔 ${(result.cleanup.gapRange.min / 1000).toFixed(1)}~${(result.cleanup.gapRange.max / 1000).toFixed(1)}s`
-                  : '删除间隔关') +
-                '）'
-              : '') +
-            ` · prompt 上限 ${fmtChars(Number(result.maxPromptChars ?? 0))}` +
-            (result.persisted === false ? ` ⚠️ ${result.warning ?? '未能写入配置'}` : '（已写入配置，重启后仍生效）')
+            tf('已生效：{0} · 间隔 {1}~{2}ms · 清理 {3}',
+              result.allowConcurrent ? t('允许并发（不推荐）') : t('串行'),
+              result.minRequestIntervalMs, result.maxRequestIntervalMs,
+              result.sessionCleanup ?? result.cleanup?.mode ?? '-') +
+            batchTxt +
+            tf(' · prompt 上限 {0}', fmtChars(Number(result.maxPromptChars ?? 0))) +
+            (result.persisted === false ? ` ⚠️ ${result.warning ?? t('未能写入配置')}` : t('（已写入配置，重启后仍生效）'))
         } else {
-          gateMsg.textContent = `保存失败：${result?.error ?? '未知原因'}`
+          gateMsg.textContent = tf('保存失败：{0}', result?.error ?? t('未知原因'))
         }
       } catch (error: any) {
-        gateMsg.textContent = `保存失败：${error?.message ?? error}`
+        gateMsg.textContent = tf('保存失败：{0}', error?.message ?? error)
       }
     }
 
@@ -3068,7 +3106,7 @@ function Panel(): any {
       try {
         applyGate(await api('/gate'))
       } catch {
-        gateMsg.textContent = '节流设置读取失败（宿主未响应）'
+        gateMsg.textContent = t('节流设置读取失败（宿主未响应）')
       }
     })()
 
@@ -3077,16 +3115,16 @@ function Panel(): any {
     recoverBtn.addEventListener('click', () => {
       void (async () => {
         recoverBtn.disabled = true
-        showMessage('正在从已登录窗口分区读取凭证……（复用上次登录态，不需要重新登录）')
+        showMessage(t('正在从已登录窗口分区读取凭证……（复用上次登录态，不需要重新登录）'))
         try {
           const result = await api('/login/recover', { method: 'POST', body: '{}' })
           if (result?.ok) {
             showMessage(`${result.verified ? '✅' : '⚠️'} ${result.message}`, result.verified ? 'ok' : '')
           } else {
-            showMessage(`❌ ${result?.message ?? '恢复失败'}`, 'err')
+            showMessage(`❌ ${result?.message ?? t('恢复失败')}`, 'err')
           }
         } catch (error: any) {
-          showMessage(`恢复失败：${error?.message ?? error}`, 'err')
+          showMessage(tf('恢复失败：{0}', error?.message ?? error), 'err')
         }
         recoverBtn.disabled = false
         await refresh(false)
@@ -3100,15 +3138,15 @@ function Panel(): any {
           const result = await api('/login/external', { method: 'POST', body: '{}' })
           if (result?.ok) {
             showMessage(
-              `已用系统默认浏览器打开 ${result.url}\n` +
-                '① 在浏览器里正常登录；②按 F12 → Console，粘贴下方「手动粘贴 Token」卡里的那行命令；' +
-                '③ 把打印出来的结果粘到那张卡的输入框 → 点「保存并验证」。',
+              tf('已用系统默认浏览器打开 {0}\n', result.url) +
+                t('① 在浏览器里正常登录；②按 F12 → Console，粘贴下方「手动粘贴 Token」卡里的那行命令；') +
+                t('③ 把打印出来的结果粘到那张卡的输入框 → 点「保存并验证」。'),
             )
           } else {
-            showMessage(`打开失败：${result?.message ?? '未知原因'}；请手动在浏览器访问 ${result?.url ?? 'https://chat.deepseek.com'}`, 'err')
+            showMessage(tf('打开失败：{0}；请手动在浏览器访问 {1}', result?.message ?? t('未知原因'), result?.url ?? 'https://chat.deepseek.com'), 'err')
           }
         } catch (error: any) {
-          showMessage(`打开失败：${error?.message ?? error}`, 'err')
+          showMessage(tf('打开失败：{0}', error?.message ?? error), 'err')
         }
         externalBtn.disabled = false
       })()
@@ -3121,7 +3159,7 @@ function Panel(): any {
         // 否则用户在等待期间再点一下就会开第二个登录窗口（并发提交凭证）。
         browserBtn.dataset.busy = '1'
         showMessage(
-          '正在启动浏览器……会先清掉上次的登录状态，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。',
+          t('正在启动浏览器……会先清掉上次的登录状态，请在其中登录 DeepSeek（登录成功后会自动捕获，不用复制粘贴）。'),
         )
         try {
           // fresh：登录前先清掉独立 profile 与登录分区里的登录态。
@@ -3133,20 +3171,20 @@ function Panel(): any {
             if (result.ok) {
               showMessage(`${result.verified ? '✅' : '⚠️'} ${result.message}${result.display ? `（${result.display}）` : ''}`, result.verified ? 'ok' : '')
             } else {
-              showMessage(`❌ ${result.message ?? `登录未完成（${result.reason ?? '未知'}）`}`, 'err')
+              showMessage(`❌ ${result.message ?? tf('登录未完成（{0}）', result.reason ?? t('未知'))}`, 'err')
             }
           } else if (!result?.started) {
             showMessage(
               result?.reason === 'not-electron'
-                ? '当前宿主进程无法开 Electron 窗口，且没找到可用的 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token。'
-                : `打开失败：${result?.reason ?? '未知原因'}`,
+                ? t('当前宿主进程无法开 Electron 窗口，且没找到可用的 Edge/Chrome：请用「用我的默认浏览器登录」+ 手动粘贴 Token。')
+                : tf('打开失败：{0}', result?.reason ?? t('未知原因')),
               'err',
             )
           } else {
-            showMessage('登录窗口已打开，正在旁路捕获登录凭证……')
+            showMessage(t('登录窗口已打开，正在旁路捕获登录凭证……'))
           }
         } catch (error: any) {
-          showMessage(`打开登录窗口失败：${error?.message ?? error}`, 'err')
+          showMessage(tf('打开登录窗口失败：{0}', error?.message ?? error), 'err')
         }
         delete browserBtn.dataset.busy
         boostUntil = Date.now() + 5 * 60_000
@@ -3158,28 +3196,28 @@ function Panel(): any {
       void (async () => {
         const raw = tokenInput.value.trim()
         if (!raw) {
-          showMessage('请先粘贴 userToken', 'err')
+          showMessage(t('请先粘贴 userToken'), 'err')
           return
         }
         const [tokenLine, ...rest] = raw.split('\n')
         const token = tokenLine.trim()
         const cookie = rest.join(' ').trim()
         tokenBtn.disabled = true
-        showMessage('正在校验 token……')
+        showMessage(t('正在校验 token……'))
         try {
           const result = await api('/login/token', { method: 'POST', body: JSON.stringify({ token, cookie }) })
           if (result?.ok) {
             if (result.error) {
               showMessage(`⚠️ ${result.error}`, '')
             } else {
-              showMessage(`✅ ${result.display ? `账号 ${result.display} · ` : ''}token 校验通过，已保存`, 'ok')
+              showMessage(`✅ ${result.display ? tf('账号 {0} · ', result.display) : ''}${t('token 校验通过，已保存')}`, 'ok')
             }
             tokenInput.value = ''
           } else {
-            showMessage(`❌ 校验失败：${result?.error ?? '未知原因'}`, 'err')
+            showMessage(tf('❌ 校验失败：{0}', result?.error ?? t('未知原因')), 'err')
           }
         } catch (error: any) {
-          showMessage(`保存失败：${error?.message ?? error}`, 'err')
+          showMessage(tf('保存失败：{0}', error?.message ?? error), 'err')
         }
         tokenBtn.disabled = false
         await refresh(false)
@@ -3222,42 +3260,42 @@ function Panel(): any {
           await api('/logout', { method: 'POST', body: '{}' })
           // 视觉上把 token 输入框也清掉，避免误以为「还是那个账号」
           tokenInput.value = ''
-          showMessage(thenLogin ? '已退出当前账号，正在打开登录窗口……' : '已退出当前账号：本地凭证与浏览器登录态都已清除。')
+          showMessage(thenLogin ? t('已退出当前账号，正在打开登录窗口……') : t('已退出当前账号：本地凭证与浏览器登录态都已清除。'))
           await refresh(false)
           if (thenLogin) {
             const result = await api('/login/browser', { method: 'POST', body: '{}' })
             if (result?.started === false) {
-              showMessage(`已退出账号；打开登录窗口失败：${result?.reason ?? '未知原因'}（可改用手动粘贴 token）`, 'err')
+              showMessage(tf('已退出账号；打开登录窗口失败：{0}（可改用手动粘贴 token）', result?.reason ?? t('未知原因')), 'err')
             } else {
               boostUntil = Date.now() + 180_000
-              showMessage('已退出账号，登录窗口已打开：请在窗口里登录其它账号，凭证会自动捕获。')
+              showMessage(t('已退出账号，登录窗口已打开：请在窗口里登录其它账号，凭证会自动捕获。'))
             }
           }
         } catch (error: any) {
-          showMessage(`退出失败：${error?.message ?? error}`, 'err')
+          showMessage(tf('退出失败：{0}', error?.message ?? error), 'err')
         } finally {
           await refresh(false)
         }
       })()
     }
 
-    armConfirm(logoutBtn, '退出当前账号', '确认退出？', () => doLogout(false))
-    armConfirm(switchBtn, '退出并登录其它账号', '确认退出并换号？', () => doLogout(true))
+    armConfirm(logoutBtn, t('退出当前账号'), t('确认退出？'), () => doLogout(false))
+    armConfirm(switchBtn, t('退出并登录其它账号'), t('确认退出并换号？'), () => doLogout(true))
 
     testBtn.addEventListener('click', () => {
       void (async () => {
         testBtn.disabled = true
         testOut.style.display = 'block'
         testOut.className = 'dsw-msg'
-        testOut.textContent = '请求中……（首次调用要解 PoW，可能需要几秒）'
+        testOut.textContent = t('请求中……（首次调用要解 PoW，可能需要几秒）')
         try {
           const result = await api('/test', { method: 'POST', body: JSON.stringify({ model: modelSelect.value }) })
           if (result?.ok) {
             testOut.className = 'dsw-msg ok'
-            testOut.textContent = `✅ ${result.ms}ms · ${result.model}\n${result.text || '(空响应)'}${result.reasoning ? `\n\n[思考] ${result.reasoning}` : ''}`
+            testOut.textContent = `✅ ${result.ms}ms · ${result.model}\n${result.text || t('(空响应)')}${result.reasoning ? `\n\n${tf('[思考] {0}', result.reasoning)}` : ''}`
           } else {
             testOut.className = 'dsw-msg err'
-            testOut.textContent = `❌ ${result?.code ? `[${result.code}] ` : ''}${result?.error ?? '失败'}`
+            testOut.textContent = `❌ ${result?.code ? `[${result.code}] ` : ''}${result?.error ?? t('失败')}`
           }
         } catch (error: any) {
           testOut.className = 'dsw-msg err'
@@ -3288,12 +3326,23 @@ function Panel(): any {
       if (Math.random() < 0.15) void refresh(false)
     }, 2000)
 
-    return () => {
+    const unsubLocale = onLocaleChange(() => {
+      // Locale changed — tear down and let React remount via state bump is handled below
       disposed = true
       if (timer !== undefined) window.clearInterval(timer)
       window.clearInterval(countdownTimer)
+      if (hostRef.current) hostRef.current.replaceChildren()
+      // Force effect re-run by toggling a data attribute observed via custom event
+      window.dispatchEvent(new CustomEvent('dsw-locale-changed'))
+    })
+
+    return () => {
+      disposed = true
+      unsubLocale()
+      if (timer !== undefined) window.clearInterval(timer)
+      window.clearInterval(countdownTimer)
     }
-  }, [])
+  }, [localeEpoch])
 
   return createElement('div', { ref: hostRef })
 }
@@ -3302,7 +3351,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(
     () =>
       ctx.slots.inject('settings.section', () =>
-        ctx.slots.register({ name: 'settings.section', id: 'deepseek-web-login', order: 46, label: () => 'DeepSeek 网页登录' }, () =>
+        ctx.slots.register({ name: 'settings.section', id: 'deepseek-web-login', order: 46, label: () => t('DeepSeek 网页登录') }, () =>
           createElement(Panel),
         ),
       ),

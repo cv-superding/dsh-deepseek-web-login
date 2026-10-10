@@ -321,8 +321,8 @@ export interface ModelSpec {
 export const MODEL_SPECS: ModelSpec[] = [
   {
     id: 'deepseek-chat',
-    name: 'DeepSeek 网页 · 快速模式（不思考）',
-    description: '同一模型，thinking 关闭：直接作答、最快、最省免费额度。适合工具调用/改写/检索类任务',
+    name: 'DeepSeek Web · Fast (no thinking)',
+    description: 'Same model, thinking off: direct answers, fastest, saves free quota. Good for tool calls / rewrite / retrieval',
     modelType: 'default',
     thinking: false,
     configurableThinking: true,
@@ -331,8 +331,8 @@ export const MODEL_SPECS: ModelSpec[] = [
   },
   {
     id: 'deepseek-reasoner',
-    name: 'DeepSeek 网页 · 快速模式（深度思考）',
-    description: '同一模型，thinking 开启：先推理再作答（推理流作为思考块回传）。适合数学/多步调试/规划，更慢也更耗额度',
+    name: 'DeepSeek Web · Fast (deep thinking)',
+    description: 'Same model, thinking on: reason then answer (reasoning stream as thinking blocks). Better for math / multi-step debug / planning; slower and uses more quota',
     modelType: 'default',
     thinking: true,
     configurableThinking: true,
@@ -357,12 +357,12 @@ const EFFORT_HIGH = 'high'
 const EFFORT_MAX = 'max'
 
 const REASONING_EFFORTS = [
-  { id: EFFORT_OFF, name: 'Off', description: '关闭思考（网页快速模式）' },
-  { id: EFFORT_LOW, name: 'Low', description: '开启思考（网页只区分开/关，等同 High）' },
-  { id: EFFORT_HIGH, name: 'High', description: '开启思考（默认）' },
-  { id: EFFORT_MAX, name: 'Max', description: '开启思考（网页只区分开/关，等同 High）' },
+  { id: EFFORT_OFF, name: 'Off', description: 'Thinking off (web fast mode)' },
+  { id: EFFORT_LOW, name: 'Low', description: 'Thinking on (web only has on/off; same as High)' },
+  { id: EFFORT_HIGH, name: 'High', description: 'Thinking on (default)' },
+  { id: EFFORT_MAX, name: 'Max', description: 'Thinking on (web only has on/off; same as High)' },
 ]
-const OFF_ONLY_EFFORTS = [{ id: EFFORT_OFF, name: 'Off', description: '该模型固定为非思考模式' }]
+const OFF_ONLY_EFFORTS = [{ id: EFFORT_OFF, name: 'Off', description: 'This model is fixed to non-thinking mode' }]
 
 /** 估算 token 数（网页端不返回 usage；CJK/英文混合按 ~3.2 字符/token 粗估）。 */
 function estimateTokens(text: string): number {
@@ -772,7 +772,7 @@ export function createAdapter(deps: AdapterDeps) {
 
   const adapter = {
     providerInfo(provider: string) {
-      return { id: provider, name: 'DeepSeek 网页版（免费）' }
+      return { id: provider, name: 'DeepSeek Web (free)' }
     },
 
     /**
