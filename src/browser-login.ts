@@ -83,6 +83,15 @@ export function buildBrowserArgs(profileDir: string, url: string): string[] {
     // 别把用户的默认浏览器设置/会话搅进来
     '--no-service-autorun',
     '--disable-background-mode',
+    // 🔴 2026-10-10：headless Chrome 在 **Linux** 上默认要 sandbox，
+    //   而 Linux 上跑浏览器的人只有两种：root（容器 / CI runner）或
+    //   没有 user namespace 权限的普通用户 —— 两种都起不来，
+    //   表现为「浏览器调试端口未就绪」（等满25s 拿不到 DevToolsActivePort）。
+    //   2026-10-10 实测：CI 的 ubuntu-latest 挂在这条，macOS / Windows 同 commit 通过。
+    //   Windows / macOS 上这个 flag 无害（会被忽略），所以无条件带上。
+    //   ⚠️ 它降低的是**本机**的进程隔离强度；本插件本来就用自己的 profile 目录跑
+    //   headless 浏览器、不加载用户日常 profile，攻击面不因此变大。
+    '--no-sandbox',
     url,
   ]
 }

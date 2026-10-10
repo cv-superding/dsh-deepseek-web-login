@@ -82,18 +82,40 @@ async function main() {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     await new Promise((r) => setTimeout(r, 200))
     const port = server.address().port
+    // 🔴 2026-10-10：这条是**第一个真拉浏览器**的用例（后面的 FormData 复用同一个实例），
+    //   所以全部冷启动开销都压在这里。
+    //   Ubuntu runner 上 Chrome 冷启动常超过 `waitForTransportDebugPort` 的 25s
+    //   （2026-10-10 实测：ubuntu 失败「浏览器调试端口未就绪」，而 macOS / Windows 同commit 通过
+    //   —— 同一份代码、同一份夹具，**纯粹是机器快慢**）。
+    // ⇒ 按本项目既有约定（`check-devtools.mjs:132`）**重试两次**：首次失败先
+    //   `shutdownBrowserTransport()` 复位再试；两次都失败才算它真的坏了。
+    //   🔴 别把 `waitForTransportDebugPort` 的超时调大来"修"这个 —— 那是产品代码的真实上限，
+    //   为了 CI 放宽它会掩盖真问题。
+    let lastErr
     try {
-      const fetch = createBrowserFetch()
-      const response = await fetch(`http://localhost:${port}/api/test`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-custom': 'ok' },
-        body: JSON.stringify({ key: 'value' }),
-      })
-      assert.equal(response.status, 200)
-      const json = await response.json()
-      assert.equal(json.method, 'POST')
-      assert.equal(json.received, JSON.stringify({ key: 'value' }))
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const fetch = createBrowserFetch()
+          const response = await fetch(`http://localhost:${port}/api/test`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-custom': 'ok' },
+            body: JSON.stringify({ key: 'value' }),
+          })
+          assert.equal(response.status, 200)
+          const json = await response.json()
+          assert.equal(json.method, 'POST')
+          assert.equal(json.received, JSON.stringify({ key: 'value' }))
+          lastErr = null
+          break
+        } catch (e) {
+          lastErr = e
+          await shutdownBrowserTransport()
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 1500)) // 给进程回收与下次启动留余量
+        }
+      }
+      if (lastErr) throw lastErr
     } finally {
+      // ⚠️ 成功与失败**都要**收尾（改造重试时最容易漏掉这个 finally ⇒ 端口与浏览器进程泄漏）
       await new Promise((resolve) => server.close(resolve))
       await shutdownBrowserTransport()
     }

@@ -2,6 +2,41 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.7.3 — 2026-10-10
+
+**修好 Linux/CI 上浏览器起不来的问题**（0.7.2 只在 ubuntu-latest 上挂，macOS / Windows 同 commit 通过）。
+
+### 根因：启动参数缺 `--no-sandbox`
+
+`buildBrowserArgs`（`browser-login.ts:75`）没有 `--no-sandbox`。
+而**在 Linux 上跑浏览器的人只有两种**：root（容器 / CI runner）
+或没有 user namespace 权限的普通用户 —— **两种都起不来**。
+
+症状极具误导性：
+
+```
+x 浏览器 fetch 可发送 POST 并读取响应: 浏览器调试端口未就绪
+```
+
+看起来像超时，实际是**启动失败** —— `waitForTransportDebugPort` 等满 25s 拿不到
+`DevToolsActivePort`。⚠️ **调大那个超时只会掩盖真问题**（本次就没那样做）。
+
+该 flag 在 Windows / macOS 上无害（会被忽略），所以无条件带上。
+
+⚠️ 它降低的是**本机**进程隔离强度；本插件本来就用自己的 profile 跑 headless 浏览器、
+不加载用户日常 profile，攻击面不因此变大。
+
+### 顺带：那条用例加了重试（双保险）
+
+`check-browser-transport.mjs` 的第 4 条是**第一个真拉浏览器**的用例（后面的 FormData 复用同一实例），
+冷启动开销全压在这里。按项目既有约定（`check-devtools.mjs:132`）加了「重试两次、两次都失败才算坏」，
+并在改造时**漏掉了 `finally` 收尾**（⇒ 端口与浏览器进程泄漏），已补回 try/finally。
+
+### 验证
+
+`buildBrowserArgs` 新增行为断言（变异验证：拿掉 `--no-sandbox` 立刻红）。
+`tsc` / build / 产物 / 隔离 / **67/67** 全过。
+
 ## 0.7.2 — 2026-10-10
 
 **修好外部审查报出的 8 条缺陷**（P1×3 / P2×4 / P3×1）。审查给了行号、复现脚本与置信度标注，

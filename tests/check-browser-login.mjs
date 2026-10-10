@@ -97,6 +97,19 @@ test('必须用 --remote-debugging-port=0（硬编码端口会撞 Windows 保留
   assert.deepEqual(portArgs, ['--remote-debugging-port=0'], `端口参数只能是 0（由系统分配），实际 ${JSON.stringify(portArgs)}`)
 })
 
+// 🔴 2026-10-10 外部事故：CI 的 ubuntu-latest 挂在「浏览器调试端口未就绪」，
+//   而 macOS / Windows 同commit 通过 ⇒ 根因是 **Linux 上 headless Chrome 要 sandbox**，
+//   而 Linux 上跑浏览器的人只有 root（容器 / CI runner）或没有 user namespace 权限的普通用户，
+//   两种都起不来。缺这个 flag 表现为「等满 25s 拿不到 DevToolsActivePort」，
+//   **看起来像超时、实际是启动失败**（所以别去调大超时，那会掩盖真问题）。
+test('启动参数必须带 --no-sandbox（Linux/CI 上否则 Chrome 起不来）', () => {
+  const args = buildBrowserArgs('/tmp/p', 'https://chat.deepseek.com/')
+  assert.ok(
+    args.includes('--no-sandbox'),
+    `缺 --no-sandbox ⇒ Linux 上 headless Chrome 启动失败（报「浏览器调试端口未就绪」）。实际参数：${JSON.stringify(args)}`,
+  )
+})
+
 test('启动参数：独立 profile + 不打扰用户日常浏览器 + 目标 URL', () => {
   const args = buildBrowserArgs('C:\\tmp\\p', 'https://chat.deepseek.com/')
   assert.ok(args.includes('--user-data-dir=C:\\tmp\\p'))
