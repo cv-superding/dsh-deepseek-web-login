@@ -2,6 +2,11 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## Unreleased
+
+### Features
+- **UI i18n**: settings panel language switcher (中文 / Русский / English). Preference stored in `localStorage` key `dsw-locale`. Chinese remains the source of truth; Russian and English catalogs cover the main UI. Missing keys fall back to Chinese. New module: `src/client/i18n.ts`.
+
 ## 0.7.5 — 2026-10-10
 
 **修好 0.6.43 那个从未生效的修复：退出 DSH 会把持久化状态自己抹掉。**
