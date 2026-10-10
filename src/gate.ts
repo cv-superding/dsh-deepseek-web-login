@@ -644,6 +644,15 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
   // 🔴 **缺省＝串行**（0.5.0 起改的默认）：只有**显式 false** 才允许批量。
   // 改默认的代价：升级后第一轮协议文本就变 ⇒ 投喂链断一次（全量重发 + 新会话）。
   let serialToolCalls = options.serialToolCalls !== false
+  // 🔴 2026-10-10 外部审查 P1：`autoRelogin` 原先**只存在于 `gate.json`**、没有内存态。
+  // 而 `writeGateSettings(applied)` 是**整对象覆盖写**、`applied = settings()` 里又没有它
+  // ⇒ 面板保存时被静默丢掉（开关弹回关闭，`index.ts:680` 的定时检查永不触发）。
+  //
+  // 审查报告给的修法（`configure()` 里 `autoRelogin = next.autoRelogin`）会引用不存在的变量。
+  // 正确修法是给它一个内存态：configure 收下 → settings 吐出来 → 覆盖写就带着它。
+  // ⚠️ 执行方 `index.ts:680` 每轮都 `readGateSettings()` 重读文件，所以这里**只影响写盘与回显**，
+  //    不需要"改完立刻生效"的即时性。
+  let autoRelogin = readGateSettings()?.autoRelogin === true
   // 重开链是否换新会话（0.6.22）：**缺省＝不换**（只有显式 true 才换）。
   // 同样"只是存着"，真正的执行在 context-feed.ts 的 needsFreshSession。
   let freshSessionOnRestart = options.freshSessionOnRestart === true
@@ -673,6 +682,13 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
       autoSwitchMinutes,
       serialToolCalls,
       freshSessionOnRestart,
+      // 🔴 2026-10-10 外部审查 P1：漏了它 ⇒ `writeGateSettings(applied)` 用整对象覆盖写盘时
+      // 把它丢掉 ⇒ 面板开关弹回关闭、定时检查永不触发（同 2026-09-14 那批字段的老问题）。
+      //
+      // ⚠️ **必须真的返回一个字段**（不能只靠 `readGateSettings()` 现读）：
+      // 保存链是 `configure(patch)` → `applied = settings()` → `writeGateSettings(applied)`，
+      // 而后者是**整对象覆盖写** ⇒ 这里少一个键，磁盘上那个就被抹掉。
+      autoRelogin,
     }
   }
 
@@ -688,6 +704,10 @@ export function createRequestGate(options: RequestGateOptions = {}): RequestGate
     if (typeof next.serialToolCalls === 'boolean') serialToolCalls = next.serialToolCalls
     if (typeof next.freshSessionOnRestart === 'boolean') {
       freshSessionOnRestart = next.freshSessionOnRestart
+    }
+    // 🔴 2026-10-10 外部审查 P1：同上，configure() 缺这个分支 ⇒ 开关存不下去
+    if (typeof next.autoRelogin === 'boolean') {
+      autoRelogin = next.autoRelogin
     }
     // 三个区间：非法的输入直接当"没给"（不报错、也不覆盖已有的有效值）
     if (next.cleanupBatch !== undefined) {

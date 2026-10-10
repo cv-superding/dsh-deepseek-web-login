@@ -2,6 +2,94 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.7.2 — 2026-10-10
+
+**修好外部审查报出的 8 条缺陷**（P1×3 / P2×4 / P3×1）。审查给了行号、复现脚本与置信度标注，
+7 个复现脚本全部实跑复现、无一条夸大。**其中两处修法不能照抄**，详见下文。
+
+### P1-1「到期前自动重登」开关无法落盘 ⇒ 功能一次都不会跑
+
+`gate.ts` 的 `settings()` 返回对象与 `configure()` 都漏了 `autoRelogin`，而保存链是
+`configure(patch)` → `applied = settings()` → `writeGateSettings(applied)`，
+后者是**整对象覆盖写、不合并** ⇒ 面板开关存不下去，定时检查永不触发。
+改动其它设置也会顺手把它抹掉。
+
+⚠️ **审查给的修法不能照抄**：它在 `configure()` 里写 `autoRelogin = next.autoRelogin`，
+但**没有对应的模块级变量**（`autoRelogin` 原本是无状态字段，`index.ts:680` 每轮
+`readGateSettings()` 重读文件）⇒ 照抄会 ReferenceError。实测踩过。
+正解是给它内存态，并让 `settings()` **真的返回一个键**。
+
+### P1-2 启动扫尾误删「已排队但尚未确认删除」的记录
+
+`session-journal.ts` 的 `writeJournal(plan.kept)` 漏了 `plan.toDelete`，与模块自身文档
+（"记录要留到确认删掉"）直接冲突。触发条件是组合式的：同一批里**同时**有孤儿记录
+（`dropped` 非空）与已排队记录 ⇒ 后者被一并抹掉；若进程在删除回执到达前又被强杀，
+就**永远补删不到**。修法：`[...plan.kept, ...plan.toDelete]`。
+
+### P1-3 `salvageXmlToolCalls` 的 `bodyStart` 偏移算错
+
+`attrs` 是捕获组 `([^>]*)`，**不含** `TAG_OPEN_PREFIX` 与结尾的 `>`，用
+`index + attrs.length` 会从开标签内部开始切 ⇒ 参数变成
+`{"_raw":"=\"read\">{...}"}`。改用 `invokeStartRe.lastIndex`。
+
+### P2-4 内部请求抛错时同一会话被丢弃两次
+
+`catch` 与 `finally` 两处做完全相同的事（同一判据 / 同一集合 / 同一动作），而 JS 语义下
+`catch` 里 `throw` 之后 `finally` **仍会执行** ⇒ 两个可避免的 DELETE（与"降低请求密度"
+的目标冲突）+ `scaffolding-discorders.jsonl` 多写一条假告警。删掉 `catch` 那份。
+
+🔴 连带修了一条**过时的守卫**：`check-bundle` 原判据是"扫 `catch` 块里那段清理"，
+**实现修好了它反而会红**（判据断的是源码位置，不是行为）。已改成守 `finally` 那层，
+并新增一条反向守卫（catch 区间里**不许**再有那段）。变异实测：放回 catch 立刻红。
+
+### P2-5 `sawCallFence` 单向闩锁 ⇒ 吃掉回答结尾的代码块闭栏
+
+`grep sawCallFence\s*=` 只有 3 处、全是 `= true`，**没有任何复位点** ⇒ 调用之后用户回答里的
+任意尾随闭栏都被 `CALL_FENCE_TAIL_RE` 剥掉（回答以代码块结尾时闭栏消失）。
+
+⚠️ **光复位不够**：`CALL_FENCE_TAIL_RE`（`protocol.ts:967`）匹配的是**任意**尾部闭栏
+（含 ` ```python ` 这种带语言名的）。"闭栏一定是配对的另一半"这个论断**只对紧邻调用块的
+那一次**成立。所以除了复位，还加了内容判据：pending 里若还有未闭合的用户代码块开栏，
+这个闭栏就不是残留，放它出去。
+
+### P2-6 空 `response/fragments` 帧清掉已建立的 thinking 通道
+
+`appendFragments` 在**没追加任何 fragment** 时也改写 `sink`，把
+`response/thinking_content` 建立的 `sink='thinking'` 清成 `null` ⇒ 紧接着的裸续段被当成
+正文上屏（同文件的 `fragments/-1/content` 分支已有守卫，漏了这道）。已对齐。
+
+### P2-7 `unwrapDsmlArguments` 字符串分支缺多键保护
+
+函数头注释声明"只剥只有一个 `arguments` 键的情况"，对象分支实现了，字符串分支
+无条件 `return reparsed` ⇒ 静默丢参数。把 `Object.keys(args).length === 1` 提到两条分支共用。
+
+### P3 `credentials.json` 落盘权限比账号文件更松（仅 POSIX）
+
+装的是**邮箱 + 明文密码**（敏感度高于 token 文件），却用裸 `writeFileSync`（按 umask 落地，
+通常 0644）。复用 `accounts.ts` 的 `writeJsonAtomic`（创建即 0600 + rename 失败清理）。
+
+### 三处"假绿灯"也已堵上
+
+新增 `tests/check-external-review-fixes.mjs`（8 条**行为**断言，不是 grep 源码）：
+
+| 原问题 | 处置 |
+|---|---|
+| `check-relogin.mjs:164` 用正则断言"这行代码在" | 改成走真实配置链（`configure` → `settings` → `writeGateSettings` → `readGateSettings`） |
+| `check-session-journal.mjs` 两条各覆盖一半，**交集**没测 | 新增 dropped 与 toDelete 同时非空的场景 |
+| `ToolCallStreamFilter` 没有"围栏调用 + 回答含代码块"的端到端文本断言 | 新增围栏计数断言 |
+
+⚠️ **变异验证**（这是本项目的既有纪律）：8 条里抽 5 条做变异，把修复还原 ⇒ 对应用例立刻红。
+其中 P2-6/P2-7 一次变异命中两条。
+
+### 验证
+
+`tsc --noEmit` / `build` / `check-bundle` / `check-test-isolation` / 逻辑测试 81 /
+新守卫 8 / **67/67** 全过。
+
+⚠️ 一个测试方法上的教训（记在这里以免再犯）：本机 `shell` 里写文件再 `cp` 还原的
+"变异 → 跑守卫"会出现**假阴性**（守卫其实抓得住，但那次跑出来是绿的）。
+可靠做法是**在同一个进程里做「变异 → execFileSync 跑守卫 → 还原」**，已实测如此。
+
 ## 0.7.1 — 2026-10-09
 
 **修好 CI：从 2026-10-02 起一直红的发布链路**（根因是探针里硬编码了本机绝对路径）。

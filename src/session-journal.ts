@@ -233,7 +233,12 @@ export function runStartupSweep(
       plan.kept.push(entry) // 排不进去 → 留到下次启动再试
     }
   }
-  if (plan.dropped.length > 0) writeJournal(plan.kept, file)
+  // 🔴 2026-10-10 外部审查 P1：原来只写 `plan.kept`，**漏了 `plan.toDelete`**。
+//   `toDelete` 是「本次已排进清理器、但删除回执还没到」的记录 —— 与本模块文档
+//   （`不在这里清记录：记录要留到"确认删掉"`，见 `removeJournalEntry`）直接冲突。
+//   触发条件是组合式的：同一批里**同时**有孤儿记录（⇒ dropped 非空）与已排队的记录
+//   ⇒ 后者被一并抹掉；若进程在回执到达前再被强杀，就**永远补删不到**（本模块存在的全部理由失效）。
+if (plan.dropped.length > 0) writeJournal([...plan.kept, ...plan.toDelete], file)
 
   if (scheduled > 0) {
     options.log?.(`deepseek-web: 上次退出遗留了 ${scheduled} 个临时会话，已交给清理器补删`)

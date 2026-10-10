@@ -1727,7 +1727,15 @@ export function createSseState(options: SseStateOptions = {}) {
         emitText(out, fragment.content)
       }
     }
-    sink = fragments.length > 0 ? 'fragments' : null
+    // 🔴 2026-10-10 外部审查 P2：原来无条件改写 `sink`，把「**没追加任何 fragment**」
+    //   （`v` 为 `[]` / 缺失 / 条目无 `content` 字符串）也当成"走 fragments 通道"，
+    //   把之前由 `response/thinking_content` 建立的 `sink='thinking'` 清成 `null`。
+    //   紧接着的裸续段（无 `p` 的帧）就会走 `appendSink` 的 else 分支被当成**正文**上屏
+    //   ⇒ 思考泄漏进正文。
+    // ⇒ 与 `response/fragments/-1/content` 分支（F24）**同一把尺子**：
+    //   fragments 为空但已建立 thinking/content 通道时**必须保持原通道**。
+    const keepChannel = fragments.length === 0 && (sink === 'thinking' || sink === 'content')
+    if (!keepChannel) sink = fragments.length > 0 ? 'fragments' : null
   }
   /** 增量：续写最后一个 fragment。 */
   const appendToLastFragment = (text: string, out: WebStreamEvent[]): void => {
@@ -3284,20 +3292,13 @@ export async function* streamWebCompletion(
     // 只有正常走完才会到）⇒ `session-title` 这类**短请求一旦出错**（限流/网络抖动/上游 5xx），
     // 它的脚手架会话就**永远留在网页端**。
     //
-    // ⚠️ 为什么只在 `promptParts === undefined` 时做：用户的对话会话**绝不能**在这里被丢 ——
-    // 出错后用户还要重登/重试接着聊（0.6.29 的约定）。判据与收尾路径同一处。
-    if (params.promptParts === undefined) {
-      const scaffolding = new Set<string>(owned)
-      if (sessionId) scaffolding.add(sessionId)
-      for (const id of scaffolding) {
-        retireSession(id)
-        try {
-          params.onDiscardSession?.(id)
-        } catch {
-          /* 丢弃失败不影响错误上抛 */
-        }
-      }
-    }
+    // ⚠️ 2026-10-10 外部审查 P2：这段原来在 `catch` 里，与 `finally` 的那一段
+    //   **判据、集合、动作三者全同**（`promptParts === undefined` / `owned ∪ {sessionId}` /
+    //   `retireSession` + `onDiscardSession`）。
+    //   JS 语义下 `catch` 里 `throw` 之后 `finally` **仍会执行** ⇒ 同一会话被丢两次
+    //   ⇒ 两个可避免的 DELETE 请求（与"降低请求密度"的目标直接冲突）+ 一条假告警
+    //   （`scaffolding-discards.jsonl` 会多写一条 `outcome:"failed"`）。
+    // ⇒ **只保留 `finally` 那份**（覆盖更全：`catch` 的 `throw` 也走它）。
     if (params.signal?.aborted) throw new AdapterLlmError('请求已取消', 'ABORTED', { cause: error })
     if (controller.signal.aborted && controller.signal.reason instanceof AdapterLlmError) throw controller.signal.reason
     if (error instanceof AdapterLlmError) throw error

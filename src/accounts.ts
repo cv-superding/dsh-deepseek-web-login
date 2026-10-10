@@ -187,7 +187,7 @@ export function newAccountId(): string {
 }
 
 /** 原子写（临时文件 + 替换），非 Windows 下收紧权限到 0600。 */
-function writeJsonAtomic(file: string, value: unknown): void {
+export function writeJsonAtomic(file: string, value: unknown): void {
   mkdirSync(join(file, '..'), { recursive: true })
   const tmp = `${file}.tmp-${process.pid}`
   // 临时文件从创建起就是 0600：它装的是**可完整登录的凭证**，

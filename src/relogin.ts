@@ -20,10 +20,11 @@
  * - 匹配用服务端的**脱敏规则**（见 `maskLocalPart`）而不是猜，匹配不上就明说匹配不上。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { webLoginDir } from './paths.ts'
+import { writeJsonAtomic } from './accounts.ts'
 
 export interface CredentialEntry {
   /** 完整邮箱（服务端只给我们脱敏串，这里是我们自己存的原文）。 */
@@ -87,9 +88,12 @@ export function writeCredentialEntries(entries: readonly CredentialEntry[], note
       '自动重登用的邮箱密码（本机明文存放）。不参与账号导出/导入，不写日志、不打接口以外的任何地方。',
     entries: entries.map((e) => ({ email: e.email.trim(), password: e.password })),
   }
-  const tmp = `${credentialsPath()}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-  renameSync(tmp, credentialsPath())
+  // 🔴 2026-10-10 外部审查 P3：原来 `writeFileSync(tmp, …, 'utf8')` **不带 mode**
+//   ⇒ 临时文件按 umask 落地（POSIX 上通常 0644，同机其它用户可读），
+//   而本文件装的是**邮箱 + 明文密码**（敏感度高于 token 文件），
+//   却没有享受 `accounts.ts:writeJsonAtomic` 的「创建即 0600 + rename 失败清理」。
+// ⇒ 复用那个成熟实现（它也是「原子写 + 0600 + 失败清理」，注释里写了为什么不能事后 chmod）。
+writeJsonAtomic(credentialsPath(), payload)
 }
 
 /** 新增/更新一条（按邮箱大小写不敏感去重）。 */

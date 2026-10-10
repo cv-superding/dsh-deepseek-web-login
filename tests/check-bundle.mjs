@@ -1127,21 +1127,38 @@ const checks = {
   // 🔴 反向验证：把 catch 里那段 `if (params.promptParts === undefined) {…}` 删掉
   //   ⇒ 下面这条会红。已实测。
   //
-  // ⚠️ 判据必须扫**全部** `} catch (error: any) {`（`webapi.ts` 里有 7 个！），不能只取
-  //   `indexOf` 的第一个 —— 那会匹配到 `PoW challenge request failed` 那个无关的 catch，
-  //   于是判据恒假、"守卫"变成一句空话（我自己踩了一次：首版就是这么写的，红了才发现）。
-  '脚手架会话在 catch（抛错）路径上也被丢弃（0.6.41 修「建俩窗口」）':
+  // ⚠️ 判据必须扫**全部** `} finally {`，不能只取第一个。
+  // 🔴 2026-10-10：这条曾写成"finally 里有没有那段清理"，**恒真** ——
+  //   finally 就在附近，只要修复在位就必然命中 ⇒ 无法区分"finally 有"与"finally 没有"。
+  //   它能守住的是**另一件事**：`finally` 删掉整段丢弃逻辑时会红（即脚手架会话泄漏到用户侧栏）。
+  '脚手架会话在收尾路径（finally）里被丢弃（0.6.41 修「建俩窗口」；判据只守 finally 这层）':
     (() => {
-      const RE = /\} catch \(error: any\) \{/g
+      const FIN = /\} finally \{/g
       let m
-      while ((m = RE.exec(srcWebapi)) !== null) {
-        // 只看**第一个 throw 之前**那一段：顺序颠倒（先 throw 后清理）就等于没修
-        const end = srcWebapi.indexOf('if (params.signal?.aborted)', m.index)
-        if (end < 0) continue
-        const seg = srcWebapi.slice(m.index, end)
+      while ((m = FIN.exec(srcWebapi)) !== null) {
+        const seg = srcWebapi.slice(m.index, m.index + 2400)
         if (/params\.promptParts === undefined/.test(seg) && /onDiscardSession\?\.\(/.test(seg)) return true
       }
       return false
+    })(),
+  // ⚠️ 判据必须**按区间限定**，不能用 `indexOf` 找第一个匹配 ——
+  //   `if (params.signal?.aborted)` 在文件里有**两处**，`indexOf` 命中的是前面那处
+  //   ⇒ 切出 8 万字符的无关区间 ⇒ 判据恒真。
+  //
+  // 🔴 另一条（"finally 里有那段"）**恒真**，因为 finally 就在附近 ⇒ 不能区分
+  //   "只有 finally 有"与"catch 也有"。所以判据只能是**catch 区间里不该有**。
+  // 变异验证：把重复段放回 catch ⇒ 本条立刻红（实测，`repro-discard-twice.mjs` 同时复现）。
+  '脚手架丢弃不在 catch 里重复做（否则同一会话被丢两次 ⇒ 重复 DELETE + 假告警）':
+    (() => {
+      const commentAt = srcWebapi.indexOf('三个 `throw` 全部')
+      if (commentAt < 0) return false
+      const catchAt = srcWebapi.lastIndexOf('catch (error: any) {', commentAt)
+      if (catchAt < 0) return false
+      const throwAt = srcWebapi.indexOf("if (params.signal?.aborted) throw new AdapterLlmError('请求已取消'", catchAt)
+      if (throwAt < 0) return false
+      const seg = srcWebapi.slice(catchAt, throwAt)
+      // 该区间里**不该**再出现 scaffolding 清理
+      return !(/params\.promptParts === undefined/.test(seg) && /onDiscardSession\?\.\(/.test(seg))
     })(),
 
   '脚手架丢弃有留痕（判据缺失就永远查不了：历史上 14 次无法区分）':

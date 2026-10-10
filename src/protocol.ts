@@ -1514,7 +1514,10 @@ function unwrapDsmlArguments(args: Record<string, unknown>): Record<string, unkn
     // 值是字符串 ⇒ 整份 JSON 被当字符串塞进来，补一次解析
     const reparsed = parseJsonLenient(wrapped)
     if (reparsed && typeof reparsed === 'object' && reparsed !== null && !Array.isArray(reparsed)) {
-      return reparsed as Record<string, unknown>
+      // 🔴 2026-10-10 外部审查 P2：这里原来**无条件 return reparsed**，缺了对象分支
+      //   才有的多键保护 ⇒ `arguments` 是字符串、且同时有其它参数键时，
+      //   那些真参数名被**静默丢弃**（函数头注释声明的判据在这条分支上没实现）。
+      if (Object.keys(args).length === 1) return reparsed as Record<string, unknown>
     }
     return args
   }
@@ -1608,16 +1611,23 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
  */
 function salvageXmlToolCalls(text: string): ToolCallRequest[] | null {
   const invokeStartRe = new RegExp(`${TAG_OPEN_PREFIX}invoke\\b([^>]*)>`, 'gi')
-  const starts: { index: number; attrs: string }[] = []
+  // 🔴 2026-10-10 外部审查 P1：`starts` 原来只存 `index + attrs`，而 `attrs`（捕获组 `([^>]*)`）
+//   **不含** `TAG_OPEN_PREFIX`（`<\s*` + 可选 DSML 前缀）与结尾的 `>`。
+//   用 `index + attrs.length` 当 body 起点 ⇒ 从**开标签内部**开始切
+//   ⇒ `="read">` 这类残渣被当成参数内容（退化成 `_raw`）。
+//   正解是存`lastIndex`（= 完整匹配 `match[0]` 之后的位置），语义也最直白。
+const starts: { index: number; end: number; attrs: string }[] = []
   let match: RegExpExecArray | null
-  while ((match = invokeStartRe.exec(text)) !== null) starts.push({ index: match.index, attrs: match[1] })
+  while ((match = invokeStartRe.exec(text)) !== null) {
+    starts.push({ index: match.index, end: invokeStartRe.lastIndex, attrs: match[1] })
+  }
   if (starts.length === 0) return null
 
   const calls: ToolCallRequest[] = []
   for (let i = 0; i < starts.length; i++) {
     const name = readAttr(starts[i].attrs, 'name')
     if (!name) continue
-    const bodyStart = starts[i].index + starts[i].attrs.length
+    const bodyStart = starts[i].end
     // 段落 = 到下一个 invoke 开标签为止；不能按闭合标签切，因为它们可能整段缺失。
     const nextStart = starts[i + 1]?.index ?? text.length
     const body = text.slice(bodyStart, nextStart)
@@ -1921,7 +1931,20 @@ export class ToolCallStreamFilter {
     // ⚠️ 必须用 sawCallFence 门控：没剥过开栏就剥闭栏 = 吃掉用户代码块的收尾
     // （`check-auto-continue` N03 守着这条 —— 它的例子就是 ```xml 代码块）。
     const tailText = stripStrayToolMarkup(this.pending)
-    out.text += this.sawCallFence ? tailText.replace(CALL_FENCE_TAIL_RE, '') : tailText
+    if (this.sawCallFence) {
+      // 🔴 2026-10-10 外部审查 P2：`sawCallFence` 原来**只有置位、没有复位**
+      //   （`grep sawCallFence\s*=` 只有 3 处，全是 `= true`）⇒ 一旦为真，整个 filter
+      //   生命周期内恒为真 ⇒ 调用之后用户可见回答里的**任意尾随闭栏**都被剥掉
+      //   （回答以代码块结尾时闭栏消失 ⇒ 后续内容被吞进代码块）。
+      //   那个"闭栏一定是配对的另一半"的论断**只对紧邻调用块的那一次**成立。
+      // ⇒ 改成**一次性标志**：这里剥掉一次就复位。
+      // ⚠️ 必须改这里（`flush()`）而不是 `drain()` 里的那处：**闭栏常常在流结束时才成行**，
+      //   逐字符分块期间它还 hold 在 `pending` 里 ⇒ 走的是这条路径。
+      out.text += tailText.replace(CALL_FENCE_TAIL_RE, '')
+      this.sawCallFence = false
+    } else {
+      out.text += tailText
+    }
     this.pending = ''
     if (this.abandoned) out.rejected = this.abandoned
     return out
@@ -2049,14 +2072,30 @@ export class ToolCallStreamFilter {
       }
       // 🔴 0.6.38：pending 尾部若是**我们自己留下的围栏残留**，剥掉。
       //
-      // ⚠️ 判据必须能区分"我们的围栏"与"正常代码块"：开栏在捕获那步已被 stripCallFence
-      // 剥掉，所以**闭栏到这里时一定是配对的另一半** ⇒ 用 sawCallFence 记录，别去判
-      // pending 里的裸 ```（那会吃掉正常代码块 —— `check-auto-continue` N03 守着这条；
-      // 逐字符分块时闭栏还没成行，任何"独占一行"判据都会在它成行之前先把它放行出去）。
-      if (this.sawCallFence && this.pending.includes('```')) {
-        out.text += this.pending.replace(CALL_FENCE_TAIL_RE, '')
-        this.pending = ''
-        return
+      // 🔴 2026-10-10 外部审查 P2：原来只判 `sawCallFence`（全程闩锁、从不复位）
+      //   ⇒ 调用之后用户回答里的**任意尾随闭栏**都被剥掉。
+      //   现在加一道**内容判据**：只有当 pending 里**没有更早的、未闭合的代码块开栏**时，
+      //   这个尾部闭栏才可能是"调用块那一半"。
+      //
+      //   为什么必须看内容而不是只看闩锁：`CALL_FENCE_TAIL_RE`（`protocol.ts:967`）
+      //   匹配的是**任意**尾部闭栏（含 ```` ```python ```` 这种带语言名的），
+      //   而"闭栏一定是配对的另一半"这个论断**只对紧邻调用块的那一次成立**。
+      //   实测症状：围栏调用 + 回答以代码块结尾 ⇒ `push(ANSWER)` 里pending 含
+      //   "\n```python\nprint(1)\n```\n" ⇒ 尾部那个 ``` 被当成残留剥掉 ⇒
+      //   回答只剩一个开栏（围栏计数 1，应为 2）。
+      if (this.sawCallFence) {
+        const beforeTail = this.pending.replace(CALL_FENCE_TAIL_RE, '')
+        // beforeTail 里若还留着开栏（``` + 非 dsh-tool 名字），说明这个闭栏属于**用户自己的代码块**
+        const hasUserCodeBlock = /```[ \t]*(?!dsh-tool\b)[a-zA-Z0-9_-]+[ \t]*\n/.test(beforeTail)
+        if (!hasUserCodeBlock) {
+          out.text += this.pending.replace(CALL_FENCE_TAIL_RE, '')
+          this.pending = ''
+          // 一次性标志：剥掉一次就复位（之后的正常代码块闭栏不动）
+          this.sawCallFence = false
+          return
+        }
+        // 有用户代码块 ⇒ 这个闭栏不是残留，放它出去并复位闩锁
+        this.sawCallFence = false
       }
       out.text += this.pending
       this.pending = ''
