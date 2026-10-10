@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildBrowserArgs,
+  transportExtraArgs,
   CdpClient,
   findSystemBrowser as findSystemBrowserImpl,
   parseDevToolsActivePort,
@@ -191,6 +192,12 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
       browser.path,
       [
         ...buildBrowserArgs(PROFILE_DIR, 'about:blank'),
+        // 🔴 2026-10-10：只给**这一处**（headless 请求代理）加 `--no-sandbox`。
+        //   Linux 上 headless Chrome 要 sandbox，而 CI runner / 容器是 root ⇒ 起不来。
+        //   ⚠️ **不能**加进 `buildBrowserArgs`：那个函数登录窗口也在用，
+        //   而登录窗口要加载真实页面、用户在里面手动输密码 ⇒ 关它的 sandbox 才真的扩大攻击面。
+        //   理由详见 `browser-login.ts: transportExtraArgs()` 的注释。
+        ...transportExtraArgs(),
         '--headless=new',
         '--disable-gpu',
         '--disable-dev-shm-usage',

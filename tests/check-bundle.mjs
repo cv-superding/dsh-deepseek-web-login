@@ -8,6 +8,7 @@ const srcAccounts = readFileSync('src/accounts.ts', 'utf8')
 // ⚠️ tsdown 会压缩/重排产物（实测 `catch(e){`、`'failed'` 字面量都变形）⇒
 //    涉及**语句顺序**的不变量只能读源码判，否则守的是一个不稳定的形状。
 const srcWebapi = readFileSync('src/webapi.ts', 'utf8')
+const srcBrowserTransport = readFileSync('src/browser-transport.ts', 'utf8')
 
 const checks = {
   'XML 工具调用解析器': host.includes('function_calls') && host.includes('<parameter'),
@@ -1183,6 +1184,24 @@ const checks = {
       return !/WebAssembly\.(instantiate|compile)/.test(body) ||
         // 只允许出现在 loadWasmModule 的缓存路径里（它现在只服务白名单校验/discoverWasmUrl）
         !/await WebAssembly\.(instantiate|compile)\s*\(/.test(body.replace(/WebAssembly\.compile\(await readOfficialResource[\s\S]{0,40}?\)\)/, ''))
+    })(),
+
+  // ── 0.7.3：`--no-sandbox` 只给 headless 传输层，**不给登录窗口**──────────────
+  // ⚠️ 这条守的是「传输层**真的调用了** `transportExtraArgs()`」。
+  //   `check-browser-login.mjs` 那两条只断函数**内容**，断不了「调用点被删掉」
+  //   （变异实测：删掉 `...transportExtraArgs()` 那行，两条守卫仍绿 ⇒ flag 悬空）。
+  'headless 传输层确实用上了 transportExtraArgs（--no-sandbox 不能悬空）':
+    /\.\.\.transportExtraArgs\(\)/.test(srcBrowserTransport),
+
+  '登录窗口不用 --no-sandbox（它加载真实页面，sandbox 是有用的隔离）':
+    (() => {
+      // 🔴 判据：spawn 登录窗口那一处**不许**出现该flag。
+      //   位置：browser-login.ts 里 `spawn(browser.path, buildBrowserArgs(` 那次调用。
+      const src = readFileSync('src/browser-login.ts', 'utf8')
+      const i = src.indexOf('spawn(browser.path, buildBrowserArgs(')
+      if (i < 0) return false
+      const seg = src.slice(i, i + 600)
+      return !/no-sandbox/.test(seg)
     })(),
 
   'PoW 无浏览器时显式报错（不静默退回 Node —— 那等于这个改动没做）':

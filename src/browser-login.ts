@@ -83,17 +83,35 @@ export function buildBrowserArgs(profileDir: string, url: string): string[] {
     // 别把用户的默认浏览器设置/会话搅进来
     '--no-service-autorun',
     '--disable-background-mode',
-    // 🔴 2026-10-10：headless Chrome 在 **Linux** 上默认要 sandbox，
-    //   而 Linux 上跑浏览器的人只有两种：root（容器 / CI runner）或
-    //   没有 user namespace 权限的普通用户 —— 两种都起不来，
-    //   表现为「浏览器调试端口未就绪」（等满25s 拿不到 DevToolsActivePort）。
-    //   2026-10-10 实测：CI 的 ubuntu-latest 挂在这条，macOS / Windows 同 commit 通过。
-    //   Windows / macOS 上这个 flag 无害（会被忽略），所以无条件带上。
-    //   ⚠️ 它降低的是**本机**的进程隔离强度；本插件本来就用自己的 profile 目录跑
-    //   headless 浏览器、不加载用户日常 profile，攻击面不因此变大。
-    '--no-sandbox',
+    // ⚠️ 这里**故意不放** `--no-sandbox` —— 见 `transportExtraArgs()` 的说明。
+    //   本函数被**登录窗口**（可见真实浏览器，用户在里面手动登录）与
+    //   **请求代理**（headless 后台）共用；sandbox 只该关后者。
     url,
   ]
+}
+
+/**
+ * 只给 **headless 请求代理**追加的启动参数（0.7.3）。
+ *
+ * ## 为什么需要 `--no-sandbox`
+ *
+ * headless Chrome 在 Linux 上默认要 sandbox，而 Linux 上跑浏览器的人只有两种：
+ * root（容器 / CI runner）或没有 user namespace 权限的普通用户 —— **两种都起不来**。
+ * 症状伪装成「浏览器调试端口未就绪」（等满 25s 拿不到 `DevToolsActivePort`），
+ * 看起来像超时、实际是启动失败 ⇒ **别去调大那个超时**，那只会掩盖真问题。
+ *
+ * ## 为什么只给传输层
+ *
+ * sandbox 是浏览器里跑第三方网页代码时的进程隔离。**登录窗口会加载 DeepSeek 的真实页面、
+ * 用户还在里面手动输密码** —— 关掉它的 sandbox 才是真正扩大攻击面。
+ * 传输层只请求 `about:blank` + 发 HTTP、**不加载任何第三方页面**，
+ * 所以关掉它的 sandbox 换来的收益（Linux/CI 可用）大于代价。
+ *
+ * ⚠️ 若哪天登录窗口也要在 Linux 上跑，应在这里按 `headless` 判定，
+ * **而不是把 flag 挪进 `buildBrowserArgs`**（那会连带关掉登录窗口的）。
+ */
+export function transportExtraArgs(): string[] {
+  return ['--no-sandbox']
 }
 
 /** 解析 `<profile>/DevToolsActivePort`：第一行是端口；容忍 CRLF 与附带内容。 */

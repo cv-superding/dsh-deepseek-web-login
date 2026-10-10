@@ -2,6 +2,42 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.7.4 — 2026-10-10
+
+**收窄 0.7.3 的 `--no-sandbox`：只给 headless 传输层，登录窗口保持 sandbox。**
+
+### 0.7.3 的问题
+
+`--no-sandbox` 被加进 `buildBrowserArgs()`，而那个函数**被两处共用**：
+
+| 调用点 | 用途 | 该不该关 sandbox |
+|---|---|---|
+| `browser-login.ts:538` | **登录窗口**（可见真实浏览器，用户在里面手动输密码） | ❌ 不该 |
+| `browser-transport.ts:193` | 请求代理（headless 后台，只请求 `about:blank`） | ✅ Linux/CI 需要 |
+
+⇒ 0.7.3 **连登录窗口的 sandbox 也关了**。sandbox 是浏览器跑第三方网页代码时的进程隔离，
+而登录窗口要加载 DeepSeek 真实页面 —— **那才是真正扩大攻击面**。
+（0.7.3 的 CHANGELOG 写"攻击面不因此变大"，**那句话不准确**，这里更正。）
+
+### 现在
+
+`--no-sandbox` 移到新函数 `transportExtraArgs()`，**只有 headless 传输层**调用它。
+传输层不加载任何第三方页面、只发 HTTP ⇒ 关 sandbox 的收益（Linux/CI 可用）大于代价。
+
+### 守卫
+
+三条，缺一不可：
+
+1. `transportExtraArgs()` 里**必须**有 `--no-sandbox`（否则 Linux/CI 起不来）；
+2. `buildBrowserArgs()` 里**必须没有**（登录窗口要用）；
+3. **传输层的 spawn 必须真的调用它** —— 前两条只断函数内容，断不了"调用点被删"。
+
+三条都做过变异验证（挪位置 / 拿掉内容 / 删调用行，各自打红）。
+
+### 验证
+
+`tsc` / build / 产物 / 17 项登录 / 8 项新守卫 / 隔离 / `check-browser-transport`（真启浏览器）/ **67/67** 全过。
+
 ## 0.7.3 — 2026-10-10
 
 **修好 Linux/CI 上浏览器起不来的问题**（0.7.2 只在 ubuntu-latest 上挂，macOS / Windows 同 commit 通过）。

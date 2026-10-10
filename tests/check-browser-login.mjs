@@ -19,7 +19,7 @@
  */
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { buildBrowserArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders } from '../src/browser-login.ts'
+import { buildBrowserArgs, transportExtraArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders } from '../src/browser-login.ts'
 import { canOpenElectronWindowWith } from '../src/login.ts'
 import { unwrapStoredToken } from '../src/auth.ts'
 
@@ -98,15 +98,28 @@ test('必须用 --remote-debugging-port=0（硬编码端口会撞 Windows 保留
 })
 
 // 🔴 2026-10-10 外部事故：CI 的 ubuntu-latest 挂在「浏览器调试端口未就绪」，
-//   而 macOS / Windows 同commit 通过 ⇒ 根因是 **Linux 上 headless Chrome 要 sandbox**，
+//   而 macOS / Windows 同commit 通过 ⇒ 根因是**Linux 上 headless Chrome 要 sandbox**，
 //   而 Linux 上跑浏览器的人只有 root（容器 / CI runner）或没有 user namespace 权限的普通用户，
 //   两种都起不来。缺这个 flag 表现为「等满 25s 拿不到 DevToolsActivePort」，
-//   **看起来像超时、实际是启动失败**（所以别去调大超时，那会掩盖真问题）。
-test('启动参数必须带 --no-sandbox（Linux/CI 上否则 Chrome 起不来）', () => {
+//   **看起来像超时、实际是启动失败**。
+//
+// 🔴🔴 判据必须**分两处**断，缺一不可（0.7.3 首版只断了一处 ⇒ 是个假绿灯）：
+//   ① `transportExtraArgs()` 里**必须有** `--no-sandbox`（否则 Linux/CI 起不来）；
+//   ② `buildBrowserArgs()` 里**必须没有** —— 它被**登录窗口**（可见真实浏览器，
+//      用户在里面手动输密码）共用，加在那儿等于关掉登录窗口的进程隔离，
+//      那才是真正扩大攻击面。
+test('transportExtraArgs 带 --no-sandbox（Linux/CI 上否则起不来）', () => {
+  assert.ok(
+    transportExtraArgs().includes('--no-sandbox'),
+    `缺 --no-sandbox ⇒ Linux 上 headless Chrome 起不来（报「浏览器调试端口未就绪」）。实际：${JSON.stringify(transportExtraArgs())}`,
+  )
+})
+
+test('buildBrowserArgs 不许带 --no-sandbox（登录窗口要用 sandbox）', () => {
   const args = buildBrowserArgs('/tmp/p', 'https://chat.deepseek.com/')
   assert.ok(
-    args.includes('--no-sandbox'),
-    `缺 --no-sandbox ⇒ Linux 上 headless Chrome 启动失败（报「浏览器调试端口未就绪」）。实际参数：${JSON.stringify(args)}`,
+    !args.includes('--no-sandbox'),
+    `--no-sandbox 不许加进 buildBrowserArgs：它被登录窗口共用，而登录窗口要加载真实页面、用户在里面手动输密码 ⇒ 关它的 sandbox 才真的扩大攻击面。实际参数：${JSON.stringify(args)}`,
   )
 })
 
