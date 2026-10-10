@@ -9,6 +9,7 @@ const srcAccounts = readFileSync('src/accounts.ts', 'utf8')
 //    涉及**语句顺序**的不变量只能读源码判，否则守的是一个不稳定的形状。
 const srcWebapi = readFileSync('src/webapi.ts', 'utf8')
 const srcBrowserTransport = readFileSync('src/browser-transport.ts', 'utf8')
+const srcIndex = readFileSync('src/index.ts', 'utf8')
 
 const checks = {
   'XML 工具调用解析器': host.includes('function_calls') && host.includes('<parameter'),
@@ -1202,6 +1203,21 @@ const checks = {
       if (i < 0) return false
       const seg = src.slice(i, i + 600)
       return !/no-sandbox/.test(seg)
+    })(),
+
+  // ── 0.7.5：持久化的生命周期边界（`disposeSessionReuse` 是卸载钩子）──────────────
+  // 行为断言在 `tests/check-persist-lifecycle.mjs`；这里守**调用点真的存在**
+  //（那条守卫只断"清空后不落盘"，断不了"卸载钩子压根没调 disposeSessionReuse"）。
+  '退出钩子确实会调 disposeSessionReuse（否则清空语义没意义、持久化也白做）':
+    (() => {
+      // 🔴 判据必须**按行**判，不能用 `srcIndex.slice(...).includes('disposeSessionReuse()')`：
+      //   那一段里有一行**注释**「① `disposeSessionReuse()` 把复用槽里的会话…」，
+      //   删掉真实调用后注释仍在 ⇒ `includes` 仍为真 ⇒ **守卫恒真**（变异实测抓不到）。
+      //   ⇒ 只认"去掉缩进后精确等于 `disposeSessionReuse()`"的**代码行**。
+      const i = srcIndex.indexOf('ctx.effect(() => () => {')
+      if (i < 0) return false
+      const seg = srcIndex.slice(i, i + 1200)
+      return seg.split('\n').some((line) => line.trim() === 'disposeSessionReuse()')
     })(),
 
   'PoW 无浏览器时显式报错（不静默退回 Node —— 那等于这个改动没做）':

@@ -2,6 +2,53 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 0.7.5 — 2026-10-10
+
+**修好 0.6.43 那个从未生效的修复：退出 DSH 会把持久化状态自己抹掉。**
+
+### 根因
+
+`disposeSessionReuse()` 是**卸载钩子**（`index.ts` 的 `ctx.effect(() => () => …）`），
+它`clear()` 内存之后**紧接着 `persistResumeState()`** ⇒ **把空态写回了文件**。
+
+⇒ **每次退出 DSH，`resume-state.json` 都被自己清空** ⇒ 下次启动 `restoreResumeState()` 读回空。
+**0.6.43/0.7.1 的"重启后仍能续上同一会话"在真实使用下等于没生效。**
+
+症状：同一对话线被迫建新会话 + 网页端出现「修改 / 重新生成」分叉（实测 27 万字符全量重发）。
+
+### 修法
+
+`persistResumeState(opts?: { persist?: boolean })` —— **退出 / 重置语义**的调用点传 `false`：
+
+- `disposeSessionReuse()`（卸载钩子，最要紧）
+- `resetSessionReuse()`
+- `resetContextChain()`
+
+其余 8 处调用点都是**真实增删改**（入栈、出栈、链更新、链删除、会话退役），**照旧落盘**。
+
+### 为什么之前一直是绿的
+
+- `check-resume-after-restart` 只测**「进程 → 进程」**，**不经过卸载钩子**；
+- `check-bundle` 守的是"落盘点存在"，**不守"落盘的内容对不对"**。
+
+⚠️ **加了持久化就必须测「退出 → 启动」这个生命周期边界。**
+
+### 新增守卫
+
+`tests/check-persist-lifecycle.mjs`（3 条）—— 先用 `writeResumeStateForTest` 造出**非空**落盘态，
+再调三个清空函数，断言**文件内容没被写空**。变异验证：三处改回 `persistResumeState()` ⇒ 三条一起红。
+
+`check-bundle` 新增一条守**卸载钩子那个调用点真的存在**（断"没被调用"）。
+
+⚠️ 这条守卫的首版**恒真**：`slice().includes('disposeSessionReuse()')` 命中了同一段里那行
+**注释**「① `disposeSessionReuse()` 把复用槽里的会话…」⇒ 删掉真实调用后仍为真。
+⇒ 改成**按行判**（`line.trim() === 'disposeSessionReuse()'`）才抓住。
+**这是「断言会被注释引用污染」的又一例，与 MEMORY纪律③同源。**
+
+### 验证
+
+`tsc` / build / 产物 / 新守卫 3 / 产物新增那条 / 外部审查 8 / `check-resume-after-restart` / 隔离 全过。
+
 ## 0.7.4 — 2026-10-10
 
 **收窄 0.7.3 的 `--no-sandbox`：只给 headless 传输层，登录窗口保持 sandbox。**

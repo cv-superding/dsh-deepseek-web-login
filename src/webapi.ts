@@ -2213,7 +2213,29 @@ function persistStatePath(): string {
 }
 
 /** 把当前内存状态写盘。**永不抛** —— 落盘失败不该让正常请求失败。 */
-function persistResumeState(): void {
+/**
+ * 把当前内存状态写盘。**永不抛** —— 落盘失败不该让正常请求失败。
+ *
+ * 🔴 2026-10-10（0.7.5）`opts.persist: false`：**退出 / 重置语义**的调用点要用它。
+ *
+ * ## 为什么需要这个开关
+ *
+ * 0.6.43 给会话槽与链加了落盘，好让"重启后仍能续上同一会话"。但三个**清空**函数
+ * （`resetContextChain` / `disposeSessionReuse` / `resetSessionReuse`）在 `clear()` 之后
+ * **紧接着调persistResumeState()** ⇒ **把空态写回了文件**。
+ *
+ * 其中 `disposeSessionReuse()` 是**卸载钩子**（`index.ts` 的 `ctx.effect(() => () => …��`）
+ * ⇒ **每次退出 DSH，持久化的状态都被自己抹掉** ⇒ 重启后 `restoreResumeState()` 读回空。
+ * 症状：网页端同一对话线被迫建新会话 + 出现「修改 / 重新生成」分叉（实测 27 万字符全量重发）。
+ *
+ * 之所以长期没被发现：`check-resume-after-restart` 只测**「进程 → 进程」**，
+ * **不经过卸载钩子**；`check-bundle` 守的是"落盘点存在"，**不守"落盘的内容对不对"**。
+ * ⚠️ **加了持久化就必须测「退出 → 启动」这个生命周期边界。**
+ */
+function persistResumeState(opts?: { persist?: boolean }): void {
+  // 退出 / 重置：内存清空是**该做的**，但**不该把"空"这件事持久化**。
+  // 落盘文件里上一份非空状态对"下次启动"才有意义。
+  if (opts?.persist === false) return
   try {
     const chains = [...contextChains.entries()]
       .map(([key, s]) => ({
@@ -2437,7 +2459,9 @@ export function resetContextChain(): void {
   contextChains.clear()
   lastChainKey = undefined
   lastFeedReason = undefined
-  persistResumeState() // 🔴 0.6.43：清干净也要落盘，否则重启后旧状态又被读回来
+  // 🔴 0.7.5：清空是"该做的"，但**不落盘** —— 落盘会把空态写回文件，
+  // 下次启动 `restoreResumeState()` 读回空 ⇒ 白清一场（0.6.43 起就在发生）。
+  persistResumeState({ persist: false })
 }
 
 /** 给状态页看：当前链式投喂是否真的在跑（没用链式就返回 undefined）。 */
@@ -2602,7 +2626,11 @@ export function disposeSessionReuse(): string | undefined {
   reuseSlots.clear()
   contextChains.clear()
   lastChainKey = undefined
-  persistResumeState() // 🔴 0.6.43
+  // 🔴 0.7.5：清空是"该做的"，但**不落盘** —— 落盘会把空态写回文件，
+  // 下次启动 `restoreResumeState()` 读回空 ⇒ 持久化白做（0.6.43 起就在发生）。
+  //⚠️ `disposeSessionReuse()` 是**卸载钩子**（`index.ts` 的 `ctx.effect(() => () => …)`）
+  //   ⇒ **每次退出 DSH 都会跑到这里**，所以这一处最要紧。
+  persistResumeState({ persist: false })
   // 0.1.83：图片的"服务端已知"集合同样归会话所有，会话退役就作废
   sentRefIdsBySession.clear()
   if (slots.length === 0) return undefined
@@ -2621,11 +2649,35 @@ export function resetSessionReuse(): void {
   reuseSlots.clear()
   contextChains.clear()
   lastChainKey = undefined
-  persistResumeState() // 🔴 0.6.43
+  // 🔴 0.7.5：清空是"该做的"，但**不落盘** —— 落盘会把空态写回文件，
+  // 下次启动 `restoreResumeState()` 读回空 ⇒ 持久化白做（0.6.43 起就在发生）。
+  //⚠️ `disposeSessionReuse()` 是**卸载钩子**（`index.ts` 的 `ctx.effect(() => () => …)`）
+  //   ⇒ **每次退出 DSH 都会跑到这里**，所以这一处最要紧。
+  persistResumeState({ persist: false })
   // 决策回执的状态也是模块级的（见 lastFeedReason），一并清掉，测试之间才互不干扰
   lastFeedReason = undefined
   // 0.1.83：图片的"服务端已知"集合也是模块级的，一并清掉
   sentRefIdsBySession.clear()
+}
+
+/**
+ * 🔴 2026-10-10（0.7.5）**测试专用**：直接往 `resume-state.json` 写一份给定状态。
+ *
+ * ## 为什么需要
+ *
+ * 要验证"退出 → 启动"这个边界，得先有**非空的落盘文件**。而真实流程要跑满一轮对话
+ * （登录、PoW、请求）才能产生，测试里既慢又不稳。
+ * ⇒ 提供这个入口，让 `tests/check-persist-lifecycle.mjs` 能**先造出非空态**，
+ * 再调`disposeSessionReuse()` 断言**它没被抹掉**。
+ *
+ * ⚠️ 它**绕过内存**直接写文件 —— 所以只适合测"落盘文件本身的行为"，
+ * 不能拿来验证内存与磁盘的一致性（那是 `check-resume-after-restart` 的职责）。
+ * ⚠️ 生产路径**不调用**它（`check-bundle` 守这件事）。
+ */
+export function writeResumeStateForTest(state: { slots: unknown[]; chains: unknown[] }): void {
+  const file = persistStatePath()
+  mkdirSync(join(webLoginDir(), 'diagnostics'), { recursive: true, mode: 0o700 })
+  writeFileSync(file, JSON.stringify({ version: 1, savedAt: Date.now(), ...state }, null, 2), 'utf8')
 }
 
 /** 链式投喂的决策回执（见 CompletionParams.onContextFeed）。 */
