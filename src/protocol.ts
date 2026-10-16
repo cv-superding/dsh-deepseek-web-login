@@ -253,34 +253,84 @@ export function toolProtocolInstructions(serial?: boolean): string {
 const MIN_TOOL_PROGRAM_CHARS = 80
 
 /**
+ * 围栏 info string 是这些 ⇒ 该块是「一段要执行的命令」，而不是解释性代码。
+ *
+ * issue #14：网页渠道下模型把要跑的 shell 命令贴进了正文（```pwsh + curl.exe …），
+ * 那一轮 `toolCallCount` 仍是 0，`eligible` 分支也救不了它（正文以完整句子收尾，
+ * 不是 midSentence / cutByServer）⇒ 两条判据都不满足 ⇒ break ⇒ 回合被判 completed。
+ * 用户看到的是「它说了要去做，然后什么都没做」，而且下一轮会被历史里的假命令继续带偏。
+ *
+ * shell 块是 agent 场景里最自然的这种形态，比 `tools.<name>(` 常见得多 —— 所以单独认。
+ */
+const SHELL_FENCE_LANGUAGES = new Set(['pwsh', 'powershell', 'ps1', 'bash', 'sh', 'shell', 'zsh', 'fish', 'cmd', 'bat'])
+
+/**
+ * shell 块的长度下限，与 PTC 的 80 字符不同：`ls -la` 本身就是一个真命令。
+ * 有误判代价，但方向是安全的：多打一次纠正请求，比静默什么都不做便宜得多。
+ */
+const MIN_SHELL_COMMAND_CHARS = 2
+
+/** `bash`、`bash title=x`、`language-bash` 都算 shell 块。 */
+function isShellFence(infoString: string): boolean {
+  const name = (infoString.trim().toLowerCase().split(/[\s,;:]/)[0] ?? '').replace(/^language-/, '')
+  return SHELL_FENCE_LANGUAGES.has(name)
+}
+
+/** 每一条 shell 的注释写法：`#`（POSIX/PowerShell）、`//`、`::` 与 `rem`（cmd/bat）。 */
+const SHELL_COMMENT = /^(?:#|\/\/|::|rem(?:\s|$)|<#)/i
+
+/**
+ * 至少一行是「命令」，而不是空行或注释。
+ *
+ * cmd/bat 用 `::` 与 `rem` 注释、PowerShell 还多一个块注释 `<# … #>`：只认 `#`/`//` 的话，
+ * 一个全是注释的 ```cmd 或 ```pwsh 块会被判成「要执行的命令」，与「纯注释块判假」这条
+ * 自相矛盾（复核实测：`:: 只是注释`、`rem 说明`、`<# … #>` 都返回 true）。
+ */
+function hasExecutableLine(body: string): boolean {
+  // PowerShell's `<# … #>` block comment spans lines, so it is removed first — a body that
+  // is one long block comment has no command line.
+  const withoutBlockComments = body.replace(/<#[\s\S]*?#>/g, '')
+  return withoutBlockComments.split('\n').some((line) => {
+    const trimmed = line.trim()
+    return trimmed.length > 0 && !SHELL_COMMENT.test(trimmed)
+  })
+}
+
+/**
  * 检测「模型把工具程序写成了正文」——而不是作为工具调用发出。
  *
- * 现场（2026-09-17 11:00，`--F-Code-DSH-Code-gongji--` 会话）：第三方 preset（染神）
- * 的 `tool-bootstrap.mjs` 注入了一条 PTC 说明 ——「你在 Programmatic Tool Calling 模式，
- * 所有动作必须通过 run_code 写 TypeScript 程序完成」；同 preset 的 persona 还写着
- * `One complete deliverable per turn: numbered steps or code blocks`。
- * 于是模型把 run_code 的 code 参数**原样贴进了正文**：三轮里一次工具调用都没发出
- * （`toolCallCount` 始终为 0），agent loop 判定回合结束 → 用户看到「它停下来了」。
- * 模型自己在 reasoning 里也承认："我把 TypeScript 代码写成了正文文本，而不是作为工具调用发出"。
+ * 现场一（2026-09-17 11:00，`--F-Code-DSH-Code-gongji--`）：第三方 preset 的 `tool-bootstrap.mjs`
+ * 注入 PTC 说明「所有动作必须通过 run_code 写 TypeScript 程序完成」，模型把 code 参数原样贴进正文，
+ * 三轮里 `toolCallCount` 始终为 0 ⇒ 回合结束 ⇒ 用户看到「它停下来了」。
  *
- * 判据：正文里出现**围栏代码块**且块内含 `tools.<name>(…)` 形态的调用 —— 那是 PTC
- * 程序体的特征（正常回答不会这么写）。没有围栏时只认带 `await` 的形态，更严格，
- * 免得把「提到某个 API」错判成「写了程序」。
+ * 现场二（issue #14，2026-10-05，`session-bcee8d6a`）：模型把**要执行的 shell 命令**写进 ```pwsh 围栏
+ * 当正文（`curl.exe -s -m 10 ".../api/status"`），本轮零工具调用、正文以完整句子收尾 ⇒ 上面的
+ * `eligible` 分支（要求 midSentence / cutByServer）不成立，而当时的判据只认 `tools.<name>(` ⇒ 同样静默
+ * 判定 completed。
+ *
+ * 判据（命中其一）：
+ *   1. 正文里出现**围栏代码块**且块内含 `tools.<name>(…)` 形态的调用 —— PTC 程序体的特征；
+ *   2. 围栏的 info string 是 **shell 语言**（见 SHELL_FENCE_LANGUAGES）且块内有非注释内容 ——
+ *      「把要跑的命令贴进正文」的形态；
+ *   3. 没有任何围栏时，只认带 `await` 的 `tools.<name>(`，更严格，免得把「提到某个 API」错判成「写了程序」。
  *
  * ⚠️ 这**只是判据**：调用方还要确认「本轮零工具调用」，否则健康的程序化调用轮会被误伤。
+ * 误判的代价是多打一次网页端请求；漏判的代价是那一轮等于什么都没做，而且会自我强化
+ * （下一轮照抄正文里的假命令）—— 所以宁可偏宽，但不宽到认不出「这确实是一段 shell」。
  */
 export function looksLikeUnexecutedToolProgram(text: string): boolean {
   const source = String(text ?? '')
   if (!source) return false
-  const blocks: string[] = []
-  const fence = /```[^\n]*\n([\s\S]*?)```/g
+  const blocks: Array<{ language: string; body: string }> = []
+  const fence = /```([^\n]*)\n([\s\S]*?)```/g
   let match: RegExpExecArray | null
-  while ((match = fence.exec(source)) !== null) blocks.push(match[1])
+  while ((match = fence.exec(source)) !== null) blocks.push({ language: match[1], body: match[2] })
   if (blocks.length === 0) {
     return /await\s+tools\.[A-Za-z_$][\w$]*\s*\(/.test(source)
   }
-  return blocks.some(
-    (block) => block.length >= MIN_TOOL_PROGRAM_CHARS && /tools\.[A-Za-z_$][\w$]*\s*\(/.test(block),
+  return blocks.some((block) =>
+    (block.body.length >= MIN_TOOL_PROGRAM_CHARS && /tools\.[A-Za-z_$][\w$]*\s*\(/.test(block.body))
+    || (isShellFence(block.language) && block.body.trim().length >= MIN_SHELL_COMMAND_CHARS && hasExecutableLine(block.body)),
   )
 }
 

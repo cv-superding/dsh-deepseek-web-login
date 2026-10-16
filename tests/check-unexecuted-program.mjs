@@ -119,6 +119,102 @@ test('空串 / undefined / 纯空白 ⇒ 判假（不能抛）', () => {
   assert.equal(looksLikeUnexecutedToolProgram(undefined), false)
 })
 
+// ── 现场样本二（issue #14）：把 shell 命令写进正文 ──────────────────
+
+/** 照抄 issue #14 的正文（`session-bcee8d6a`，2026-10-05 17:44），只把接口地址缩短。 */
+const SHELL_PROGRAM = [
+  '那小糯先干一件事：**用刚学会的方法，看看自己现在跑在哪条路上。**',
+  '',
+  '```pwsh',
+  'curl.exe -s -m 10 "http://127.0.0.1:19387/deepseek-web-login/api/status"',
+  '```',
+  '顺手也看一眼台账有没有记上小糯这一轮。',
+].join('\n')
+
+test('现场样本二（围栏语言是 pwsh + shell 命令）⇒ 判真', () => {
+  assert.ok(!SHELL_PROGRAM.includes('tools.'), '自证：样本里没有任何 tools.xxx( 形态')
+  assert.ok(SHELL_PROGRAM.includes('curl.exe'), '自证：样本确实是要执行的命令')
+  assert.equal(looksLikeUnexecutedToolProgram(SHELL_PROGRAM), true)
+})
+
+test('各种 shell 语言标记都要认（含 language- 前缀）⇒ 判真', () => {
+  for (const tag of ['bash', 'sh', 'shell', 'zsh', 'powershell', 'pwsh', 'cmd', 'bat', 'language-bash']) {
+    const text = ['```' + tag, 'mkdir -p build && cd build', '```'].join('\n')
+    assert.equal(looksLikeUnexecutedToolProgram(text), true, `语言标记是「${tag}」时应判真`)
+  }
+})
+
+test('短 shell 命令也要认（自证：总长不足 PTC 那条 80 字符的门槛）⇒ 判真', () => {
+  const text = ['```bash', 'ls -la', '```'].join('\n')
+  assert.ok(text.length < 80, '自证：这条样本比 MIN_TOOL_PROGRAM_CHARS 短')
+  assert.equal(looksLikeUnexecutedToolProgram(text), true)
+})
+
+test('shell 块里是函数定义而不是一行命令 ⇒ 判真', () => {
+  const text = ['```pwsh', 'function Get-Status {', '  param($Url)', '  curl.exe -s -m 10 $Url', '}', '```'].join('\n')
+  assert.equal(looksLikeUnexecutedToolProgram(text), true)
+})
+
+test('输出记录类标记不算「要执行的命令」⇒ 判假', () => {
+  // `console` / `terminal` / `shell-session` 标的是**输出**，不是要跑的程序；
+  // 把它们当命令会诱导调用方去执行一段本来只是回显的内容。
+  const transcripts = [
+    ['```console', '$ npm test', '> all tests passed', '```'].join('\n'),
+    ['```terminal', 'root@host:~# ls -la', 'total 0', '```'].join('\n'),
+    ['```shell-session', 'user@host % git status', 'clean', '```'].join('\n'),
+  ]
+  for (const text of transcripts) {
+    assert.equal(looksLikeUnexecutedToolProgram(text), false, '应判假：' + text.split('\n')[0])
+  }
+})
+
+test('标记大小写不敏感（BASH / PWSH / Language-Bash）⇒ 判真', () => {
+  for (const tag of ['BASH', 'Sh', 'PWSH', 'Language-Bash', 'Language-BASH']) {
+    const text = ['```' + tag, 'mkdir -p build', '```'].join('\n')
+    assert.equal(looksLikeUnexecutedToolProgram(text), true, `语言标记是「${tag}」时应判真`)
+  }
+})
+
+test('单字符 shell 块低于长度门槛 ⇒ 判假', () => {
+  assert.equal(looksLikeUnexecutedToolProgram(['```bash', 'x', '```'].join('\n')), false)
+  assert.equal(looksLikeUnexecutedToolProgram(['```bash', '-', '```'].join('\n')), false)
+  // 两个字符就是命令了（`ls`），门槛就在这里。
+  assert.equal(looksLikeUnexecutedToolProgram(['```bash', 'ls', '```'].join('\n')), true)
+})
+
+test('PowerShell 块注释（<# … #>）也算注释 ⇒ 判假', () => {
+  const text = ['```pwsh', '<# 先说明一下', '   这里还是注释 #>', '```'].join('\n')
+  assert.equal(looksLikeUnexecutedToolProgram(text), false)
+  // 块注释之后跟一条真命令，还是要判真。
+  const withCommand = ['```pwsh', '<# 说明 #>', 'Get-ChildItem -Recurse', '```'].join('\n')
+  assert.equal(looksLikeUnexecutedToolProgram(withCommand), true)
+})
+
+test('cmd/bat 的注释写法（:: 与 rem）也算注释 ⇒ 判假', () => {
+  assert.equal(looksLikeUnexecutedToolProgram(['```cmd', ':: 只是注释', ':: 又一行', '```'].join('\n')), false)
+  assert.equal(looksLikeUnexecutedToolProgram(['```bat', 'rem 说明', 'rem 再来一行', '```'].join('\n')), false)
+  // 但注释后面跟着真命令就不一样了。
+  assert.equal(looksLikeUnexecutedToolProgram(['```cmd', ':: 先说明', 'dir /b', '```'].join('\n')), true)
+})
+
+test('shell 块里只有注释 / 只有空行 ⇒ 判假（没有要执行的命令）', () => {
+  assert.equal(looksLikeUnexecutedToolProgram(['```bash', '# 说明一下这个接口', '# 再看一行', '```'].join('\n')), false)
+  assert.equal(looksLikeUnexecutedToolProgram(['```bash', '', '```'].join('\n')), false)
+})
+
+test('非 shell 标记的块（python / json / text）⇒ 判假', () => {
+  for (const tag of ['python', 'json', 'text', 'md']) {
+    const text = ['```' + tag, 'mkdir -p build && cd build', '```'].join('\n')
+    assert.equal(looksLikeUnexecutedToolProgram(text), false, `语言标记是「${tag}」时应判假`)
+  }
+})
+
+test('正文行内提到一条命令、但没有围栏 ⇒ 判假', () => {
+  const text = '你可以用 curl.exe 访问那个接口看看返回值，这条是说明不是命令。'
+  assert.ok(!text.includes('```'), '自证：样本没有围栏')
+  assert.equal(looksLikeUnexecutedToolProgram(text), false)
+})
+
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
 if (failures.length) process.exitCode = 1
