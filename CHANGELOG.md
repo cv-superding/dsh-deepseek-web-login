@@ -2,6 +2,41 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 未发布 — Windows 上 transport profile 清理不再自锁启动
+
+传输层每次启动前会清一遍 `web-login/transport-profile`。旧实现是一句
+`rmSync(PROFILE_DIR, { recursive: true, force: true })` —— 在 Windows 上它是个定时炸弹：
+
+```
+清理 transport profile 失败：EPERM, Permission denied: \\?\C:\Users\<user>\.dsh\web-login\transport-profile
+```
+
+报错看起来像权限/杀软问题，实际原因在别处。headless 浏览器是多进程的（主进程 +
+GPU / renderer / utility / network 若干），而 Windows 的 `TerminateProcess` **不级联**：
+`child.kill()` 只收掉主进程，剩下的子进程成了孤儿，仍持有 `--user-data-dir` 下文件的
+独占句柄。于是下一次启动删目录必失败 —— 而 `force: true` 只吞"文件不存在"，不吞 `EPERM`。
+外壳强杀（更新、崩溃重启）时尤其容易留下这种状态，一旦留下就是**每次启动都失败**。
+
+### 改了三处
+
+- **清理改「先改名、再删旧名」**：`renameSync` 只要求父目录可写，不碰被占用的文件，
+  所以在"文件被锁"这种最常见卡点上仍然成功；改名后用 best-effort 删除，删不掉就随它去。
+  连改名都做不到（父目录本身被锁）时**保留旧目录继续启动** —— 带上一次残渣也比整个
+  传输层起不来强。
+- **收整棵进程树**：Windows 上 `cleanup()` / 启动失败的各条出口改用
+  `taskkill /PID <pid> /T /F`，不再只 `child.kill()`。这是"别再留孤儿"那半边。
+- **等上一批真的退出**：新增一个只在 `exit` 事件上落定的状态位，清理前最多等 3 秒。
+  不靠"谁调了 cleanup"记账 —— 进程退出才是文件句柄已放开的唯一保证。
+
+### 行为上要知道的两点
+
+- 补丁的目标是**绝不阻断启动**，不是当万能清理器。删不掉是允许的结果，会留下一个
+  `transport-profile.stale-<时间戳>` 目录（几十 MB），下次启动再试。
+- 非 Windows 平台不走 `taskkill`；改名路径通用，但那里本来就没有这个问题。
+
+由 `tests/check-browser-transport.mjs` 的两条用例守着（`check-bundle` 另守"产物里
+旧写法真的没了"）。反向验证实测：把旧实现改回去，用例报的正是上面那句 `EPERM`。
+
 ## 1.0.2 — 2026-10-15（滚动窗口限速：一次封号的事后分析）
 
 那晚（22:53）账号会话被吊销（`AUTH`/invalid token）。事后从调用台账里读出的轨迹：

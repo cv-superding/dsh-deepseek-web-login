@@ -1194,6 +1194,27 @@ const checks = {
   'headless 传输层确实用上了 transportExtraArgs（--no-sandbox 不能悬空）':
     /\.\.\.transportExtraArgs\(\)/.test(srcBrowserTransport),
 
+  // ── Windows：清 transport profile 必须是「先改名再删」，且收掉整棵进程树 ─────
+  // 旧实现直接 `rmSync(PROFILE_DIR, { recursive: true, force: true })`：上一批
+  // headless 浏览器（多进程、Windows 上 kill 不级联）还占着文件时就抛 EPERM，
+  // 而 `force` 只吞"不存在"、不吞 EPERM ⇒ 每次启动都失败。
+  // 两条都要断：①源码走的是改名路径；②产物里那句旧 `rmSync` 真的没了。
+  // ⚠️ 断"旧写法不存在"时**必须先剥掉注释** —— 新代码的注释里正引用了旧写法
+  //   （"为什么不是一句 rmSync(…)"），不剥的话这条永远红。`check-bundle` 读的是源码，
+  //   注释会一并读进来。
+  '清 transport profile 走「先改名再删」（EPERM 不再卡死启动）':
+    /await prepareTransportProfile\(PROFILE_DIR/.test(srcBrowserTransport) &&
+    /renameSync\(profileDir, retired\)/.test(srcBrowserTransport) &&
+    !/rmSync\(PROFILE_DIR, \{ recursive: true, force: true \}\)/.test(
+      srcBrowserTransport.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''),
+    ),
+
+  'Windows 上收浏览器进程树（taskkill /T，否则孤儿子进程锁住 profile）':
+    /execFile\('taskkill', \['\/PID', String\(pid\), '\/T', '\/F'\]/.test(srcBrowserTransport) &&
+    /killTransportTree\(child\.pid\)/.test(srcBrowserTransport) &&
+    // 产物侧：tsdown 不保证保留源码里的注释，但会保留字面量 `taskkill`
+    host.includes('taskkill'),
+
   '登录窗口不用 --no-sandbox（它加载真实页面，sandbox 是有用的隔离）':
     (() => {
       // 🔴 判据：spawn 登录窗口那一处**不许**出现该flag。

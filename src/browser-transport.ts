@@ -9,8 +9,8 @@
  * 为什么不用 electron.net.fetch：官方 DSH 把插件跑成 ELECTRON_RUN_AS_NODE=1 的 Node 子进程，
  * require('electron') 拿不到 net.fetch。本模块是绕过这个限制的后备方案。
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -156,10 +156,119 @@ let activeSession: BrowserTransportSession | undefined
 let launchPromise: Promise<BrowserTransportSession> | undefined
 const requests = new Map<string, TransportRequestState>()
 
+/**
+ * 上一个 transport 浏览器是否真的退出了。
+ *
+ * 不靠"谁调了 cleanup"记账，而是直接订阅 `exit` 事件：进程退出是**唯一**能保证
+ * 文件句柄已放开的事件。`cleanup` 只是顺手把这里复位，好让下一次 `kill` 不被提前
+ * 判定为"已经在退出了"。
+ */
+let exitState: 'none' | 'exiting' | 'exited' = 'none'
+let settleExit: () => void = () => {}
+
+/**
+ * 等到上一个浏览器退出为止（有上限）。
+ *
+ * 超时不算失败：调用方接着尝试改名，最坏情形是改名也失败、保留旧目录继续启动 ——
+ * 那仍然比"整个传输层起不来"好。这里不抛错是刻意的，别改成 throw。
+ */
+async function waitForPreviousTransportExit(): Promise<void> {
+  if (exitState !== 'exiting') return
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, TRANSPORT_EXIT_GRACE_MS)
+      const done = settleExit
+      settleExit = () => {
+        clearTimeout(timer)
+        done()
+      }
+    }),
+    new Promise<void>((resolve) => setTimeout(resolve, TRANSPORT_RECLAIM_TIMEOUT_MS)),
+  ])
+}
+
 export function systemBrowserAvailable(): boolean {
   // 测试隔离：单测/CI 可以强制关闭浏览器代理，避免依赖本机浏览器。
   if (process.env.DSH_NO_BROWSER_TRANSPORT === '1') return false
   return findSystemBrowser() !== null
+}
+
+const TRANSPORT_EXIT_GRACE_MS = 3_000
+/**
+ * 回收旧传输层浏览器的总等待预算。
+ *
+ * 卡住的情形是 Windows 上"目录里还有被占用的文件"：`taskkill` 给出了强杀信号，
+ * 但浏览器要逐个进程退出，句柄才真的放开。3 秒够用完整体退出的浏览器走完，
+ * 又不至于把每次冷启动拖慢到用户能察觉。
+ */
+const TRANSPORT_RECLAIM_TIMEOUT_MS = 3_000
+
+/**
+ * 结束一个 transport 浏览器进程**连同它的子进程**。
+ *
+ * 🔴 为什么不能只 `child.kill()`（2026-10-17，Windows 实测）：
+ *   headless 浏览器是多进程的（主进程 + GPU/renderer/utility/network 若干），
+ *   Windows 的 `TerminateProcess` **不级联**后代进程。主进程一死，剩下的子进程就
+ *   成了孤儿 —— 它们仍持有 `--user-data-dir` 下文件的独占句柄，于是下一次启动时
+ *   "删旧 profile"必然 `EPERM`/`EBUSY`。Linux/macOS 上退出信号能走到整棵进程树，
+ *   这个问题不显形，所以只有 Windows 要单独走 `taskkill /T`。
+ *
+ * 同步执行：调用点都在 `cleanup()` 这类不允许 await 的地方。`taskkill` 找不到进程
+ * 时会返回非 0，忽略即可（进程本来就已经没了）。
+ */
+function killTransportTree(pid: number | undefined): void {
+  if (typeof pid !== 'number' || pid <= 0) return
+  if (process.platform !== 'win32') return
+  try {
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {})
+  } catch {}
+}
+
+/**
+ * 清空 transport profile 并重建。
+ *
+ * 🔴 为什么不是一句 `rmSync(PROFILE_DIR, { recursive: true, force: true })`：
+ *   Windows 上删除目录要求**目录本身和目录里每一个文件**都能被删除。只要上一次的
+ *   浏览器还活着（哪怕只是残留的 GPU 进程），`rmSync` 就会抛 `EPERM`，而它的
+ *   `force: true` 只吞"文件不存在"，不吞 `EPERM`。插件因此**每次启动都失败**，
+ *   而失败原因（"上一次的进程还在"）跟现象（"清理失败"）看起来毫无关系。
+ *
+ * 改成"先改名、再删旧名"：改名只要求父目录可写，不碰被占用的文件，所以在
+ * "文件被锁"这种最常见的卡点上仍然能成功；旧目录改名后用 `best-effort` 删除，
+ * 删不掉就随它去（下次启动还会再试）。
+ *
+ * 连改名都做不到（父目录本身被锁）时**保留旧目录继续启动**：浏览器启动时会复用
+ * 已有的 user-data-dir，虽然带上了上一次的残渣，但比"整个传输层起不来"好得多 ——
+ * 后者会让所有依赖它的请求一起失败。
+ */
+async function prepareTransportProfile(
+  profileDir: string,
+  waitForReclaim: () => Promise<void>,
+): Promise<void> {
+  if (existsSync(profileDir)) {
+    // 先收掉仍占着这个目录的旧浏览器，否则改名也会失败（Windows 上"
+    // 目录里有打开的文件"时 rename 同样被拒）。
+    await waitForReclaim()
+    let retired: string | undefined
+    try {
+      retired = `${profileDir}.stale-${Date.now()}`
+      renameSync(profileDir, retired)
+    } catch {
+      retired = undefined
+    }
+    if (retired) {
+      try {
+        rmSync(retired, { recursive: true, force: true })
+      } catch {
+        // 删不掉就留着：占几十 MB，下次启动会再试，不影响功能。
+      }
+    }
+  }
+  try {
+    mkdirSync(profileDir, { recursive: true })
+  } catch (error: any) {
+    throw new Error(`创建 transport profile 失败：${error?.message ?? error}`)
+  }
 }
 
 /** 等 profile 里的 DevToolsActivePort 出现并返回端口。 */
@@ -492,12 +601,7 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
     const browser = findSystemBrowser()
     if (!browser) throw new Error('未找到 Edge/Chrome，无法启动浏览器代理传输层')
 
-    try {
-      if (existsSync(PROFILE_DIR)) rmSync(PROFILE_DIR, { recursive: true, force: true })
-      mkdirSync(PROFILE_DIR, { recursive: true })
-    } catch (error: any) {
-      throw new Error(`清理 transport profile 失败：${error?.message ?? error}`)
-    }
+    await prepareTransportProfile(PROFILE_DIR, waitForPreviousTransportExit)
 
     const child = spawn(
       browser.path,
@@ -513,26 +617,27 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
       spawnError = err
     })
     await new Promise((r) => setTimeout(r, 300))
-    if (spawnError) {
+    // 启动失败的三条出口也要收整棵进程树：半死的浏览器同样占着 profile。
+    const abortLaunch = (): void => {
+      killTransportTree(child.pid)
       try {
         child.kill()
       } catch {}
+    }
+    if (spawnError) {
+      abortLaunch()
       throw new Error(`启动浏览器失败：${spawnError.message}`)
     }
 
     const port = await waitForTransportDebugPort(PROFILE_DIR, child)
     if (!port) {
-      try {
-        child.kill()
-      } catch {}
+      abortLaunch()
       throw new Error('浏览器调试端口未就绪')
     }
 
     const page = await findPageTarget(port)
     if (!page) {
-      try {
-        child.kill()
-      } catch {}
+      abortLaunch()
       throw new Error('浏览器里没有可用页面')
     }
 
@@ -540,9 +645,7 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
     try {
       await cdp.connect()
     } catch (error: any) {
-      try {
-        child.kill()
-      } catch {}
+      abortLaunch()
       throw new Error(`连接 CDP 失败：${error?.message ?? error}`)
     }
 
@@ -583,14 +686,25 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
       try {
         cdp.close()
       } catch {}
+      // 只 kill 主进程会留下持有 profile 文件句柄的孤儿子进程（见 killTransportTree）。
+      killTransportTree(child.pid)
       try {
         child.kill()
       } catch {}
       activeSession = undefined
       launchPromise = undefined
+      if (exitState === 'exiting') {
+        exitState = 'exited'
+        settleExit()
+      }
     }
 
     child.on('exit', cleanup)
+
+    // 登记"这个进程还没退"。必须在 spawn 之后立刻做：`exit` 来得比这里早时
+    // 上面的 cleanup 已经把 exitState 复位成 none，不会留下一个永远等不到的 exiting。
+    exitState = 'exiting'
+    settleExit = () => {}
 
     return { browser, child, cdp, cleanup, pageSession: {} }
   })()

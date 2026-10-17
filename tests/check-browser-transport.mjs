@@ -7,13 +7,17 @@
  * 用法: node tests/check-browser-transport.mjs
  */
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 const HOME = mkdtempSync(join(tmpdir(), 'dsh-browser-transport-'))
 process.env.DSH_HOME = HOME
+
+/** `PROFILE_DIR` 是模块加载时按 `DSH_HOME` 定下的，所以本文件必须和产品算同一份。 */
+const PROFILE_DIR = join(HOME, 'web-login', 'transport-profile')
 
 /**
  * 是否允许本文件真启浏览器。
@@ -484,6 +488,109 @@ async function main() {
       await shutdownBrowserTransport()
       server.close()
     }
+  })
+
+  // 17. 🔴 Windows：上一次的浏览器还占着 profile 文件时，清 profile **不许**把启动卡死
+  //
+  //    2026-10-17 实测（Windows 11 + Edge 155）：headless 浏览器是多进程的，主进程死后
+  //    仍有约 10 个 msedge.exe 持有 `--user-data-dir` 下文件的独占句柄。旧实现在这里
+  //    直接 `rmSync` ⇒ `EPERM` ⇒ `清理 transport profile 失败：…` ⇒ **每次启动都失败**，
+  //    而报错文本跟真实原因（"上一批进程还活着"）毫无关联。
+  //
+  //    这条用例用 PowerShell 的独占句柄模拟"上一次的浏览器还没走干净"：
+  //    句柄挂在 profile 里的一个**普通文件**上（Edge 锁的正是这类文件）。
+  //
+  //    ⚠️ 判据是"启动没被清理卡死"，不是"干净删掉了"。补丁的价值在于**绝不阻断启动**，
+  //    不是当一个万能清理器 —— 删不掉是允许的结果。
+  //
+  //    ⚠️ 故意锁一个**自造的小文件**、不锁 `Local State` 这类浏览器自己要写的文件：
+  //    锁住真文件会把浏览器自己搞起不来，那时失败原因就不是清理逻辑了，用例会失去归因力。
+  await test('★ Windows：profile 被占用时清理不许阻断启动（EPERM 回归）', async () => {
+    if (process.platform !== 'win32') {
+      console.log('    (skip: 本用例模拟的是 Windows 的独占句柄语义)')
+      return
+    }
+    // 先用**正常路径**把 transport 跑起来，让插件自己写出一个真实的 profile，
+    // 再关掉它 —— 这才是"上一次留下的 profile"。
+    //
+    // 🔴 不能自己 `mkdirSync(PROFILE_DIR)` 造一个空目录来省事：空目录在没有句柄时
+    //   `rmSync` 是能成功的，用例会**在坏实现上也是绿的**（反向验证实测过）。
+    //   必须让目录里装着真浏览器写出来的东西。
+    const {
+      launchBrowserTransport,
+      shutdownBrowserTransport,
+      systemBrowserAvailable,
+    } = await import('../src/browser-transport.ts?ebusy=' + Date.now())
+    if (!systemBrowserAvailable()) {
+      console.log('    (skip: 本机无 Edge/Chrome，无法真启浏览器验证)')
+      return
+    }
+    await launchBrowserTransport()
+    await shutdownBrowserTransport()
+    assert.ok(existsSync(PROFILE_DIR), '前置条件：正常跑过一次之后 profile 目录应当存在')
+    // 让被 kill 的子进程把句柄放干净，否则这里已经是"占用中"了，测的就不是下一轮启动
+    await new Promise((r) => setTimeout(r, 1_500))
+    assert.ok(readdirSync(PROFILE_DIR).length > 0, '前置条件：profile 里得有真浏览器写的文件')
+
+    const lockedFile = join(PROFILE_DIR, 'locked-by-previous-run.bin')
+    writeFileSync(lockedFile, '占位')
+
+    // 用独立进程持有句柄（本进程去开句柄会把自己的事件循环占住，没必要）。
+    // FileShare.Read 是 Edge 的典型形态：别人能读，但删不掉、也搬不走整个目录。
+    const holder = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        [
+          `$f = [System.IO.File]::Open('${lockedFile}', 'Open', 'Read', 'Read')`,
+          `Write-Output 'READY'`,
+          `Start-Sleep -Milliseconds 6000`,
+          `$f.Close()`,
+        ].join('; '),
+      ],
+      { encoding: 'utf8', timeout: 20_000 },
+    )
+    assert.ok(holder.includes('READY'), `前置条件：句柄持有进程没起来。实际输出=${holder}`)
+
+    // 句柄已持有 ⇒ 现在跑真正的清理 + 启动。旧实现会在这里抛
+    // `清理 transport profile 失败：EPERM …`，新实现必须走通。
+    try {
+      // ① 清理阶段不许抛 —— 这是本用例的主判据
+      let session
+      try {
+        session = await launchBrowserTransport()
+      } catch (error) {
+        assert.fail(
+          `profile 被占用时启动被清理卡死了（EPERM 回归）。真实原因应当是` +
+            `"上一批浏览器进程还活着"，但用户看到的是：${error?.message ?? error}`,
+        )
+      }
+      assert.ok(session?.child?.pid, '启动必须拿到一个真的浏览器进程')
+
+      // ② 目录必须重新就位：浏览器要能在里面写自己的状态
+      assert.ok(existsSync(PROFILE_DIR), '清理之后必须重建 profile 目录')
+    } finally {
+      await shutdownBrowserTransport()
+    }
+  })
+
+  // 18. 收尾：残留的 `.stale-*` 不能无限堆积
+  //
+  //    "改名 + best-effort 删除"这条路径的代价是：句柄没放开时删不掉就等于多留一份
+  //    几十 MB 的目录。允许留**一份**（留给下次启动再试），但不许每启动一次多一份。
+  await test('★ 失败的清理不会让 .stale-* 目录无限堆积', async () => {
+    const root = join(HOME, 'web-login')
+    if (!existsSync(root)) {
+      console.log('    (skip: 上一条用例没跑真启浏览器，没有产生 stale 目录)')
+      return
+    }
+    const stale = readdirSync(root).filter((n) => basename(n).startsWith('transport-profile.stale-'))
+    assert.ok(
+      stale.length <= 1,
+      `最多允许留一份待清理的旧 profile（留给下次启动重试），实际有 ${stale.length} 份：${stale.join(', ')}`,
+    )
   })
 
   console.log()
