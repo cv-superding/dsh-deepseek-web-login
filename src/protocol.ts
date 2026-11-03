@@ -1087,7 +1087,12 @@ const DSML_PREFIX_BODY = '[|｜]+\\s*DSML\\s*[|｜]+\\s*|\\s*dsml-\\s*'
 const DSML_PREFIX = `(?:${DSML_PREFIX_BODY})?`
 /** 整组**必需**（给"必须有前缀才剥"的场合用，如 `invoke`）。 */
 const DSML_PREFIX_ONLY = `(?:${DSML_PREFIX_BODY})`
-const XML_STARTER_RE = new RegExp(`<\\s*${DSML_PREFIX}(${WRAPPER_NAMES}|invoke)\\b`, 'i')
+const XML_STARTER_RE = new RegExp(
+  // 带前缀的 `parameter` 也算调用开始：模型丢掉包裹层/只剩参数标签时，
+  // 不认它 ⇒ drain() 会把 `<｜｜DSML｜｜parameter …>` 当正文直接吐出去（实测漏标路径）。
+  `<\\s*${DSML_PREFIX}(${WRAPPER_NAMES}|invoke)\\b` + `|<\\s*${DSML_PREFIX_ONLY}parameter\\b`,
+  'i',
+)
 /**
  * 代码围栏：模型常把调用块放进 ``` 里。
  *
@@ -1740,11 +1745,17 @@ export function parseXmlToolCalls(block: string): ToolCallRequest[] | null {
       // 没有 parameter 子元素：尝试把内文当 JSON 参数，否则按 _raw 保留
       const inner = body.trim()
       if (inner) {
-        try {
-          const parsed = JSON.parse(inner)
-          if (parsed && typeof parsed === 'object') Object.assign(args, parsed as Record<string, unknown>)
-          else args._raw = parsed
-        } catch {
+        /**
+         * ⚠️ 必须用 `parseJsonLenient`：模型写 Windows 路径（`"D://apps"`）是**非法 JSON 转义**，
+         * 用 `JSON.parse` 直接抛 ⇒ 掉进 `_raw` ⇒ 参数全丢、执行器报缺参。
+         * 抢救路径一直用的是 lenient，两条路径不能分叉。
+         */
+        const parsed = parseJsonLenient(inner)
+        if (parsed !== undefined && parsed && typeof parsed === 'object') {
+          Object.assign(args, parsed as Record<string, unknown>)
+        } else if (parsed !== undefined) {
+          args._raw = parsed
+        } else {
           args._raw = inner
         }
       }
@@ -1831,7 +1842,19 @@ function salvageXmlParameters(body: string): Record<string, unknown> {
   for (let i = 0; i < found.length; i++) {
     // 值 = 本参数开标签之后 → 下一个参数开标签之前（或段尾）
     // 按**开标签位置**切段而不是按 `</parameter>`：收尾标签可能整段缺失。
-    const valueEnd = found[i + 1] ? found[i + 1].start : body.length
+    let valueEnd = found[i + 1] ? found[i + 1].start : body.length
+    /**
+     * 收尾标签之后可能还有正文（`…x</…parameter>这里是正文`）⇒ 值必须在 `</…parameter>` 处截止，
+     * 否则协议标记和正文会被塞进工具参数里。
+     */
+    /**
+     * ⚠️ 前缀**可选**：进到这里的文本已经过 `normalizeDsml`（把 `<｜｜DSML｜｜` 剥成了 `<`），
+     * 所以现场更常见的是裸 `</parameter>`。只认带前缀的写法 ⇒ 这条修复等于没做。
+     */
+    const closeAt = new RegExp(`<\\/\\s*(?:(?:${DSML_PREFIX_ONLY}))?parameter\\s*>`, 'i').exec(
+      body.slice(found[i].end, valueEnd),
+    )
+    if (closeAt) valueEnd = found[i].end + closeAt.index
     // 值尾部残留的 `</parameter>` / `</invoke>` / `</tool_calls>` 一律剥掉
     args[found[i].key] = parseParameterValue(
       stripXmlClosers(body.slice(found[i].end, valueEnd)),
@@ -2014,39 +2037,6 @@ export function findXmlToolCallEnd(buffer: string): number {
  *   3. 只剩后半截的 —— 独占一行的 `voke>`（`invoke>` 掉了头）
  * 正文里正常讨论 XML 时通常写在代码围栏或行内代码里，形态与这三条不同。
  */
-/**
- * 找出「有开无闭」的 DSML 残段起点（没有就返回 -1）。
- *
- * 为什么必须有：模型被服务端上限截断、或流被硬切断时，正文里会留下**未闭合**的
- * `<｜｜DSML｜｜invoke …>` / `<｜｜DSML｜｜parameter …>`，甚至只有半截前缀 `<｜DSML`。
- * 这些是私有标记，正文里不可能有正当含义 ⇒ 从起点一直吞到结尾（剩下的本来也属于协议）。
- *
- * ⚠️ 只认**带 DSML 前缀**的标签：正文里正常讨论 `<invoke>`（无前缀）必须原样保留，
- *    `check-dsml-stray` / `logic-test` 各有用例守着。
- */
-function danglingDsmlStart(text: string): number {
-  // ① 结尾只剩半截前缀：`<｜DSML`、`<｜｜DSML｜`
-  const half = new RegExp(`<\\s*(?:[|｜]\\s*){1,2}DSML[\\s|｜]*$`, 'i').exec(text)
-  if (half) return half.index
-
-  /**
-   * ② 带前缀的开标签，但它在文本里**找不到**对应的闭合标签。
-   * ⚠️ `${DSML_PREFIX_ONLY}` **必须用 `(?:…)` 包住**：它自带 `|` 分支，裸插值会把整个
-   * 正则拆成两个互不相干的模式（本文件里已经有两条注释记着同一个坑，这次又踩了一次：
-   * 拆散后 `([a-z_]+)` 落在分支之外，`match[1]` 直接是 undefined）。
-   */
-  const open = new RegExp(`<\\s*(?:${DSML_PREFIX_ONLY})([a-z_]+)\\b[^>]*>`, 'gi')
-  let match: RegExpExecArray | null
-  while ((match = open.exec(text)) !== null) {
-    if (!match[1]) continue
-    const tag = match[1].toLowerCase()
-    const rest = text.slice(match.index)
-    const close = new RegExp(`<\\/\\s*(?:${DSML_PREFIX_ONLY})${tag}\\s*>`, 'i')
-    if (!close.test(rest)) return match.index
-  }
-  return -1
-}
-
 export function stripStrayToolMarkup(text: string): string {
   if (!text) return text
   if (!/voke\s*>|calls?\s*>|tool_calls?\s*>|function_calls?\s*>|DSML/i.test(text)) return text
@@ -2108,19 +2098,57 @@ const DSML_TAG_NAMES = new Set([...WRAPPER_NAMES.split('|'), 'invoke', 'paramete
  * 而"整对删除"还要求开口/闭合**同名配对**——用模板字符串拼三层嵌套正则时，错一处就是静默的
  * 过度匹配（实测踩过：`</｜DSML｜tool_calls>` 被截成 `s>`）。这里改成显式扫描，行为可推演。
  */
+/**
+ * 把**代码段**（``` 围栏与 `行内代码`）的内容替换成等长空格，返回掩码文本。
+ *
+ * 用途：正文里"解释 DSML 长什么样"时，标记会出现在行内代码或围栏里 —— 那不是残留协议，
+ * 切掉会把后面的解释一起吞了（实测：整条回答只剩前半句，还留下未闭合围栏）。
+ * 等长掩码让索引与原文对齐，扫描掩码、按索引切原文。
+ */
+function maskCodeSpans(text: string): string {
+  const chars = text.split('')
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== '`') {
+      i += 1
+      continue
+    }
+    // 围栏（≥3 个反引号）还是行内（1~2 个）
+    let run = 0
+    while (text[i + run] === '`') run += 1
+    if (run >= 3) {
+      const fence = '`'.repeat(run)
+      const close = text.indexOf(fence, i + run)
+      const end = close === -1 ? text.length : close + run
+      for (let k = i; k < end; k += 1) chars[k] = ' '
+      i = end
+      continue
+    }
+    // 行内代码：到下一个同数量反引号为止（找不到就当普通字符）
+    const closeInline = text.indexOf('`'.repeat(run), i + run)
+    const end = closeInline === -1 ? i + run : closeInline + run
+    for (let k = i; k < end; k += 1) chars[k] = ' '
+    i = end
+  }
+  return chars.join('')
+}
+
 function cutDsmlMarkup(text: string): string {
   /**
    * ⓪ 结尾只剩**半截前缀**（`<｜DSML`、`<｜｜DSML｜`）—— 扫描器只认完整标签，这条单独处理。
    * 流式路径有 hold-back 兜着，但历史消息/硬切断的文本会原样留在这里。
    */
-  const half = new RegExp(`<\\s*(?:[|｜]\\s*){1,2}DSML[\\s|｜]*$`, 'i').exec(text)
+  // 覆盖：1~N 根竖线（模型会写三四根）、`dsml-` 连字符变体、以及只到一半的名字
+  const half = new RegExp(`<\\s*(?:(?:[|｜]\\s*)+DSML[\\s|｜]*|dsml-?\\s*[a-z]*)$`, 'i').exec(text)
   if (half) text = text.slice(0, half.index)
 
+  const masked = maskCodeSpans(text)
   const tagRe = new RegExp(`<\\s*(\\/?)\\s*(?:${DSML_PREFIX_ONLY})([A-Za-z_]+)\\b[^>]*>`, 'gi')
   type Tag = { close: boolean; name: string; start: number; end: number }
   const tags: Tag[] = []
   let match: RegExpExecArray | null
-  while ((match = tagRe.exec(text)) !== null) {
+  // 扫**掩码**（代码段里的标记不算残留协议），但索引用原文
+  while ((match = tagRe.exec(masked)) !== null) {
     const name = match[2].toLowerCase()
     if (!DSML_TAG_NAMES.has(name)) continue
     tags.push({ close: match[1] === '/', name, start: match.index, end: tagRe.lastIndex })
@@ -2128,6 +2156,14 @@ function cutDsmlMarkup(text: string): string {
   if (tags.length === 0) return text
 
   // 栈配对：同名闭合吃掉最近的同名开标签；记下"整段删除"的区间
+  /**
+   * 包裹名**等价**：模型常写成 `<prefix tool_calls>` 开、`</prefix calls>` 闭（退化形态）。
+   * 严格按字符串配对会把它当成"未闭合" ⇒ 整段切到结尾，把后面的正文一起吃掉。
+   */
+  const canonical = (name: string): string =>
+    name === 'calls' || name === 'tool_call' || name === 'tool_calls' || name === 'function_calls'
+      ? 'calls'
+      : name
   const stack: Tag[] = []
   const removals: Array<[number, number]> = []
   let cutAt = -1
@@ -2137,7 +2173,7 @@ function cutDsmlMarkup(text: string): string {
       continue
     }
     for (let i = stack.length - 1; i >= 0; i -= 1) {
-      if (stack[i].name === tag.name) {
+      if (canonical(stack[i].name) === canonical(tag.name)) {
         removals.push([stack[i].start, tag.end])
         stack.length = i // 同名开标签及其内部未闭合的都算被这一段吞掉
         break
@@ -2145,7 +2181,11 @@ function cutDsmlMarkup(text: string): string {
     }
   }
   // 剩下的开标签：有开无闭 ⇒ 从最早的开始切到结尾
-  if (stack.length > 0) cutAt = Math.min(...stack.map((tag) => tag.start))
+  // ⚠️ 不能用 `Math.min(...stack.map(...))`：几万个开标签时展开传参会抛
+  //    `RangeError: Maximum call stack size exceeded`，异常从 flush() 抛出去 = 整轮输出失败。
+  for (const tag of stack) {
+    if (cutAt === -1 || tag.start < cutAt) cutAt = tag.start
+  }
 
   const limit = cutAt === -1 ? text.length : cutAt
   removals.sort((a, b) => a[0] - b[0])
@@ -2176,6 +2216,8 @@ function stripDegenerateMarkup(text: string): string {
       ),
       '',
     )
+    // 带前缀的孤立开/闭标签（含 parameter —— 旧名单只有包裹名与 invoke，`</…parameter>` 漏了）
+    .replace(new RegExp(`<\\/?\\s*(?:${DSML_PREFIX_ONLY})(?:${WRAPPER_NAMES}|invoke|parameter)\\s*>`, 'gi'), '')
     .replace(new RegExp(`(^|\\n)[ \\t]*<\\/?[ \\t]+(?:${WRAPPER_NAMES})[ \\t]*>[ \\t]*(?=\\n|$)`, 'gi'), '$1')
     .replace(/(^|\n)[ \t]*(?:in)?voke\s*>\s*(?=\n|$)/gi, '$1')
 }
@@ -2267,7 +2309,11 @@ export class ToolCallStreamFilter {
      * ⚠️ `abandoned` 存在时**不切**：那条路的用意就是"解析失败也要让用户看见原始内容"，
      *    把协议标记一起吞掉等于把证据抹了。
      */
-    if (!this.abandoned) out.text = stripResidualDsml(out.text)
+    /**
+     * ⚠️ 不要用 `abandoned` 门控：证据由 `out.rejected.raw` 承载，而 `out.text` 是**另一段**
+     * 可见正文 —— 一旦整轮里出现过一次解析失败就永久关掉清理，会把后续 DSML 全放上屏。
+     */
+    out.text = stripResidualDsml(out.text)
     if (this.abandoned) out.rejected = this.abandoned
     return out
   }

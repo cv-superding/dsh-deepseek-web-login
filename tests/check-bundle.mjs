@@ -75,8 +75,25 @@ const checks = {
    * 原来这里查的是局部变量名 `selectTab` —— 那是**碰运气**：删掉内置浏览器后打包布局一变，
    * 同名局部变量被 mangle，这条就假红了。语义等价的稳定判据：页签栏类名 + 页容器类名 + 切换时写的 aria-selected。
    */
-  'client 标签页骨架（页签栏 + 页容器 + 切换逻辑）':
-    client.includes('dsw-tabs') && client.includes('dsw-pane') && client.includes('aria-selected'),
+  /**
+   * 🔴 判据必须能区分"**真的创建了**页签栏"与"只在 CSS 里出现过类名"。
+   * 2026-11-03 删内置浏览器时把页签栏构造整段误删，设置页只剩标题（7 个 pane 全没挂载），
+   * 而当时的判据 `client.includes('dsw-tabs')` 被**残留的 CSS 规则**满足 ⇒ 全量用例 73/73 全绿。
+   * 改成计数：CSS 一份 + `el('div','dsw-tabs')` 一份 ⇒ 至少 2 次。
+   */
+  'client 标签页骨架（页签栏真的被创建 + 页容器 + 切换逻辑）':
+    client.split('dsw-tabs').length - 1 >= 2 &&
+    (client.match(/dsw-tab\b/g) ?? []).length >= 2 &&
+    client.includes('dsw-pane') &&
+    client.includes('aria-selected'),
+
+  /** 2.0.0 移除内置浏览器 ⇒ 产物里不许再出现它的任何入口（负向守卫，防止误 merge 回来）。 */
+  '产物里没有内置浏览器残留（/browser 路由 / guest 快照 / 宿主桥）':
+    !host.includes('/browser/') &&
+    !/guest-(storage|settings)/.test(host) &&
+    !client.includes('dshDesktop') &&
+    !client.includes('about:blank#') &&
+    !/conversation\.view|shell\.overlay/.test(client),
   'client 四个页签齐全（账号/模型/防风控/传输层）': ['账号', '模型', '防风控', '传输层'].every((label) => client.includes(label)),
   'client 操作反馈常驻标签栏之上（dsw-alert）': client.includes('dsw-alert'),
   'client 副标题整词不拆（deepseek-web 不会被断在连字符）': client.includes('dsw-nobreak'),

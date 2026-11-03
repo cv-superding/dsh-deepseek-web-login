@@ -401,6 +401,51 @@ test('DSML 形态覆盖：CDATA 解包 / arguments 包装层 / 参数值截断 /
   )
 })
 
+// ── 2026-11-03（审查后补）：6 处边界 ──────────────────────────
+
+test('孤立的带前缀 </…parameter> 也要剥（旧名单只认包裹名与 invoke）', () => {
+  const cleaned = stripResidualDsml('前面 </｜｜DSML｜｜parameter> 后面')
+  assert.ok(!/DSML|parameter/i.test(cleaned), `没剥干净：${JSON.stringify(cleaned)}`)
+  assert.ok(cleaned.includes('前面') && cleaned.includes('后面'), `正文被吃了：${JSON.stringify(cleaned)}`)
+})
+
+test('包裹名错配（tool_calls 开 / calls 闭）也当成闭合，不许把后面正文切掉', () => {
+  const text =
+    '前言 <｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="read">p</｜｜DSML｜｜invoke></｜｜DSML｜｜calls> 后记'
+  const cleaned = stripResidualDsml(text)
+  assert.ok(cleaned.includes('后记'), `后面正文被切了：${JSON.stringify(cleaned)}`)
+  assert.ok(!/DSML/i.test(cleaned), `标记没清：${JSON.stringify(cleaned)}`)
+})
+
+test('正文里解释 DSML（行内代码 / 围栏）不许把后面的内容切光', () => {
+  const inline = 'DSML 写法示例：`<｜｜DSML｜｜invoke name="read">` 就这一句，后面是结论。'
+  assert.ok(stripResidualDsml(inline).includes('后面是结论'), '行内代码把后文切了')
+
+  const fenced = 'DSML 长这样：\n```xml\n<｜｜DSML｜｜invoke name="read">\n```\n然后是解释：这里很重要。'
+  const out = stripResidualDsml(fenced)
+  assert.ok(out.includes('这里很重要'), `围栏把解释切了：${JSON.stringify(out)}`)
+})
+
+test('严格路径的内文 JSON 用宽容解析（Windows 单反斜杠不许丢参数）', () => {
+  const text = '<｜｜DSML｜｜invoke name="t">{"path":"D:////apps////DSH"}</｜｜DSML｜｜invoke>'
+  const args = JSON.parse(parseXmlToolCalls(text)?.[0]?.arguments ?? '{}')
+  assert.equal(args.path, 'D:////apps////DSH', `参数丢了：${JSON.stringify(args)}`)
+})
+
+test('抢救路径：</…parameter> 之后的正文不许塞进参数值', () => {
+  const text =
+    '<｜｜DSML｜｜invoke name="t"><｜｜DSML｜｜parameter name="a" string="true">x</｜｜DSML｜｜parameter>这里是正文'
+  const args = JSON.parse(parseXmlToolCalls(text)?.[0]?.arguments ?? '{}')
+  assert.equal(args.a, 'x', `参数值被污染：${JSON.stringify(args)}`)
+})
+
+test('半截前缀也覆盖 dsml- 变体与三四根竖线', () => {
+  for (const tail of ['<dsml-', '<dsml-inv', '<｜｜｜DSML', '<|｜|DSML｜']) {
+    const cleaned = stripResidualDsml(`前面\n${tail}`)
+    assert.ok(!/[<｜|]/.test(cleaned.replace('前面', '')), `没切干净：${JSON.stringify(cleaned)}`)
+  }
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)

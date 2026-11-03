@@ -5,14 +5,14 @@
  * 渲染契约（沿用生态实测结论）：槽位 register 必须带 name 字段，
  * 渲染函数返回 React 元素（createElement），React #130 的坑即来自返回非元素。
  */
-import { createElement, useLayoutEffect, useEffect, useRef, useState } from 'react'
+import { createElement, useEffect, useRef } from 'react'
 import {
   pickJsonFile,
   readImportSource,
   saveWithPicker,
   suggestedExportName,
 } from '../file-picker.ts'
-import { describeCookieLife, summarizeCookieLife } from '../cookies.ts'
+import { describeCookieLife } from '../cookies.ts'
 import { accountsSignature, shouldSyncAccounts } from '../account-sync.ts'
 type ClientContext = {
   slots: any
@@ -483,8 +483,8 @@ let panelStylesInjected = false
 /**
  * 注入面板样式表（幂等）。
  *
- * 🔴 不能只在设置页的 effect 里注入：`conversation.view` 的页签可能在用户**从没打开过设置页**
- * 的情况下先渲染 —— 那时页签就没样式（按钮是裸的、字号是默认的）。
+ * 🔴 不能只在设置页的 effect 里注入：面板宿主可能在**用户从没打开过设置页**的情况下先挂载，
+ * 那时页面就没样式（按钮是裸的、字号是默认的）。
  */
 function ensurePanelStyles(): void {
   if (panelStylesInjected || typeof document === 'undefined') return
@@ -538,9 +538,10 @@ function Panel(): any {
       message.style.display = 'block'
     }
 
-    // ── 标签栏 + 四个页 ────────────────────────────────────────
+    // ── 标签栏 + 七个页 ────────────────────────────────────────
     // 原来 7 张卡堆在一页，「找某一项」要滚很久。分组按"什么时候会用它"：
-    //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
+    //   账号（登录/换号）· 模型（查阅与测试）· Token 统计（用量）· 防风控（限流与清理）·
+    //   传输层（指纹）· 上下文（投喂方式）· 关于（版本与数据位置）
     const TAB_KEYS = ['account', 'model', 'token', 'gate', 'transport', 'context', 'about'] as const
     const TAB_LABELS: Record<string, string> = {
       account: '账号',
@@ -582,6 +583,28 @@ function Panel(): any {
         if (on) paneFirstShow[each]?.()
       }
     }
+    /**
+     * 一级页签栏 + 把 7 个 pane 挂到页面上。
+     *
+     * 🔴 这段是通用骨架，与任何单个页都无关 —— 2026-11-03 删"内置浏览器"时它紧跟在
+     * `browserPane` 块后面，被整段划进删除范围，结果**设置页只剩标题**（7 个 pane 全没挂载）。
+     * 恢复时保留 `selectTab('account')`：不调用它，7 个 pane 都没有 `hidden` 属性 ⇒ 全部同时显示；
+     * 而且 `paneFirstShow.token`（Token 统计）也只有经它才会触发。
+     */
+    const tabBar = el('div', 'dsw-tabs')
+    tabBar.setAttribute('role', 'tablist')
+    for (const key of TAB_KEYS) {
+      const btn = el('button', 'dsw-tab', TAB_LABELS[key]) as HTMLButtonElement
+      btn.type = 'button'
+      btn.setAttribute('role', 'tab')
+      btn.addEventListener('click', () => selectTab(key))
+      tabButtons[key] = btn
+      tabBar.append(btn)
+      panes[key].setAttribute('role', 'tabpanel')
+    }
+    page.append(tabBar, ...TAB_KEYS.map((key) => panes[key]))
+    selectTab('account')
+
     // ── 账号页内部再分两个子页 ──────────────────────────────────────
     // 4 张卡堆在一页还是太长。按"你是来看状态、还是来管账号"分：
     //   登录状态  这个号现在能不能用 / 怎么再登一次

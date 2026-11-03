@@ -11,7 +11,7 @@
  */
 import { maskIdentifier, readAuth, refreshVerifiedIdentity, withVerifiedIdentity, writeAuth, type WebAuth } from './auth.ts'
 import { createRequire } from 'node:module'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROVIDER, createAdapter, describeAuth, MODEL_SPECS, type AdapterConfig } from './adapter.ts'
 import {

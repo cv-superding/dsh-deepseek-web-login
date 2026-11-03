@@ -94,7 +94,7 @@ unattended background operation.
 
 ## Screenshots
 
-The settings panel is split into **6 tabs** (one page at a time): **Account** (login status /
+The settings panel is split into **7 tabs** (one page at a time): **Account** (login status /
 current account / **account library** / manual token) · **Models** (available models /
 connectivity test) · **Anti-throttle** (request pacing / session cleanup with three ranges / **call ledger**) ·
 **Transport** (fingerprint + one-click test) · **Context** (full resend / chained incremental) ·

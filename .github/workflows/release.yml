@@ -55,6 +55,11 @@ jobs:
       - name: 发布前跑全量离线用例
         run: node scripts/test-offline.mjs
 
+      # 🔴 lib/ 是**提交进仓库**的，npm pack 会原样带走 —— 产物核对必须在发布前跑，
+      #    否则"源码对、产物错"（例如删功能时把通用骨架一起删了）会直接发到 npm。
+      - name: 核对构建产物（与源码一致 + 关键骨架在位）
+        run: node tests/check-bundle.mjs
+
       # tag 与 package.json 的 version 必须一致：否则会发出一个「npm 上叫 A、git 里标 B」的包，
       # 而且 npm 不允许覆盖，错了只能发新版本。
       - name: 校验 tag 与 package.json 版本一致
