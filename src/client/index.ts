@@ -64,8 +64,7 @@ interface StatusPayload {
   models: { id: string; name: string; description: string; modelType: string; thinking: boolean; contextWindow: number }[]
   config: {
     maxPromptChars: number
-    idleTimeoutMs: number
-    deleteWebSessions: boolean
+    // 2026-11-03：idleTimeoutMs / deleteWebSessions 已从 /status 移除（面板从不读）
     allowConcurrent?: boolean
     minRequestIntervalMs?: number
     version?: string

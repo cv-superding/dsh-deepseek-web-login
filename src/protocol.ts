@@ -1082,7 +1082,15 @@ const WRAPPER_NAMES = 'tool_calls|tool_call|function_calls|calls'
  * ⚠️ 之所以一直没暴露：现有用例只写了无空格形态（`check-dsml-stray.mjs` / `logic-test.mjs`）——
  * **测的形态和现场形态不是同一个**。与「0.6.28 思考分支跳过全部四道网」同类。
  */
-const DSML_PREFIX_BODY = '[|｜]+\\s*DSML\\s*[|｜]+\\s*|\\s*dsml-\\s*'
+/**
+ * DSML 前缀：竖线段或 `dsml-` 连字符段。
+ *
+ * ⚠️ 竖线**之间允许空白**：实测形态除了 `<｜｜DSML｜｜`，还有 `<｜ ｜DSML｜｜`（模型把两根竖线
+ * 拆开写）。旧写法 `[|｜]+\s*DSML` 只认"连续竖线"，于是这种形态整套判据都认不出来
+ * （解析、剥离、半截 hold-back 三处各写一份口径，改一处没用）。
+ * 改成 `(?:[|｜]\s*)+` 后统一覆盖：单根、多根、带空格都算。
+ */
+const DSML_PREFIX_BODY = '(?:[|｜]\\s*)+DSML\\s*[|｜]+\\s*|\\s*dsml-\\s*'
 /** 整组可选（前缀可有可无）。 */
 const DSML_PREFIX = `(?:${DSML_PREFIX_BODY})?`
 /** 整组**必需**（给"必须有前缀才剥"的场合用，如 `invoke`）。 */
@@ -2180,10 +2188,19 @@ function cutDsmlMarkup(text: string): string {
       }
     }
   }
-  // 剩下的开标签：有开无闭 ⇒ 从最早的开始切到结尾
-  // ⚠️ 不能用 `Math.min(...stack.map(...))`：几万个开标签时展开传参会抛
-  //    `RangeError: Maximum call stack size exceeded`，异常从 flush() 抛出去 = 整轮输出失败。
+  /**
+   * 剩下的开标签分两类，处理方式**不同**：
+   *  - **块级**（invoke / 包裹名）未闭合 ⇒ 从最早的切到结尾 —— 后面的内容本来都属于这个块；
+   *  - **零散 parameter** 未闭合 ⇒ 只删这个标签本身。
+   *    实测（2026-11-03）：`第一段话 <前缀parameter …>42 第二段话` 只会命中零散参数标签，
+   *    一律"切到结尾"会把 `42 第二段话` 整段吃掉（模型正文里插一个参数标签就丢半条回答）。
+   * ⚠️ 不能用 `Math.min(...stack.map(...))`：几万个开标签会抛 RangeError（整轮输出失败）。
+   */
   for (const tag of stack) {
+    if (tag.name === 'parameter') {
+      removals.push([tag.start, tag.end])
+      continue
+    }
     if (cutAt === -1 || tag.start < cutAt) cutAt = tag.start
   }
 
@@ -2275,6 +2292,16 @@ export class ToolCallStreamFilter {
         out.calls.push(...calls)
         // 0.1.82：调用块**之后**的正文不能跟着一起消失 —— 见 xmlToolCallTail 的说明。
         if (captured.mode === 'xml') out.text += stripStrayToolMarkup(xmlToolCallTail(captured.buffer))
+      } else if (
+        captured.mode === 'xml' &&
+        !new RegExp(`${TAG_OPEN_PREFIX}invoke\\b`, 'i').test(normalizeDsml(captured.buffer))
+      ) {
+        /**
+         * 捕获里**没有 invoke**（只有 parameter / 包裹标签）⇒ 这不是调用块，而是正文里插了一个
+         * 协议标签。此时不能走 `abandoned`（那条路只记录不吐字）⇒ 用户会**丢掉半条回答**。
+         * 实测（2026-11-03）：`第一段话 <前缀parameter …>42 第二段话` 只吐出了前半句。
+         */
+        out.text += stripResidualDsml(stripStrayToolMarkup(captured.buffer))
       } else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
         this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
       // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，

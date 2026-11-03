@@ -1630,18 +1630,18 @@ export function apply(ctx: any, config: Config = {}): void {
                   thinking: spec.thinking,
                   contextWindow: spec.contextWindow,
                 })),
+                /**
+                 * ⚠️ 只放**面板真的会读**的字段。
+                 * 2026-11-03 审查发现这里有 5 个恒为死值的键（`idleTimeoutMs` / `deleteWebSessions` /
+                 * `sessionCleanupPending` / `transport` / `transportHeartbeat`）：面板一次都没读过，
+                 * 而 `transportHeartbeatSnapshot()` 每次轻量轮询都要算一遍。需要心跳/传输层状态的
+                 * 走 `GET /transport`（那里有 heartbeat 字段），别在这儿重复算。
+                 */
                 config: {
                   maxPromptChars: adapterConfig.maxPromptChars,
-                  idleTimeoutMs: adapterConfig.idleTimeoutMs,
-                  deleteWebSessions: adapterConfig.deleteWebSessions !== false,
                   allowConcurrent: adapterConfig.allowConcurrent === true,
                   minRequestIntervalMs: adapterConfig.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS,
                   maxRequestIntervalMs: adapterConfig.maxRequestIntervalMs ?? DEFAULT_MAX_REQUEST_INTERVAL_MS,
-                  sessionCleanup: cleanupMode,
-                  sessionCleanupPending: sessionCleaner.pendingCount(),
-                  transport: transportState.effective,
-                  // 传输层保活心跳：面板/排查用（探测只走本地 CDP，不发网络请求）
-                  transportHeartbeat: transportHeartbeatSnapshot() ?? null,
                   contextMode,
                   contextChain: contextChainInfo() ?? null,
                   version: pluginVersion(),

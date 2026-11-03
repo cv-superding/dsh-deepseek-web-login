@@ -446,6 +446,30 @@ test('半截前缀也覆盖 dsml- 变体与三四根竖线', () => {
   }
 })
 
+// ── 2026-11-03（第二轮）：中途注入 / 竖线带空格 / 块级未闭合 ────────
+
+test('🔴 正文中途插一个 parameter 标签：标签要清掉，**两边的文字一个都不能丢**', () => {
+  const f = new ToolCallStreamFilter(TOOLS)
+  const out = f.push('第一段话 <｜｜DSML｜｜parameter name="a" string="true">42 第二段话')
+  const tail = f.flush()
+  const whole = out.text + tail.text
+  assert.ok(!/DSML|parameter/i.test(whole), `标签漏上屏：${JSON.stringify(whole)}`)
+  assert.ok(whole.includes('第一段话') && whole.includes('第二段话'), `文字丢了：${JSON.stringify(whole)}`)
+  assert.ok(whole.includes('42'), `中间的值丢了：${JSON.stringify(whole)}`)
+})
+
+test('竖线之间带空格（<｜ ｜DSML）也要按完整标记处理', () => {
+  const cleaned = stripResidualDsml('正文 <｜ ｜DSML｜｜invoke name="a">x</｜｜DSML｜｜invoke> 后文')
+  assert.ok(!/DSML/i.test(cleaned), `没清掉：${JSON.stringify(cleaned)}`)
+  assert.ok(cleaned.includes('正文') && cleaned.includes('后文'), `正文被吃：${JSON.stringify(cleaned)}`)
+})
+
+test('块级（invoke）未闭合仍然切到结尾（别把这条一并放过）', () => {
+  const cleaned = stripResidualDsml('前言 <｜｜DSML｜｜invoke name="a">后面都属于块内')
+  assert.ok(!cleaned.includes('后面都属于块内'), `块级未闭合没切：${JSON.stringify(cleaned)}`)
+  assert.ok(cleaned.includes('前言'), '前言该保留')
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)
