@@ -2191,6 +2191,13 @@ export class ToolCallStreamFilter {
   private pending = ''
   private capture: { mode: 'json' | 'xml'; buffer: string } | null = null
   private abandoned: { raw: string; mode: 'json' | 'xml'; reason?: 'unbalanced' | 'unparsable' | 'oversize' | 'echo' } | null = null
+  /**
+   * ⚠️ **只存不用**（故意的）：历史参数，保留签名以免调用点大改。
+   *
+   * 不拿它过滤解析出的调用 —— 模型调一个没声明过的工具时，把调用丢掉会让**整轮输出变空**
+   * （客户端只看到"模型未返回正文或工具调用"），比让客户端报「未知工具」糟糕得多。
+   * 真要收紧工具集，应该在执行器那一层报错，不是在这里静默丢弃。
+   */
   private readonly knownTools?: ReadonlySet<string>
   /**
    * 本次流里**我们剥掉过一个调用围栏的开栏**（0.6.38）。
