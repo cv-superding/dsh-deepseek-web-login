@@ -361,6 +361,46 @@ test('端到端：未闭合的 DSML 喂进流式过滤器，flush 后正文里�
   assert.ok(!/invoke name/i.test(text), `invoke 标签上屏了：${JSON.stringify(text)}`)
 })
 
+// ── 2026-11-03：解析形态覆盖（与"另一份实现"对拍后锁定我们的口径）──────
+
+test('DSML 形态覆盖：CDATA 解包 / arguments 包装层 / 参数值截断 / 未知工具 / 多调用', () => {
+  const P = '｜'
+  const wrap = (body) => `<${P}${P}DSML${P}${P}${body}>`
+  const close = (name) => `</${P}${P}DSML${P}${P}${name}>`
+  const one = (name, params) =>
+    wrap(`invoke name="${name}"`) + params + close('invoke')
+
+  // ① CDATA：剥掉语法包装，只留内容（不是把 <![CDATA[ 当正文）
+  const cdata = one('t', wrap('parameter name="x"') + '<![CDATA[a<b&c]]>' + close('parameter'))
+  assert.deepEqual(JSON.parse(parseXmlToolCalls(cdata)[0].arguments), { x: 'a<b&c' })
+
+  // ② `parameter name="arguments"` 包装层要剥掉（否则执行器报 missing required property）
+  const nested =
+    one('bash', wrap('parameter name="arguments" string="false"') + '{"command":"node x.js"}' + close('parameter'))
+  assert.deepEqual(JSON.parse(parseXmlToolCalls(nested)[0].arguments), { command: 'node x.js' })
+
+  // ③ 参数值被硬切断（连 </parameter> 都没有）：仍要抢救出这个调用
+  const cut = wrap('invoke name="bash"') + wrap('parameter name="command"') + 'uname -a'
+  const salvaged = parseXmlToolCalls(cut)
+  assert.equal(salvaged?.[0]?.name, 'bash')
+  assert.deepEqual(JSON.parse(salvaged[0].arguments), { command: 'uname -a' })
+
+  // ④ 未声明的工具名**不许过滤**（丢掉会让整轮输出变空）
+  const unknown = one('not_a_real_tool', wrap('parameter name="x"') + '1' + close('parameter'))
+  assert.equal(parseXmlToolCalls(unknown)?.[0]?.name, 'not_a_real_tool')
+
+  // ⑤ 多调用顺序保持
+  const many =
+    wrap('calls') +
+    one('a', wrap('parameter name="x"') + '1' + close('parameter')) +
+    one('b', wrap('parameter name="y"') + '2' + close('parameter')) +
+    close('calls')
+  assert.deepEqual(
+    parseXmlToolCalls(many).map((call) => call.name),
+    ['a', 'b'],
+  )
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)
