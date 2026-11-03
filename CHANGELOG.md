@@ -25,6 +25,20 @@
 
 `~/.dsh/web-login/guest-settings.json`、`guest-storage.json` 不再被读取，可以直接删。
 
+### DSML 兜底加厚（同一版）
+
+模型偶尔会退回 **DSML**（`<｜｜DSML｜｜invoke …>` 这类 XML 风格调用）而不是约定的围栏 JSON。
+这一版把两处薄弱点补上，都在 `src/protocol.ts` + `tests/check-dsml-stray.mjs`（新增 7 条用例）：
+
+- **尊重 `string` 属性**：`string="true"` 的参数**保持字符串**，不再被 JSON 解码成数字/布尔
+  （`<parameter name="code" string="true">123</parameter>` 以前会变成数字 123，把"内容就是这几个字符"的字段类型改掉）；
+  `string="false"` 仍按 JSON 解。**两条解析路径（严格 / 截断抢救）都接**——漏一处就是后门。
+- **可见正文里残留的 DSML 一律切掉**：完整对整段删、未闭合的开标签与结尾的半截前缀**切到结尾**。
+  旧实现只认**无属性**的 `</…invoke>`，于是带 `name="…"` 的标记从来没被剥过，完整块也会把
+  `<｜｜DSML｜｜invoke name="bash">` 原样留在正文里（模型被服务端上限截断时最容易看到）。
+  ⚠️ 只在**流结束时**做这一刀：逐块 `push()` 里"切到结尾"会把后面还没到的正常内容一起砍掉；
+  解析失败被 `abandoned` 的那条路也**不切**（那条路的用意就是"让用户看见原始内容"）。
+
 ### 保留了什么（这些与 guest 无关，一条没动）
 
 - **传输层**（真 Edge/Chrome + 你的账号 UA 与 `x-hif-*` 指纹头）与**保活心跳**；

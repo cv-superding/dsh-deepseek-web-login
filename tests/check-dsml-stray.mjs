@@ -19,7 +19,14 @@
  * 用法: node tests/check-dsml-stray.mjs
  */
 import assert from 'node:assert/strict'
-import { ToolCallStreamFilter, stripStrayToolMarkup, findXmlToolCallEnd, TOOL_PROTOCOL_INSTRUCTIONS } from '../src/protocol.ts'
+import {
+  ToolCallStreamFilter,
+  parseXmlToolCalls,
+  stripResidualDsml,
+  stripStrayToolMarkup,
+  findXmlToolCallEnd,
+  TOOL_PROTOCOL_INSTRUCTIONS,
+} from '../src/protocol.ts'
 
 let passed = 0
 const failures = []
@@ -295,6 +302,63 @@ test('★ 反向：正文里正常讨论 <invoke> 不会被误吞（`invoke` 与
   // 所以剥它是零风险；`invoke` 才是通用 XML 标签，必须留着。
   const line = '在 HTML 里 <invoke> 不是一个标准标签，它只是普通文字。'
   assert.equal(stripStrayToolMarkup(line), line, `被误吞了: ${JSON.stringify(stripStrayToolMarkup(line))}`)
+})
+
+// ── 2026-11-03：DSML 参数类型 + 可见正文里的残留标记 ──────────────
+
+test('DSML：显式 string="true" 必须保持字符串（不许被 JSON 解码成数字）', () => {
+  const build = (attr) =>
+    `<｜｜DSML｜｜invoke name="t"><｜｜DSML｜｜parameter name="n"${attr}>123</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>`
+  const args = (attr) => JSON.parse(parseXmlToolCalls(build(attr))?.[0]?.arguments ?? '{}')
+  assert.equal(args('').n, 123, '缺省仍是"能解析就解析"（既有行为）')
+  assert.equal(args(' string="false"').n, 123, 'string="false" ⇒ 按 JSON 解')
+  assert.equal(args(' string="true"').n, '123', 'string="true" ⇒ 原样字符串')
+  assert.equal(args(" string='true'").n, '123', '单引号属性同样要认')
+})
+
+test('DSML：string="true" 在**截断抢救**那条路径上也要生效（漏一处就是后门）', () => {
+  // 故意不给 </invoke>：走 salvageXmlParameters
+  const truncated =
+    '<｜｜DSML｜｜invoke name="t"><｜｜DSML｜｜parameter name="n" string="true">123'
+  const args = JSON.parse(parseXmlToolCalls(truncated)?.[0]?.arguments ?? '{}')
+  assert.equal(args.n, '123', `抢救路径也要尊重 string="true"，实际：${JSON.stringify(args)}`)
+})
+
+test('可见正文：未闭合的 DSML 残段切到结尾（模型被硬切断时的现场）', () => {
+  const leaked = '好的，我来执行：\n<｜｜DSML｜｜invoke name="bash">\n<｜｜DSML｜｜parameter name="command">ls -la'
+  const cleaned = stripResidualDsml(leaked)
+  assert.ok(!/DSML|invoke|parameter/i.test(cleaned), `残段没切干净：${JSON.stringify(cleaned)}`)
+  assert.ok(cleaned.startsWith('好的，我来执行'), '正文本身要保留')
+})
+
+test('可见正文：结尾的半截前缀也要切掉', () => {
+  for (const tail of ['<｜DSML', '<｜｜DSML｜', '<|DSML']) {
+    const cleaned = stripResidualDsml(`前面的话\n${tail}`)
+    assert.ok(!cleaned.includes('<'), `半截前缀没切：${JSON.stringify(cleaned)}`)
+  }
+})
+
+test('可见正文：完整块切掉后，**后面的正常文字必须留着**（曾误吞）', () => {
+  const text =
+    '引言\n<｜｜DSML｜｜invoke name="t"><｜｜DSML｜｜parameter name="a">1</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>\n结尾文字'
+  const cleaned = stripResidualDsml(text)
+  assert.ok(!/DSML|invoke|parameter/i.test(cleaned), `标记没清干净：${JSON.stringify(cleaned)}`)
+  assert.ok(cleaned.includes('结尾文字'), `后面的正文被吞了：${JSON.stringify(cleaned)}`)
+})
+
+test('可见正文：正文里讨论 <invoke>（无前缀）不许动', () => {
+  const line = '在 HTML 里 <invoke> 不是一个标准标签。'
+  assert.equal(stripResidualDsml(line), line)
+})
+
+test('端到端：未闭合的 DSML 喂进流式过滤器，flush 后正文里不许出现 DSML', () => {
+  const f = new ToolCallStreamFilter(TOOLS)
+  const chunks = ['好的：\n', '<｜｜DSML｜｜invo', 'ke name="bash">\n', '<｜｜DSML｜｜parameter name="command">', 'ls']
+  let text = ''
+  for (const chunk of chunks) text += f.push(chunk).text
+  text += f.flush().text
+  assert.ok(!/DSML/i.test(text), `DSML 上屏了：${JSON.stringify(text)}`)
+  assert.ok(!/invoke name/i.test(text), `invoke 标签上屏了：${JSON.stringify(text)}`)
 })
 
 if (failures.length) {
