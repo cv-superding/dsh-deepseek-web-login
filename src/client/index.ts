@@ -14,16 +14,6 @@ import {
 } from '../file-picker.ts'
 import { describeCookieLife, summarizeCookieLife } from '../cookies.ts'
 import { accountsSignature, shouldSyncAccounts } from '../account-sync.ts'
-import { buildSessionInstallExpression } from '../page-session.ts'
-import {
-  createGuestBrowser,
-  publishGuestRect,
-  registerGuestHost,
-  subscribeGuestRect,
-  type GuestRect,
-  type GuestStatus,
-} from './guest.ts'
-
 type ClientContext = {
   slots: any
   effect: any
@@ -266,46 +256,6 @@ white-space:pre-wrap;word-break:break-word}
 .dsw-models .id{color:var(--fg3);font-size:12px;margin-top:2px;word-break:break-word}
 /* 说明文字：限宽 64ch —— 满宽的一行小字读起来很累，且会拖长整张卡。 */
 .dsw-hint{color:var(--fg3);font-size:12px;line-height:1.7;margin:var(--sp-3) 0 0;max-width:64ch}
-/**
- * 加载转圈：重启 DSH 后「网页版」页签要等几秒才装回登录态，
- * 空着或显示「未启动」会让用户以为"自动启动开关没生效"（实测反馈）。
- */
-.dsw-spin{width:22px;height:22px;border-radius:50%;box-sizing:border-box;
-  border:2px solid color-mix(in srgb,var(--fg3) 28%,transparent);border-top-color:var(--fg3);
-  animation:dsw-spin .9s linear infinite}
-@keyframes dsw-spin{to{transform:rotate(360deg)}}
-
-/* ── 启动卡片（「网页版」页签未启动时那张卡）────────────────────────────
-   改造前它是**内联样式**，且用了三个不存在的令牌名：
-     --dsw-alias-fg-muted / --dsw-alias-fg-base / --dsw-alias-bg-l2
-   这几个在 DSH 里根本没有（正确的叫 --dsw-alias-label-* / --dsw-alias-bg-layer-*），
-   于是每次都落到硬编码兜底（#fafafa / #222）—— **深色主题下整张卡是白底黑字**。
-   这是 bug 不是审美：兜底值只对浅色成立（同类坑见 AGENTS.md 2.1）。
-   现在改为类名走样式表，颜色全部来自上面的语义层，两套主题都跟着宿主走。 */
-.dsw-startcard{width:min(560px,86%);position:relative;overflow:hidden;
-  padding:22px 24px;border-radius:var(--r-lg);
-  border:1px solid var(--bd2);background:var(--glass);box-shadow:var(--sheen);
-  display:flex;flex-direction:column;gap:12px;
-  transition:border-color .2s var(--ease-instrument),box-shadow .24s var(--ease-instrument)}
-.dsw-startcard::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;
-  background:var(--chan-sheen);opacity:.95;pointer-events:none}
-.dsw-startcard:hover{border-color:color-mix(in srgb,var(--accent) 42%,transparent);
-  box-shadow:var(--sheen),0 18px 40px rgb(0 0 0 / 12%)}
-.dsw-startcard-title{font-size:15px;font-weight:600;color:var(--fg)}
-.dsw-startcard-desc{font-size:12px;line-height:1.9;color:var(--fg2)}
-.dsw-startcard-tip{font-size:12px;color:var(--fg3)}
-/* 失败时：左侧色条 + 混过正文色的错误字（纯错误色在深色底上会发暗刺眼）。 */
-.dsw-startcard-err{font-size:12px;line-height:1.8;padding:9px 11px;border-radius:var(--r-sm);
-  border-left:3px solid var(--err);background:var(--err-weak);
-  color:color-mix(in srgb,var(--err) 78%,var(--fg))}
-
-/* ── 设置项 + 卡片盒（0.8.0）：对齐 Our Free Model 的设置页 ────────────────
-   改造前是横排的「label · 控件 · value」：一行里三样东西抢宽度，
-   一句说明塞不下，只能全堆到卡片尾的 dsw-hint，读的人得来回扫。
-   参考页（表单型设置页）的做法是**一项占一行**：左边标题带一句副说明、右边控件，
-   项与项之间一条细线。好处是**每一项自解释**，不必回页尾找补充说明。
-   ⚠️ 两种布局各有适用面：数据型内容（账号行、统计）仍走原来的 dsw-kv /
-   dsw-gate-row，它们信息密度高、没有"每个字段配一句说明"的必要。 */
 .dsw-field{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--sp-2) var(--sp-4);
   align-items:center;padding:var(--sp-3) 0;border-top:1px solid var(--bd)}
 .dsw-field:first-child{border-top:0;padding-top:2px}
@@ -528,384 +478,6 @@ function el(tag: string, cls?: string, text?: string): HTMLElement {
   return node
 }
 
-/**
- * 内置浏览器 guest（模块级单例）。
- *
- * 它**不参与发消息**：只负责让 DSH 窗口里有一个真人那样活着的页面
- * （站点自己的 JS 在跑）。回答不回显、发送仍走原有通路。
- */
-const guestBrowser = createGuestBrowser({
-  fetchSession: () => api('/browser/session'),
-  buildInstall: buildSessionInstallExpression,
-  reportBeat: (beat) => api('/browser/guest-beat', { method: 'POST', body: JSON.stringify({ beat }) }),
-  log: (message) => console.log('[deepseek-web: guest]', message),
-})
-
-/**
- * guest 的**永久宿主**：挂在 `shell.overlay`（root scope，永不卸载）。
- *
- * 🔴 为什么不能放在设置页里：Electron 的 `<webview>` 一旦从 DOM 摘除再插回就会
- * **重新加载**，而这个页面的价值恰恰是"一直活着"。所以宿主固定在这里，
- * 设置页只切它的显示/隐藏（改 `display`），绝不搬运节点。
- */
-function GuestHost(): any {
-  const ref = useRef<any>(null)
-  const [rect, setRect] = useState<GuestRect | null>(null)
-  const [running, setRunning] = useState<boolean>(guestBrowser.status().running)
-  useEffect(() => {
-    // 宿主节点由内层 guest 包装的 ref 回调登记（webview 要挂在那一层，不是外层）
-    const offRect = subscribeGuestRect(setRect)
-    const offStatus = guestBrowser.subscribe((status) => setRunning(status.running))
-    setRunning(guestBrowser.status().running)
-    return () => {
-      offRect()
-      offStatus()
-    }
-  }, [])
-
-  /**
-   * ⚠️ 这里**不再**随面板加载自动挂 guest。
-   *
-   * 用户实测（2026-10-15）：那样会让 DSH 启动多花 ~15 秒 —— 每次开 DSH 都要冷启一个
-   * Chromium 渲染进程、加载整个网页端、再 reload 一次，和 UI 启动抢磁盘/CPU。
-   * dsh-webin 没有这个问题，因为它的 guest 是**切到 LDW 页签时才建**的。
-   * 所以自动挂的触发点搬到「网页版」页签第一次量出可用尺寸时（见 WebLoginPlaceholder）。
-   */
-  /**
-   * 🔴 只有 guest **真的在跑**才显示宿主。
-   *
-   * 上一版只要页签可见就显示 —— 那时宿主是个空的白色圆角盒（带边框和阴影），
-   * 正好糊在页签内容上：用户看到的是"一块突出来的白框"，而我自己的启动卡片被它盖住了。
-   */
-  const visible = rect !== null && running
-  /**
-   * 自校正定位（webin 同款）：期望位置来自占位符的 `getBoundingClientRect()`（视口坐标），
-   * 而 `position:fixed` 只有在没有 transform 祖先时才严格等于视口坐标 ⇒ 放好后量一次
-   * 自己的真实位置、按偏差平移修正；修正有上限（scale 类变换无法收敛时必须停下来）。
-   */
-  const fixAttempts = useRef(0)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    if (!rect || !running) {
-      fixAttempts.current = 0
-      return
-    }
-    if (fixAttempts.current >= 4) return
-    const current = el.getBoundingClientRect()
-    const dx = rect.left - current.left
-    const dy = rect.top - current.top
-    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
-      fixAttempts.current = 0
-      return
-    }
-    fixAttempts.current += 1
-    el.style.left = `${(parseFloat(el.style.left || '0') || 0) + dx}px`
-    el.style.top = `${(parseFloat(el.style.top || '0') || 0) + dy}px`
-  })
-  /**
-   * 显示时**不要任何自己的装饰**（边框/阴影/圆角/背景）：它就是页签内容本身，
-   * 有装饰就会像"一块浮在界面上的东西"（用户上一版就是这么说）。
-   */
-  const style: Record<string, unknown> = {
-    position: 'fixed',
-    zIndex: 30,
-    overflow: 'hidden',
-    background: 'transparent',
-    boxSizing: 'border-box',
-  }
-  if (rect && running) {
-    Object.assign(style, { left: rect.left, top: rect.top, width: rect.width, height: rect.height, visibility: 'visible' })
-  } else {
-    // 页签不可见：移出视口 + hidden。**不用 display:none** —— 那会让 webview 停止布局（webin 实测）。
-    Object.assign(style, { left: '-99999px', top: '-99999px', width: '420px', height: '620px', visibility: 'hidden' })
-  }
-  /**
-   * 结构**照抄 dsh-webin**：
-   *   外层 host：fixed + flex column（`...box` 就是量出来的矩形）
-   *   内层 guest 包装：`flex:auto; min-height:0; display:flex` ← webview 挂在这里
-   * `min-height:0` 是关键：不给它，flex 子项的最小高度会撑住内容、webview 拿不到剩余高度。
-   */
-  return createElement(
-    'div',
-    { ref, id: 'dsh-deepseek-guest-host', style: { ...style, display: 'flex', flexDirection: 'column' } },
-    createElement('div', {
-      key: 'guest',
-      ref: (node: HTMLDivElement | null) => registerGuestHost(node),
-      style: { flex: 'auto', minHeight: 0, display: 'flex' },
-    }),
-  )
-}
-
-/**
- * 「网页版」页签的占位符（挂 `conversation.view`）。
- *
- * 它只做两件事：① 量自己的矩形报给常驻宿主；② guest 未启动时给出启动按钮。
- * **绝不把 guest 放在这里** —— 页签切换会卸载它，webview 一摘一插就重新加载。
- */
-function WebLoginPlaceholder(props?: { sessionId?: string }): any {
-  const ref = useRef<HTMLDivElement | null>(null)
-  const [status, setStatus] = useState<GuestStatus | null>(null)
-  useEffect(() => {
-    const el = ref.current
-    if (el === null) return
-    let frame = 0
-    const measure = () => {
-      frame = 0
-      if (el.isConnected) {
-        const r = el.getBoundingClientRect()
-        if (r.width > 0 && r.height > 0) {
-          publishGuestRect({ left: r.left, top: r.top, width: r.width, height: r.height })
-          // 页签真的显示出来了（尺寸像样）⇒ 才考虑自动挂
-          if (r.width >= 200 && r.height >= 200) autoStartIfNeeded()
-          return
-        }
-      }
-      publishGuestRect(null)
-    }
-    /**
-     * 页签第一次量出**可用尺寸**时：按设置自动挂上（用户不用点按钮），
-     * 但**绝不在面板加载时挂**，而且要**等 UI 空闲**（空闲回调 + 8 秒兜底）——
-     * 实测顺序错了会让 DSH 启动多花 ~15 秒。
-     */
-    let autoStarted = false
-    const autoStartIfNeeded = () => {
-      if (autoStarted || guestBrowser.status().running) return
-      autoStarted = true
-      void (async () => {
-        try {
-          const settings = await api('/browser/settings')
-          if (settings?.autoStart === false) {
-            setAutoPhase('off')
-            return
-          }
-          const claim = await api('/browser/claim-autostart', { method: 'POST', body: '{}' })
-          if (claim?.claimed !== true) {
-            console.log('[deepseek-web: guest] 自动挂载未认领到（别的窗口负责）')
-            setAutoPhase('off')
-            return
-          }
-          /**
-           * 🔴 等 UI **空闲**再挂。
-           *
-           * 用户实测：DSH 启动要 ~15 秒才可用 —— 因为上次离开时停在「网页版」页签，
-           * 启动恢复该页签 ⇒ 自动挂立刻触发 ⇒ 冷启 Chromium + 加载整个网页端 + reload，
-           * 全在跟 UI 自己的启动抢 CPU/磁盘。
-           * `requestIdleCallback` 保证"UI 自己的活先干完"；超时 8 秒兜底（别永远不挂）。
-           */
-          const launch = () => {
-            void guestBrowser.start().then((next) => {
-              // 挂上了 ⇒ 以后交给运行态；没挂上（失败）⇒ 退回启动卡（带原因）
-              setAutoPhase(next?.running === true ? 'done' : 'off')
-            })
-          }
-          const idle = (globalThis as { requestIdleCallback?: (cb: () => void, options?: { timeout?: number }) => number })
-            .requestIdleCallback
-          if (typeof idle === 'function') idle(launch, { timeout: 8_000 })
-          else window.setTimeout(launch, 3_000)
-        } catch (error) {
-          console.warn('[deepseek-web: guest] 自动挂载失败：', error)
-          setAutoPhase('off')
-        }
-      })()
-    }
-    const schedule = () => {
-      if (frame === 0) frame = requestAnimationFrame(measure)
-    }
-    const observer = new ResizeObserver(schedule)
-    observer.observe(el)
-    window.addEventListener('resize', schedule)
-    // 页签切换不一定会触发 resize ⇒ 低频兜底量一次
-    const poll = window.setInterval(schedule, 800)
-    schedule()
-    const off = guestBrowser.subscribe(() => setStatus(guestBrowser.status()))
-    setStatus(guestBrowser.status())
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', schedule)
-      window.clearInterval(poll)
-      if (frame) cancelAnimationFrame(frame)
-      off()
-      publishGuestRect(null)
-    }
-  }, [])
-  void props?.sessionId
-  ensurePanelStyles()
-  const running = status?.running === true
-  /**
-   * `pending` = "该自动挂，但还在等 UI 空闲 / 正在挂"。
-   *
-   * 这段窗口期（空闲等待 + 申请 guest + 加载页面，可能十几秒）**必须显示加载态**，
-   * 不能显示"未启动 + 启动按钮"—— 那会让用户误以为自动启动开关没生效（实测反馈）。
-   */
-  const [autoPhase, setAutoPhase] = useState<'pending' | 'off' | 'done'>('pending')
-  const busy = status?.state === 'idle' && (status?.beats ?? 0) === 0 && status?.error === undefined
-    ? false
-    : status?.running === true
-  const stateText = !running
-    ? '未启动'
-    : status?.state === 'alive'
-      ? '保活中'
-      : status?.state === 'logged-out'
-        ? '页面未登录（会重装）'
-        : status?.state === 'off-origin'
-          ? '页面被导航走（会带回）'
-          : '探测不到页面'
-  const children: any[] = []
-  if (!running && autoPhase === 'pending') {
-    // 加载态：转圈 + 说清在干什么（别让用户以为开关没生效）
-    children.push(
-      createElement(
-        'div',
-        {
-          key: 'loading',
-          style: {
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '10px',
-            color: 'var(--dsw-alias-label-secondary, #545b66)',
-          },
-        },
-        createElement('div', { key: 'spinner', className: 'dsw-spin' }),
-        createElement(
-          'div',
-          { key: 'text', style: { fontSize: '13px' } },
-          '正在恢复内置浏览器…',
-        ),
-        createElement(
-          'div',
-          {
-            key: 'sub',
-            style: { fontSize: '12px', textAlign: 'center', maxWidth: '420px', lineHeight: 1.8 },
-          },
-          '会用上次的登录态自动打开（几秒就好）。也可以直接在这里等，不用点任何按钮。',
-        ),
-        createElement(
-          'button',
-          {
-            key: 'skip',
-            type: 'button',
-            className: 'dsw-btn ghost',
-            style: { fontSize: '12px' },
-            onClick: () => {
-              setAutoPhase('off')
-            },
-          },
-          '我要看启动卡片',
-        ),
-      ),
-    )
-  } else if (!running) {
-    children.push(
-      createElement(
-        'div',
-        {
-          key: 'card',
-          className: 'dsw-startcard',
-        },
-        createElement(
-          'div',
-          { key: 'title', className: 'dsw-startcard-title' },
-          '网页版（内置浏览器）',
-        ),
-        createElement(
-          'div',
-          {
-            key: 'desc',
-            className: 'dsw-startcard-desc',
-          },
-          '在这里登录网页端并保持登录态 —— 站点自己的 JS 会一直跑（插件负责保活）。' +
-            '发送仍走原有通路，网页端的回答不会回显到这里。',
-        ),
-        createElement(
-          'div',
-          { key: 'actions', style: { display: 'flex', gap: '8px', marginTop: '2px' } },
-          createElement(
-            'button',
-            {
-              key: 'start',
-              type: 'button',
-              /* primary：这张卡上只有这一个动作，它该是唯一实心主色的按钮。 */
-              className: 'dsw-btn primary',
-              onClick: () => {
-                void guestBrowser.start()
-              },
-            },
-            '启动内置浏览器',
-          ),
-        ),
-        status?.error
-          ? createElement(
-              'div',
-              {
-                key: 'err',
-                className: 'dsw-startcard-err',
-              },
-              status.error,
-            )
-          : createElement(
-              'div',
-              { key: 'tip', className: 'dsw-startcard-tip' },
-              '首次启动会向 DSH 桌面端申请一个内置浏览器。',
-            ),
-      ),
-    )
-  } else {
-    children.push(
-      createElement(
-        'div',
-        {
-          key: 'bar',
-          style: {
-            position: 'absolute',
-            top: '6px',
-            right: '10px',
-            zIndex: 2,
-            display: 'flex',
-            gap: '6px',
-            alignItems: 'center',
-            fontSize: '11px',
-            color: 'var(--dsw-alias-label-secondary, #545b66)',
-          },
-        },
-        stateText,
-        createElement(
-          'button',
-          {
-            key: 'stop',
-            type: 'button',
-            className: 'dsw-btn ghost',
-            style: { fontSize: '11px', padding: '2px 8px' },
-            onClick: () => {
-              void guestBrowser.stop()
-            },
-          },
-          '关闭',
-        ),
-      ),
-    )
-  }
-  void busy
-  return createElement(
-    'div',
-    {
-      ref,
-      style: {
-        position: 'relative',
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '10px',
-      },
-    },
-    children,
-  )
-}
-
 let panelStylesInjected = false
 
 /**
@@ -969,14 +541,13 @@ function Panel(): any {
     // ── 标签栏 + 四个页 ────────────────────────────────────────
     // 原来 7 张卡堆在一页，「找某一项」要滚很久。分组按"什么时候会用它"：
     //   账号（登录/换号）· 模型（查阅与测试）· 防风控（限流与清理）· 传输层（指纹）
-    const TAB_KEYS = ['account', 'model', 'token', 'gate', 'transport', 'browser', 'context', 'about'] as const
+    const TAB_KEYS = ['account', 'model', 'token', 'gate', 'transport', 'context', 'about'] as const
     const TAB_LABELS: Record<string, string> = {
       account: '账号',
       model: '模型',
       token: 'Token 统计',
       gate: '防风控',
       transport: '传输层',
-      browser: '浏览器',
       context: '上下文',
       about: '关于',
     }
@@ -985,7 +556,6 @@ function Panel(): any {
     const tokenPane = el('div', 'dsw-pane')
     const gatePane = el('div', 'dsw-pane')
     const transportPane = el('div', 'dsw-pane')
-    const browserPane = el('div', 'dsw-pane')
     const contextPane = el('div', 'dsw-pane')
     const aboutPane = el('div', 'dsw-pane')
     const panes: Record<string, HTMLElement> = {
@@ -994,7 +564,6 @@ function Panel(): any {
       token: tokenPane,
       gate: gatePane,
       transport: transportPane,
-      browser: browserPane,
       context: contextPane,
       about: aboutPane,
     }
@@ -1013,99 +582,6 @@ function Panel(): any {
         if (on) paneFirstShow[each]?.()
       }
     }
-    // ── 浏览器页：内置 guest（只负责"有个活着的页面"，不回显、不参与发送）────
-    {
-      browserPane.append(
-        el(
-          'div',
-          'dsw-hint',
-          '主界面顶部的「网页版」页签就是内置浏览器（登录网页版用，插件保活）。' +
-          '它不参与发消息 —— 发送仍走原有通路，网页端的回答不会回显到这里。' +
-          '这里只是另一处入口与状态查看。',
-        ),
-      )
-      const startBtn = el('button', 'dsw-btn', '启动内置浏览器') as HTMLButtonElement
-      const stopBtn = el('button', 'dsw-btn danger', '关闭并释放') as HTMLButtonElement
-      for (const btn of [startBtn, stopBtn]) btn.type = 'button'
-      const row = el('div', 'dsw-row')
-      row.append(startBtn, stopBtn)
-      const autoBox = el('input') as HTMLInputElement
-      autoBox.type = 'checkbox'
-      autoBox.checked = true
-      const autoLabel = el('label', 'dsw-hint')
-      autoLabel.style.display = 'flex'
-      autoLabel.style.gap = '6px'
-      autoLabel.style.alignItems = 'center'
-      autoLabel.append(autoBox, document.createTextNode('打开「网页版」页签时自动启动（不拖慢 DSH 启动，且只在一个窗口里挂）'))
-      void api('/browser/settings').then((result) => {
-        autoBox.checked = result?.autoStart !== false
-      })
-      autoBox.addEventListener('change', () => {
-        void api('/browser/settings', {
-          method: 'POST',
-          body: JSON.stringify({ autoStart: autoBox.checked }),
-        })
-      })
-      const statusLine = el('div', 'dsw-hint', '内置浏览器：未启动')
-      const noteLine = el('div', 'dsw-hint', '')
-      browserPane.append(row, autoLabel, statusLine, noteLine)
-
-      const render = (status: GuestStatus): void => {
-        const ago = status.at ? Math.max(0, Math.round((Date.now() - status.at) / 1000)) : null
-        const label = status.error
-          ? `不可用（${status.error}）`
-          : !status.running
-            ? status.state === 'idle'
-              ? '未启动'
-              : '已停止'
-            : status.state === 'alive'
-              ? '保活中'
-              : status.state === 'logged-out'
-                ? '页面未登录（会在下次探测时重装）'
-                : status.state === 'off-origin'
-                  ? '页面被导航走（会带回站点）'
-                  : '探测不到页面'
-        statusLine.textContent =
-          `内置浏览器：${label}` +
-          (ago === null ? '' : ` · ${ago}s 前` ) +
-          (status.account ? ` · 账号 ${status.account}` : '') +
-          (status.beats ? ` · 探测 ${status.beats} 次 / 恢复 ${status.recoveries} 次` : '')
-        noteLine.textContent = status.note ?? ''
-      }
-      render(guestBrowser.status())
-      guestBrowser.subscribe(render)
-      startBtn.addEventListener('click', () => {
-        startBtn.disabled = true
-        void guestBrowser
-          .start()
-          .then((status) => {
-            render(status)
-            if (status.running) guestBrowser.setVisible(true)
-          })
-          .finally(() => {
-            startBtn.disabled = false
-          })
-      })
-      stopBtn.addEventListener('click', () => {
-        void guestBrowser.stop().then(render)
-      })
-      // 可见性由主界面的「网页版」页签驱动（webview 不能在设置页与页签间搬运）
-    }
-
-    const tabBar = el('div', 'dsw-tabs')
-    tabBar.setAttribute('role', 'tablist')
-    for (const key of TAB_KEYS) {
-      const btn = el('button', 'dsw-tab', TAB_LABELS[key]) as HTMLButtonElement
-      btn.type = 'button'
-      btn.setAttribute('role', 'tab')
-      btn.addEventListener('click', () => selectTab(key))
-      tabButtons[key] = btn
-      tabBar.append(btn)
-      panes[key].setAttribute('role', 'tabpanel')
-    }
-    page.append(tabBar, ...TAB_KEYS.map((key) => panes[key]))
-    selectTab('account')
-
     // ── 账号页内部再分两个子页 ──────────────────────────────────────
     // 4 张卡堆在一页还是太长。按"你是来看状态、还是来管账号"分：
     //   登录状态  这个号现在能不能用 / 怎么再登一次
@@ -1222,27 +698,6 @@ function Panel(): any {
         '「从已登录窗口恢复」= 复用上次登录过的窗口分区直接取凭证（免重新登录），凭证丢失时用它救急。',
       ),
     )
-    /**
-     * 登录态失效时的**推荐做法**（用户明确要求在这里提示）。
-     *
-     * 为什么推内置浏览器：登录动作发生在 DSH 自带的 Chromium 里，插件只是**读回**它的
-     * 登录态（token 一换立刻可用）—— 不开新浏览器窗口，也不用反复打 API 探活请求。
-     */
-    const guestHint = el('div', 'dsw-card')
-    const guestHintTitle = el('div', 'dsw-hint', '登录态失效怎么办：直接在内置浏览器里登录')
-    guestHintTitle.style.fontWeight = '600'
-    guestHintTitle.style.marginBottom = '6px'
-    guestHint.append(
-      guestHintTitle,
-      el(
-        'div',
-        'dsw-hint',
-        '主界面的「网页版」页签就是内置浏览器。在那里登录一次，插件会自动把 token 同步进账号库，' +
-          '立刻就能用（不用再点「重新登录」开浏览器窗口，也不用反复打探活请求）。' +
-          '担心封号时，这条是最省的做法：它借的是 DSH 自己的浏览器内核。',
-      ),
-    )
-    acctStatusPane.append(loginCard, accountCard, guestHint)
 
     // ── 账号库：多账号并存 + 一键切换 ────────────────────────────────
     // 为什么值得有：以前换号的代价是「退出 → 清浏览器分区 → 重新登录 → 等捕获」，
@@ -4056,49 +3511,4 @@ export function apply(ctx: ClientContext): void {
     'deepseek-web-login: settings page',
   )
 
-  /**
-   * 内置浏览器 guest 的宿主槽位。
-   *
-   * 单独挂 `shell.overlay`（root scope）是为了**永不卸载** —— guest 的 `<webview>`
-   * 一旦被摘下来再插回去就会重新加载，而这个页面的全部价值就是"一直活着"。
-   * 拿不到这个槽位（不同 DSH 版本）时**只降级**：设置页里照旧能看状态，只是没有浏览器面板，
-   * 所以这里必须 try/catch —— 不能让一个可选能力把整个插件带崩。
-   */
-  /**
-   * 「网页版」页签（挂 `conversation.view`，与 对话/轨迹/LDW 并排）。
-   * 契约同 webin：`{ name, id, order, label }`；组件是**占位符**（量矩形 + 启动按钮），
-   * 真正的 guest 在上面的 `shell.overlay` 宿主里。
-   */
-  ctx.effect(
-    () => {
-      try {
-        return ctx.slots.inject('conversation.view', () =>
-          ctx.slots.register(
-            { name: 'conversation.view', id: 'deepseek-web-login-view', order: 30, label: () => '网页版' },
-            WebLoginPlaceholder,
-          ),
-        )
-      } catch (error) {
-        console.warn('[deepseek-web] conversation.view 槽位不可用，网页版页签将不可见：', error)
-        return undefined
-      }
-    },
-    'deepseek-web-login: web view tab',
-  )
-
-  ctx.effect(
-    () => {
-      try {
-        return ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register({ name: 'shell.overlay', id: 'deepseek-web-login-guest' }, () =>
-            createElement(GuestHost),
-          ),
-        )
-      } catch (error) {
-        console.warn('[deepseek-web] shell.overlay 槽位不可用，内置浏览器面板将不可用：', error)
-        return undefined
-      }
-    },
-    'deepseek-web-login: guest browser host',
-  )
 }

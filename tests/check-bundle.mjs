@@ -70,7 +70,13 @@ const checks = {
   'CDP 读 cookie 与真实请求头': host.includes('Storage.getCookies') && host.includes('requestWillBeSentExtraInfo'),
   'client 显示宿主进程/登录方式': client.includes('宿主进程') && client.includes('loginCapability'),
   'client 如实说明凭证来源（不再写「可能仍可用」）': client.includes('凭证来源') && !client.includes('可能仍可用'),
-  'client 标签页骨架（页签栏 + 页容器 + 切换函数）': client.includes('dsw-tabs') && client.includes('dsw-pane') && client.includes('selectTab'),
+  /**
+   * ⚠️ 判据必须用**压缩后仍存活**的东西（类名/属性字符串）。
+   * 原来这里查的是局部变量名 `selectTab` —— 那是**碰运气**：删掉内置浏览器后打包布局一变，
+   * 同名局部变量被 mangle，这条就假红了。语义等价的稳定判据：页签栏类名 + 页容器类名 + 切换时写的 aria-selected。
+   */
+  'client 标签页骨架（页签栏 + 页容器 + 切换逻辑）':
+    client.includes('dsw-tabs') && client.includes('dsw-pane') && client.includes('aria-selected'),
   'client 四个页签齐全（账号/模型/防风控/传输层）': ['账号', '模型', '防风控', '传输层'].every((label) => client.includes(label)),
   'client 操作反馈常驻标签栏之上（dsw-alert）': client.includes('dsw-alert'),
   'client 副标题整词不拆（deepseek-web 不会被断在连字符）': client.includes('dsw-nobreak'),
@@ -1297,18 +1303,6 @@ const checks = {
     /\btransportHeartbeatSnapshot\b/.test(host) &&
     /\.heartbeat\b/.test(client),
 
-  /**
-   * 内置浏览器（guest）：两端都要在产物里 —— host 提供登录态与心跳入口，
-   * 面板提供 guest 本体（`dshDesktop` 桥 + `<webview>` + 门禁要求的 `about:blank#`）。
-   * 少任何一半，"浏览器"页就只是一个空壳按钮。
-   */
-  '产物里带着内置浏览器（host 入口 + 面板侧 guest 本体）':
-    host.includes('/browser/session') &&
-    host.includes('/browser/guest-beat') &&
-    /\bnormalizeGuestBeat\b/.test(host) &&
-    client.includes('dshDesktop') &&
-    client.includes('webview') &&
-    client.includes('about:blank#'),
 }
 
 let failed = 0

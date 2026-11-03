@@ -186,39 +186,6 @@ completion all succeed. Switch to browser login if you ever hit frequent `AUTH` 
 
 If they are lost, **Recover from the logged-in window** reuses the persistent partition — no re-login needed.
 
-### Built-in browser (the 「网页版」 tab)
-
-The main tab bar (next to 对话 / 轨迹 / LDW) now has a **「网页版」** tab: a real chat.deepseek.com page
-inside DSH's own Chromium, kept alive by the plugin. It is **not** an echo of your chats (sending still goes
-through the normal path) — its job is to keep a genuine web session alive and to hand its login state to the plugin.
-
-**How to use it (once is enough):**
-
-1. Open the **「网页版」** tab — it acquires the built-in browser **automatically** (on by default; toggle in
-   Settings → DeepSeek 网页登录 → **浏览器**). A spinner shows "正在恢复内置浏览器…" for a few seconds.
-2. **Log in once** inside it. Within ~10 s the plugin (a) saves the page's login state
-   (`localStorage` + cookie) to `~/.dsh/web-login/guest-storage.json`, and (b) syncs the token + identity into
-   the account library — a new account is **added and switched to** automatically.
-3. **Restarts no longer need a re-login**: DSH's guest partition is memory-only by design
-   (`dsh-sidebar-browser-<uuid>`, no `persist:`), but the plugin writes the snapshot back into the page and
-   reloads it on every attach.
-4. Crashes recover themselves (retry after 20 s, at most 3 times; a manual "close" disables that), and the
-   crash reason (`crashed` / `destroyed` / `render-process-gone`) is logged.
-
-Nothing is lost while the tab is closed: the fingerprint patch is re-applied on every attach, the login
-snapshot is on disk, and the account/API path does not depend on the page at all.
-
-**Why it is built this way** (all measured, not guessed):
-
-- `<webview>` reads its `useragent` **only before attach** — set it later and the page goes out with an
-  `Electron/` UA, which makes the web app answer 「使用环境异常」;
-- login state must be written **on the target origin** (`about:blank` is an opaque origin: writes are discarded);
-- do not attach during DSH startup (cold Chromium + a full web app competes with the UI — measured ~15 s slower
-  startup), so it waits for an idle callback instead.
-
-Diagnostics: `~/.dsh/web-login/diagnostics/guest-fingerprint.jsonl` (what the page sees: UA, `webdriver`,
-UA-CH brands, WebGL, viewport) and `guest-errors.jsonl` (non-`alive` states and reasons).
-
 ## Models
 
 Taken from the account's own server config (`GET /api/v0/client/settings?scope=model` → `model_configs`,
