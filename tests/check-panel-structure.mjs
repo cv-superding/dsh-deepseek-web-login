@@ -79,6 +79,24 @@ test('每个 pane 容器都被创建过（不是只声明了映射）', () => {
   }
 })
 
+test('🔴 每个 pane 都必须真的被填进内容（"建了不挂" = 整页空白）', () => {
+  const required = [
+    ['acctStatusPane', '登录状态子页'],
+    ['acctLibraryPane', '账号库子页'],
+    ['modelPane', '模型页'],
+    ['tokenPane', 'Token 统计页'],
+    ['gatePane', '防风控页'],
+    ['transportPane', '传输层页'],
+    ['contextPane', '上下文页'],
+    ['aboutPane', '关于页'],
+  ]
+  for (const [pane, label] of required) {
+    // ⚠️ 必须是**代码行形状**：注释里也会写同样的调用（解释为什么要有它），裸子串会被注释满足
+    const re = new RegExp(`^\\s+${pane}\\.append\\s*\\(`, 'm')
+    assert.ok(re.test(source), `${label}（${pane}）没有 append 任何内容 —— 会整页空白`)
+  }
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)

@@ -19,6 +19,7 @@ import { join } from 'node:path'
 // 隔离：不设的话留痕会写进用户真实的 ~/.dsh/web-login/（见 test-offline.mjs 的说明）
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-session-reuse-'))
 
+const { applyContextMode } = await import('../src/context-feed.ts')
 const {
   streamWebCompletion,
   setFetchImpl,
@@ -27,6 +28,9 @@ const {
   DEFAULT_SESSION_REUSE_TURNS,
   MAX_CONVERSATION_SLOTS,
 } = await import('../src/webapi.ts')
+
+// 2026-11-03：默认投喂模式改成 chained 后，这里显式钉在 full —— 本文件测的是**会话轮换**，与投喂模式无关。
+applyContextMode('full')
 
 let passed = 0
 const failures = []

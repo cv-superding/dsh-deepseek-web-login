@@ -25,6 +25,9 @@ const {
   MAX_IMPORT_ACCOUNTS,
 } = await import('../src/accounts.ts')
 const { setFetchImpl, resetSessionReuse, resetWasmUrlCache, streamWebCompletion } = await import('../src/webapi.ts')
+const { applyContextMode } = await import('../src/context-feed.ts')
+// 2026-11-03：默认投喂模式改成 chained；本文件测的是会话/账号等独立逻辑，显式钉在 full。
+applyContextMode('full')
 const { classifyAuthEnvelope } = await import('../src/webapi.ts')
 const { createRequestGate } = await import('../src/gate.ts')
 const { existsSync } = await import('node:fs')

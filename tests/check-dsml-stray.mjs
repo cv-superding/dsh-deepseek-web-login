@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import {
   ToolCallStreamFilter,
   parseXmlToolCalls,
+  serializePrompt,
   stripResidualDsml,
   stripStrayToolMarkup,
   findXmlToolCallEnd,
@@ -468,6 +469,17 @@ test('块级（invoke）未闭合仍然切到结尾（别把这条一并放过�
   const cleaned = stripResidualDsml('前言 <｜｜DSML｜｜invoke name="a">后面都属于块内')
   assert.ok(!cleaned.includes('后面都属于块内'), `块级未闭合没切：${JSON.stringify(cleaned)}`)
   assert.ok(cleaned.includes('前言'), '前言该保留')
+})
+
+test('🔴 回灌历史前剥 DSML（模型会照抄上一轮的泄漏）', () => {
+  const msgs = [
+    { role: 'user', content: [{ type: 'text', text: '你好' }] },
+    { role: 'assistant', content: [{ type: 'text', text: '前 <｜｜DSML｜｜invoke name="read">x</｜｜DSML｜｜invoke> 后' }] },
+    { role: 'user', content: [{ type: 'text', text: '继续' }] },
+  ]
+  const out = String(serializePrompt({ messages: msgs, tools: [] }))
+  assert.ok(!/DSML/i.test(out), `历史里还有 DSML：${out.slice(0, 200)}`)
+  assert.ok(out.includes('前 ') && out.includes(' 后'), '正文被吃掉了')
 })
 
 if (failures.length) {

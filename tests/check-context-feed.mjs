@@ -453,10 +453,11 @@ test('decideFeed 不改动传进来的 entries/chain（纯函数）', () => {
 
 // ── 当前模式（即时生效）────────────────────────────────────────────────
 
-test('当前模式默认是 full，applyContextMode 立即改变它', () => {
+test('当前模式默认是 chained，applyContextMode 立即改变它', () => {
   resetContextMode()
-  assert.equal(DEFAULT_CONTEXT_MODE, 'full')
-  assert.equal(currentContextMode(), 'full')
+  // 2026-11-03：默认从 full 改成 chained（全量模式每轮发根消息 ⇒ 网页端显示成「修改/重新生成」分叉）
+  assert.equal(DEFAULT_CONTEXT_MODE, 'chained')
+  assert.equal(currentContextMode(), 'chained')
   applyContextMode('chained')
   assert.equal(currentContextMode(), 'chained')
   // 复原，免得影响别的用例

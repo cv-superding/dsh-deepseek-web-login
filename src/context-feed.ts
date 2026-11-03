@@ -33,7 +33,19 @@ import { resolveDshHome } from './auth.ts'
 export type ContextMode = 'full' | 'chained'
 
 /** 默认每轮重发全量 —— 与 0.1.61 及以前的行为一致，不改动既有用户。 */
-export const DEFAULT_CONTEXT_MODE: ContextMode = 'full'
+/**
+ * 默认投喂模式：**链式**（2026-11-03 改）。
+ *
+ * 为什么从 `full` 改过来：全量模式每轮都发 `parent_message_id: null` 的**根消息**；
+ * 一旦它落进一个**已经有内容**的网页端会话里，网页端会把它渲染成「同一条消息的多个版本」
+ * —— 界面上就是「修改 / 重新生成」+ `n / n` 翻页（用户实测截图：`4 / 7`）。
+ * 而且 DSH 每轮都会替换式改写运行时快照 ⇒ 链经常要重开 ⇒ 全量模式下几乎**每轮**都长这样。
+ * 链式模式只发增量 + 指向上一条 assistant，网页端看到的就是正常的一问一答。
+ *
+ * ⚠️ 全量仍然保留（面板可切）：它换来的是"服务端不留上下文"，代价就是上面那个分叉外观；
+ * 现在 `needsFreshSession` 会把"根消息落进复用会话"这条也拦下来，见那里的注释。
+ */
+export const DEFAULT_CONTEXT_MODE: ContextMode = 'chained'
 
 export function normalizeContextMode(value: unknown): ContextMode | undefined {
   return value === 'full' || value === 'chained' ? value : undefined
@@ -183,10 +195,17 @@ export function needsFreshSession(
   /** 是否允许"重开链时换新会话"。缺省取模块级设置（默认 **否**），见 `currentFreshSessionOnRestart`。 */
   allowRestartSwap: boolean = currentFreshSessionOnRestart(),
 ): boolean {
-  // ⚠️ **只在链式模式下生效**。全量模式里"每轮都是根消息"本来就是常态，
-  // 若也一律换新会话，就变成**每轮多建 + 多删一个会话**（+2 个请求/轮）——
-  // 请求密度本身就是风控关注点，不能为了一个只有链式模式才有的问题付这个代价。
-  if (mode !== 'chained') return false
+  /**
+   * 🔴 2026-11-03 改：**全量模式也要拦**。
+   *
+   * 旧注释的理由是"全量模式每轮都是根消息，一律换会话会 +2 请求/轮"。但那个取舍换来的是
+   * **用户直接可见的坏形态**：根消息落进已有内容的会话 ⇒ 网页端渲染成「修改 / 重新生成」+ `n / n`。
+   * 正确性优先：宁可多建一个会话（会话清理会成批删），也不要把对话弄成分叉。
+   *
+   * 全量模式仍然保留（面板可切），只是它现在**每轮一个干净会话** —— 语义上也更对：
+   * 我们的 prompt 本来就是全量，会话里不需要任何历史。
+   */
+  if (mode !== 'chained' && !(feed.parentMessageId === null && reused)) return false
   // 0.6.18：没有结构化 parts 的请求（session-title / compaction 等）在链式模式下也走全量，
   // 它们不是"重开链"，不需要干净会话；强制换新会让每个内部请求都退役当前会话，
   // 把 chat 的网页端会话活活冲掉。

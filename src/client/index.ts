@@ -855,6 +855,15 @@ function Panel(): any {
         '⚠️ 导出的备份文件就是可完整登录的凭证（等同于账号本身）—— 别分享、别提交到仓库。',
       ),
     )
+    /**
+     * 🔴 登录状态子页的内容。
+     *
+     * 2026-11-03 事故：删「内置浏览器」的提示卡时，把紧跟其后的
+     * `acctStatusPane.append(loginCard, accountCard)` **一起删掉了** ⇒ 登录状态页整页空白
+     * （卡片建好了但没挂到任何 pane 上）。这类"建了不挂"只能靠结构用例拦：
+     * `tests/check-panel-structure.mjs` 已加断言。
+     */
+    acctStatusPane.append(loginCard, accountCard)
     acctLibraryPane.append(accountsCard)
 
     /**

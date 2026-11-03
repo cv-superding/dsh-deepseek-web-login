@@ -931,7 +931,14 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
       continue
     }
     if (message.role === 'assistant') {
-      const text = flattenText(blocks).join('')
+      /**
+       * 🔴 回灌的历史里必须**先剥掉 DSML/残留标记**。
+       *
+       * 实测（2026-11-03，用户截图）：某一轮模型把 DSML 写进了正文/思考并被网页端渲染出来；
+       * 我们把那条 assistant 文本原样当历史回灌 ⇒ 模型**照抄** ⇒ 泄漏自我强化。
+       * `stripResidualDsml` 是围栏感知的（解释性代码块里的示例不会被吃）。
+       */
+      const text = stripResidualDsml(flattenText(blocks).join(''))
       const renderedCalls = renderToolCalls(blocks)
       // 只有**带工具调用**的这一轮才把"下一个 user 文本"预期成工具返回（见上面说明）
       pendingToolCallIds = renderedCalls
