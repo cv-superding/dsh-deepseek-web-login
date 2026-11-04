@@ -1569,7 +1569,7 @@ export function apply(ctx: any, config: Config = {}): void {
                * 只对**当前账号**有意义：窗口用的是登录时那个 profile 分区，
                * 换号要重登才会换分区（所以面板上只给当前账号显示这个按钮）。
                */
-              const opened = openWebWindow()
+              const opened = await openWebWindow()
               sendJson(res, opened.ok ? 200 : 500, opened)
               return
             }

@@ -213,6 +213,17 @@ test('stripStrayToolMarkup：DSML 前缀的裸包裹标签（开/闭、空格、
   for (const c of cases) assert.equal(stripStrayToolMarkup(c), '', `应剥掉：${c}`)
 })
 
+test('stripStrayToolMarkup：带前缀的 </parameter> 也要剥（流式阶段没有第二道补刀）', () => {
+  // 现场：`LIDOW:{…}` 后面粘了三个闭标签。calls/invoke 这条函数本来就剥，
+  // parameter 只由 flush 的 stripResidualDsml 兜 ⇒ 推送阶段就上屏了（用户能看见）。
+  for (const tag of ['</|DSML|parameter>', '</｜｜DSML｜｜ parameter>', '<dsml-parameter>']) {
+    assert.equal(stripStrayToolMarkup(`前面${tag}后面`), '前面后面', `没剥：${tag}`)
+  }
+  // 反向：无前缀的 parameter 是正文里可以讨论的普通 XML
+  const keep = '正文里的 <parameter> 标签只是举例。'
+  assert.equal(stripStrayToolMarkup(keep), keep)
+})
+
 test('stripStrayToolMarkup：正常提到尖括号的文本不许乱剥（对照）', () => {
   const keep = 'a < b and c > d, 用 <div> 标签'
   assert.equal(stripStrayToolMarkup(keep), keep, '普通尖括号文本必须原样保留')

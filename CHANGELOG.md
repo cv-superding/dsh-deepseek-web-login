@@ -2,6 +2,46 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.3.5 — 2026-11-04（独立审计修掉的 6 个 bug）
+
+本轮由**独立审计**（子代理）过了一遍解析/投喂/传输三条主线，逐条修 + 逐条加用例，
+每条都做过**变异验证**（还原旧实现 ⇒ 对应用例精确变红）。
+
+### 1. 半截 `LIDOW` 前缀被当正文吐出去（严重）
+`hold-back`（扣留半截标记）的正则还停在 `DO:` 时代，只认 `D/DO/DO:`。分块边界正好落在
+`L`/`LI`/`LIDOW` 时，前缀被推出正文，后面补上的 `:{"name":…}` 拼不回标记 ⇒ **整条调用上屏且不执行**。
+→ 正则扩成 `L(?:I(?:D(?:O(?:W)?)?)?)?|D(?:O)?` + `:?`，与 `DO_MARKER_RE` 同口径（`/i`）。
+
+### 2. 切号后页面残留上一个号的 token ⇒ 把 A 的凭证写进 B
+`withLiveToken` 原本「长度 ≥32 且不同就采纳」。切号只改 `activeId`，页面里还是 A 的
+`localStorage.userToken` ⇒ 会把 A 的 token 写进 B 的记录，并用 A 的身份发 B 的请求。
+→ 新增纯函数 `decideLiveToken`：页面 token 在库里能对上**另一个**记录时拒绝采纳（且不缓存，
+等页面重装后立刻自愈）。
+
+### 3. 快速失败把「可自愈」的号拦在门外
+站点换 token 后，旧 token 的 `lastVerifyError` 还在 2 分钟窗口内 ⇒ 请求前检查直接 AUTH，
+自愈永远轮不到。
+→ ① `withLiveToken` 提到快速失败**之前**；② 新增 `freshAuthFailure`：失败结论必须**不早于**
+`capturedAt`（手工粘贴/页面采纳都不会清 `lastVerifyError`）；③ 采纳页面 token 时一并刷新 `capturedAt`。
+
+### 4. `/open-web` 的 spawn 异步失败会变成未捕获异常
+`spawn` 的 `ENOENT/EACCES` 走 `'error'` 事件（异步），原实现只有同步 `try/catch` ⇒ 未捕获异常，
+而且失败时仍返回 `ok:true`。
+→ `openWebWindow` 改 async、挂 `'error'` 监听、等 300ms 收异步错误；路由 `await`。
+
+### 5. `</…parameter>` 在**流式阶段**就上屏
+`stripStrayToolMarkup` 剥了包裹名与 `invoke`，没剥 `parameter`；`flush()` 的兜底已经晚了
+（`push()` 交出去的正文收不回来）。
+→ 剥除名单补「带 DSML 前缀的 `parameter`」（无前缀的 `<parameter>` 仍保留，正文可以讨论）。
+
+### 6. `DO:` 别名吞掉正文里的举例
+`DO` 是英文常用词，正文里的 `DO: {"foo": 1}` 会被当调用捕获、前缀被摘掉、解析失败后只吐 JSON。
+→ 捕获时留底被摘掉的前缀（`captureLabel`），判定「不是调用」时原样吐回；`stripDoCalls` 也改成
+「对象真的能解析成调用才删」。
+
+**用例**：新增 `tests/check-live-token.mjs`（10 项）；`check-call-prefix` 13→16、
+`check-dsml-stray` 58→59、`check-browser-login` 16→18。**未改动任何既有断言**。
+
 ## 2.3.1 — 2026-11-04（分享链接实证的三处解析缺陷）
 
 用户在分享页（`chat.deepseek.com/share/vlzpg…`）里看到：模型**确实按 `LIDOW:` 写了调用**，但

@@ -153,6 +153,53 @@ await test('★ 扁平参数形态：{"name":"write","file_path":…} 直接当�
   assert.ok(!('name' in args), 'name 不该混进参数里')
 })
 
+await test('★ 长正文 + 分块边界落在半截 LIDOW 上：整条调用不许漏上屏（DO→LIDOW 改名时漏掉的那条）', () => {
+  /**
+   * 现场机制：hold-back 的半截前缀表只写了 `D/DO/DO:`。当 pending 已经**超过 24 字符**
+   * （长正文）时，尾部停在 `LIDOW` / `LIDOW:` 不会被扣留 ⇒ 前缀被当正文推出去，
+   * 随后补上的 `:{"name":…}` 再也拼不回标记 ⇒ 调用既不上屏也不执行。
+   * 每个前缀都单独跑：`L` / `LI` / `LID` 走的是同一条判据。
+   */
+  const pad = '这是一段足够长的正文内容用来把 pending 撑过二十四个字符\n'
+  const full = 'LIDOW:{"name":"read","arguments":{"file_path":"a.txt"}}'
+  for (const head of ['L', 'LI', 'LID', 'LIDO', 'LIDOW', 'LIDOW:', 'lidow', 'lIDOW:']) {
+    const { text, calls } = run([pad + head, full.slice(head.length)])
+    assert.equal(calls.length, 1, `分块边界在 ${JSON.stringify(head)} 时调用丢了`)
+    assert.equal(calls[0].name, 'read')
+    assert.equal(text, pad, `分块边界在 ${JSON.stringify(head)} 时前缀/调用漏上屏：${JSON.stringify(text)}`)
+  }
+})
+
+await test('★ 调用后紧跟的三个 DSML 闭标签：push 阶段就不许上屏（flush 的补刀收不回来）', () => {
+  const raw =
+    '答案\nLIDOW:{"name":"write","file_path":"a.txt"}</｜｜DSML｜｜ parameter>\n' +
+    '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n尾'
+  const filter = new ToolCallStreamFilter()
+  let text = ''
+  const calls = []
+  for (const out of [filter.push(raw)]) {
+    text += out.text
+    calls.push(...out.calls)
+  }
+  // 关键在 **push**：用户看到的是逐块交出去的那份，flush 再清也收不回
+  assert.ok(!/DSML/i.test(text), `流式过程中闭标签已经上屏：${JSON.stringify(text)}`)
+  const tail = filter.flush()
+  text += tail.text
+  calls.push(...tail.calls)
+  assert.equal(calls.length, 1)
+  assert.ok(!/DSML/i.test(text), `流结束后仍有标记：${JSON.stringify(text)}`)
+  assert.ok(text.includes('尾'), '正文被吃了')
+})
+
+await test('★ 正文里的 "DO: {...}"（举例，不是调用）不许被吞掉前缀', () => {
+  const prose = '解释一下\nDO: {"foo": 1} 是一个例子\n后续'
+  const { text, calls } = run([prose])
+  assert.equal(calls.length, 0, '举例不该被当成调用')
+  assert.equal(text, prose, `正文被改了：${JSON.stringify(text)}`)
+  // 历史回灌走的是 stripDoCalls，同一判据（否则正文里的例子会在下一轮被删掉）
+  assert.equal(stripDoCalls(prose), prose, `stripDoCalls 吞了正文：${JSON.stringify(stripDoCalls(prose))}`)
+})
+
 await test('★ 孤立 DSML 闭标签（没有开标签）也要剥掉', () => {
   const text = '正文</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
   const out = stripResidualDsml(text)

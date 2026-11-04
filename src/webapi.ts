@@ -616,6 +616,50 @@ async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
 let liveTokenCache: { stored: string; live: string; at: number } | null = null
 
 /**
+ * 页面里的 token 能不能采纳 —— 纯函数，便于单测（现场行为见 `withLiveToken`）。
+ *
+ * `other-account` 是 2026-11-04 补的边界：切号只改 `activeId`，传输页面里还留着上一个号的
+ * `localStorage.userToken`。此时采纳它等于把 A 的凭证写进 B 的记录、并用 A 的身份发 B 的请求
+ * （比"掉号"严重得多）。判据：页面 token 在库里能对上一个**别的**记录 ⇒ 不采纳。
+ */
+export function decideLiveToken(input: {
+  storedToken: string
+  pageToken: string
+  accounts?: readonly { id: string; token: string }[]
+}): { adopt: boolean; reason?: 'too-short' | 'same' | 'other-account' } {
+  const page = String(input.pageToken ?? '')
+  if (page.length < 32) return { adopt: false, reason: 'too-short' }
+  if (page === input.storedToken) return { adopt: false, reason: 'same' }
+  const accounts = input.accounts ?? []
+  const target = accounts.find((item) => item.token === input.storedToken)
+  const owner = accounts.find((item) => item.token === page)
+  if (target && owner && owner.id !== target.id) return { adopt: false, reason: 'other-account' }
+  return { adopt: true }
+}
+
+/**
+ * 账号记录里的授权类失败结论还能不能用来**快速失败**（纯函数）。
+ *
+ * 三个条件缺一不可：① 有结论 ② 2 分钟内 ③ 结论**不早于这份凭证的捕获时间**。
+ * ③ 是 2026-11-04 补的：重新登录 / 手工粘贴 / 从页面采纳新 token 都会换凭证，但只有重登会清
+ * `lastVerifyError`；剩下两条路会把「旧 token 的失败结论」留在记录上，于是刚换好的号被
+ * 请求前检查误杀（表现是明明能自愈却一直报 AUTH）。
+ */
+export function freshAuthFailure(
+  record: { lastVerifyError?: { at: string; message: string } | null; capturedAt?: string } | undefined,
+  now = Date.now(),
+  windowMs = 120_000,
+): string | undefined {
+  const failure = record?.lastVerifyError
+  if (!failure?.at) return undefined
+  const at = Date.parse(failure.at)
+  if (!Number.isFinite(at) || now - at >= windowMs) return undefined
+  const born = record?.capturedAt ? Date.parse(record.capturedAt) : Number.NaN
+  if (Number.isFinite(born) && at < born) return undefined
+  return failure.message || '登录态已失效'
+}
+
+/**
  * 🔴 用**页面里的 token**（如果它已经换过）。
  *
  * 症状（2026-11-04 用户实测）：重启 DSH 后 2~5 秒面板就变红，报
@@ -640,13 +684,18 @@ async function withLiveToken(auth: WebAuth): Promise<WebAuth> {
   } catch {
     pageToken = ''
   }
-  if (pageToken.length < 32 || pageToken === auth.token) {
-    liveTokenCache = { stored: auth.token, live: auth.token, at: now }
+  const accounts = listAccounts()
+  const decision = decideLiveToken({ storedToken: auth.token, pageToken, accounts })
+  if (!decision.adopt) {
+    // 页面还是**别的号** ⇒ 不缓存：页面随时可能被重装成当前号，缓存 30s 会让自愈白等
+    if (decision.reason !== 'other-account') liveTokenCache = { stored: auth.token, live: auth.token, at: now }
     return auth
   }
   try {
-    const target = listAccounts().find((item) => item.token === auth.token)
-    if (target) updateAccount(target.id, { token: pageToken })
+    // `capturedAt` 一起刷新：这份凭证是**刚从页面采纳的新 token**，不是上一次捕获时那份。
+    // 不刷新的话请求前的 AUTH 快速失败会拿「旧 token 的失败结论」把它误杀（见 freshAuthFailure）。
+    const target = accounts.find((item) => item.token === auth.token)
+    if (target) updateAccount(target.id, { token: pageToken, capturedAt: new Date(now).toISOString() })
   } catch {
     // 落盘失败不影响本次请求（只是下次启动又得再采纳一次）
   }
@@ -3233,6 +3282,13 @@ export async function* streamWebCompletion(
   transport: CompletionTransport = defaultTransport,
 ): AsyncGenerator<WebStreamEvent> {
   /**
+   * 页面里那份 token 才是活的（见 withLiveToken 的说明）—— 必须在任何请求头构造之前替换。
+   * ⚠️ 必须放在下面的「快速失败」**之前**：快速失败读的是账号记录里的失败结论，而那份结论
+   * 是针对**旧 token** 的。先自愈再判，才不会把「页面已经换了新 token」的号直接拦死
+   * （2026-11-04：掉号自愈被快速失败挡在门外，表现就是明明能自愈却一直报 AUTH）。
+   */
+  auth = await withLiveToken(auth)
+  /**
    * 🔴 请求前快速失败：如果探活/校验**刚刚**判定这份 token 失效（`lastVerifyError` 且 < 2 分钟），
    * 直接抛 AUTH —— 不要再走一遍建会话/PoW/SSE。
    *
@@ -3240,22 +3296,22 @@ export async function* streamWebCompletion(
    * 人只能干等。而实际上服务端早在 2ms 内就回了 `invalid token`。
    * 判据用**新鲜度**兜住历史上那个坑（一次端点级误判就把健康账号锁死）：超过 2 分钟的旧结论不采信，
    * 探活成功或重新登录会清掉它。
+   *
+   * ⚠️ 还要与**这份凭证的捕获时间**比：失败结论若比 `capturedAt` 更早，说明它说的是上一份 token
+   * （手工粘贴新 token / 从页面采纳新 token 都不会清 `lastVerifyError`）⇒ 对当前凭证不成立。
    */
   try {
     const record = listAccounts().find((item) => item.token === auth.token)
-    const failure = record?.lastVerifyError
-    const at = failure?.at ? Date.parse(failure.at) : Number.NaN
-    if (failure && Number.isFinite(at) && Date.now() - at < 120_000) {
+    const failure = freshAuthFailure(record)
+    if (failure) {
       throw new AdapterLlmError(
-        `登录态已失效（${failure.message}）—— 请重新登录：面板「浏览器窗口登录」登一次，或在 Chrome 里 F12 取 userToken 粘贴过来（粘贴不会踢掉自己）`,
+        `登录态已失效（${failure}）—— 请重新登录：面板「浏览器窗口登录」登一次，或在 Chrome 里 F12 取 userToken 粘贴过来（粘贴不会踢掉自己）`,
         'AUTH',
       )
     }
   } catch (error) {
     if (error instanceof AdapterLlmError) throw error
   }
-  // 页面里那份 token 才是活的（见 withLiveToken 的说明）—— 必须在任何请求头构造之前替换。
-  auth = await withLiveToken(auth)
   const controller = new AbortController()
   const signal = params.signal ? AbortSignal.any([params.signal, controller.signal]) : controller.signal
   // 归属键：账号 + DSH 会话（窗口）。这条请求要用的网页端会话与投喂链都挂在它下面。

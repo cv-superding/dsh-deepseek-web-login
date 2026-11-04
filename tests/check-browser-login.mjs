@@ -18,8 +18,8 @@
  * 用法: node tests/check-browser-login.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
-import { buildBrowserArgs, transportExtraArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders } from '../src/browser-login.ts'
+import { existsSync, readFileSync } from 'node:fs'
+import { buildBrowserArgs, transportExtraArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders, openWebWindow } from '../src/browser-login.ts'
 import { canOpenElectronWindowWith } from '../src/login.ts'
 import { unwrapStoredToken } from '../src/auth.ts'
 
@@ -190,6 +190,19 @@ test('findSystemBrowser：返回可执行文件确实存在（或明确为 null�
   if (browser === null) return // 允许机器上确实没装
   assert.ok(browser.name && browser.path, JSON.stringify(browser))
   assert.ok(existsSync(browser.path), `返回的路径必须存在：${browser.path}`)
+})
+
+test('openWebWindow：spawn 的异步错误必须被接住（ENOENT 不许带崩宿主）', () => {
+  // 不能真启浏览器（check-test-isolation 守着），所以守**实现形态**：
+  // ① 必须是 async（要等异步 error 冒头再回报）；② 必须挂 'error' 监听。
+  assert.equal(openWebWindow?.constructor?.name, 'AsyncFunction', 'openWebWindow 必须是 async')
+  const src = readFileSync(new URL('../src/browser-login.ts', import.meta.url), 'utf8')
+  const from = src.indexOf('export async function openWebWindow')
+  const to = src.indexOf('export function clearBrowserLoginProfile')
+  assert.ok(from > 0 && to > from, '找不到 openWebWindow 的实现块')
+  const block = src.slice(from, to)
+  assert.ok(block.includes("child.on('error'"), '没有 error 监听 ⇒ 异步 spawn 失败会变成未捕获异常')
+  assert.ok(block.includes('spawnError'), '没有把异步失败收集起来如实回报')
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

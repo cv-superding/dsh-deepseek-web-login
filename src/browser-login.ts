@@ -745,24 +745,42 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
  * ⚠️ 与传输层用的 `transport-profile` 是**两个目录**（见 browser-transport 的 PROFILE_DIR）⇒
  * 这里开有头窗口不会和后台那个无头实例抢锁。
  */
-export function openWebWindow(options: { profileDir?: string; url?: string } = {}): {
+export async function openWebWindow(options: { profileDir?: string; url?: string } = {}): Promise<{
   ok: boolean
   error?: string
   browser?: string
-} {
+}> {
   const browser = findSystemBrowser()
   if (!browser) return { ok: false, error: '没找到系统浏览器（Edge/Chrome）' }
   const profileDir = options.profileDir ?? DEFAULT_PROFILE_DIR
+  let child: ChildProcess
   try {
-    const child = spawn(browser.path, buildBrowserArgs(profileDir, options.url ?? `${DS_BASE}/`), {
+    child = spawn(browser.path, buildBrowserArgs(profileDir, options.url ?? `${DS_BASE}/`), {
       detached: true,
       stdio: 'ignore',
     })
-    child.unref()
-    return { ok: true, browser: browser.path }
   } catch (error: any) {
     return { ok: false, error: String(error?.message ?? error) }
   }
+  /**
+   * ⚠️ spawn 的失败大多是**异步**到达的（ENOENT / EACCES / 被安全软件拦截）。
+   * 不挂 'error' 监听时它不是被 catch 接住，而是变成**未捕获异常** —— 会把整个 DSH 宿主
+   * 带崩，而这里的真实语义只是"网页版窗口没打开"（同 F14，见 browserLogin 里的同一处修法）。
+   * 等一小会儿把异步错误收上来，再如实回报，别在没打开时也让用户看到"✅ 已打开"。
+   */
+  let spawnError: Error | undefined
+  child.on('error', (error: Error) => {
+    spawnError = error
+  })
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  if (spawnError) {
+    try {
+      child.kill()
+    } catch {}
+    return { ok: false, error: `启动 ${browser.name} 失败：${spawnError.message}` }
+  }
+  child.unref()
+  return { ok: true, browser: browser.path }
 }
 
 export function clearBrowserLoginProfile(profileDir = DEFAULT_PROFILE_DIR): boolean {

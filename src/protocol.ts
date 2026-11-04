@@ -2115,7 +2115,14 @@ export function stripStrayToolMarkup(text: string): string {
         //    于是 `<invoke>` 那种无前缀写法也会被这个分支吃掉 —— 实测踩过）。
         `<\\/?\\s*(?:${DSML_PREFIX_ONLY})?(?:${WRAPPER_NAMES})\\s*>` +
           // invoke：整组前缀**必需**（`DSML_PREFIX_ONLY` 本身不带 `?`）
-          `|<\\/?\\s*${DSML_PREFIX_ONLY}invoke\\s*>`,
+          `|<\\/?\\s*${DSML_PREFIX_ONLY}invoke\\s*>` +
+          /**
+           * 🔴 2026-11-04：`LIDOW:{…}` 之后模型常粘上 `</…parameter>` / `</…invoke>` / `</…calls>`
+           * 三个闭标签。包裹名与 invoke 这里已经剥了，**parameter 没有** ⇒ 它会在**流式过程中**
+           * （`push` 已经把正文交出去了，flush 的 `stripResidualDsml` 收不回来）直接上屏。
+           * 只认带 DSML 前缀的写法：无前缀的 `<parameter>` 是正文里可以讨论的普通 XML。
+           */
+          `|<\\/?\\s*${DSML_PREFIX_ONLY}parameter\\s*>`,
         'gi',
       ),
       '',
@@ -2156,6 +2163,12 @@ export function stripDoCalls(text: string): string {
     const cutFrom = match.index + match[1].length
     const bodyStart = match.index + match[0].length
     const balanced = extractBalancedJson(text.slice(bodyStart))
+    /**
+     * 🔴 2026-11-04：`DO` 是英文常用词，正文里完全可能出现 `DO: {"foo": 1}`（解释协议/举例）。
+     * 旧实现只要 `DO:` 后面跟了一个配平对象就整行删掉 ⇒ 用户的正文少一截。
+     * 判据改成「这个对象真的能解析成工具调用」—— 调用必须带 name/tool，正文示例通常没有。
+     */
+    if (balanced && !parseToolCallJson(balanced.json)) continue
     // 对象后面紧跟的那个换行一起吃掉 —— 否则删完留下一个空行（与流式路径的 residual 同口径）
     const after = balanced ? bodyStart + balanced.end : text.length
     const cutTo = balanced ? after + (/^[ \t]*\r?\n/.exec(text.slice(after))?.[0]?.length ?? 0) : text.length
@@ -2361,6 +2374,14 @@ export class ToolCallStreamFilter {
    * 围栏形态没有这个问题（闭栏自带边界），所以只在 do 路径上做。
    */
   private captureDo = false
+  /**
+   * 本次捕获被摘掉的 **`LIDOW:` / `DO:` 前缀原文**（含缩进与冒号后的空白）。
+   *
+   * 用途只有一个：解析失败、判定「这不是调用」时把它**原样吐回正文**。
+   * `DO` 是英文常用词（`DO: {"foo": 1}` 可能是解释），旧实现把前缀吃掉后只吐 JSON
+   * ⇒ 正文里少一截；有了这份原文，非调用形态可以一字不差地还原。
+   */
+  private captureLabel = ''
 
   constructor(knownTools?: ReadonlySet<string>) {
     this.knownTools = knownTools
@@ -2401,7 +2422,9 @@ export class ToolCallStreamFilter {
         this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
       // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，
       // ⚠️ 但必须先剥残片：实测过 `<|DSML|calls>` + 闭合标签这种退化块会从这里漏到正文（2026-09-12）。
-      else out.text += stripStrayToolMarkup(captured.buffer)
+      // 若捕获是 `DO:` 触发的，还要把被摘掉的前缀一起还回去（否则正文少一截）。
+      else out.text += this.captureLabel + stripStrayToolMarkup(captured.buffer)
+      this.captureLabel = ''
       this.capture = null
     }
     // 流结束：把 hold 住的尾巴吐出去之前先剥掉孤立残片 —— 它们会在这里"逃逸"成正文
@@ -2474,6 +2497,7 @@ export class ToolCallStreamFilter {
             if (this.sawCallFence || this.sawDo) out.fenced = true // 🔴 0.6.39：与 JSON 路径同口径
           } else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
           else out.text += stripStrayToolMarkup(block)
+          this.captureLabel = ''
           this.capture = null
           this.pending = this.residual(captured.buffer.slice(end)) + this.pending
           continue
@@ -2497,6 +2521,7 @@ export class ToolCallStreamFilter {
           // 它是"本次调用带围栏"的**权威信号**，而且天然跨 `push`：
           // 开栏到达与 JSON 到达可以不在同一个分块里，逐字符分块尤其如此。
           if (this.sawCallFence || this.sawDo) out.fenced = true
+          this.captureLabel = ''
           this.capture = null
           // 🔴 0.6.38：协议改成 ```dsh-tool 包裹后，这里剩下的是**带语言名的闭栏**。
           // 旧的 FENCE_HEAD_RE 只认行首裸围栏（`^[ \t]*\n?```[ \t]*\n?`）⇒ 闭栏剥不掉，
@@ -2508,7 +2533,9 @@ export class ToolCallStreamFilter {
         // 因此这是**坏掉的调用**而不是正文 → 丢弃 + 告警（泄漏成正文才是真正的乱码来源）。
         const head = captured.buffer.slice(0, balanced.end)
         if (looksLikeToolCallBlock('json', head)) this.abandoned ??= { raw: head, mode: 'json', reason: 'unparsable' }
-        else out.text += head
+        // 不像调用 ⇒ 连**被摘掉的 `DO:` 前缀**一起吐回去，否则正文少一截（见 captureLabel）
+        else out.text += this.captureLabel + head
+        this.captureLabel = ''
         this.capture = null
         this.pending = this.residual(captured.buffer.slice(balanced.end)) + this.pending
         continue
@@ -2537,6 +2564,7 @@ export class ToolCallStreamFilter {
         out.text += this.pending.slice(0, index + keepNewline)
         this.sawDo = true
         this.captureDo = true
+        this.captureLabel = ''
         this.capture = { mode: 'json', buffer: this.pending.slice(index + keepNewline) }
         this.pending = ''
         continue
@@ -2552,6 +2580,8 @@ export class ToolCallStreamFilter {
         out.text += this.pending.slice(0, index + keepNewline)
         this.sawDo = true
         this.captureDo = true
+        // 摘掉的那截先留底：万一解析不出调用，要原样吐回去（见 captureLabel）
+        this.captureLabel = this.pending.slice(index + keepNewline, index + matchLen)
         this.capture = { mode: 'json', buffer: this.pending.slice(index + matchLen) }
         this.pending = ''
         continue
@@ -2564,6 +2594,7 @@ export class ToolCallStreamFilter {
         const head = stripCallFence(rawHead)
         if (head !== rawHead) this.sawCallFence = true
         out.text += head
+        this.captureLabel = ''
         this.capture = { mode: useXml ? 'xml' : 'json', buffer: this.pending.slice(index) }
         this.pending = ''
         continue
@@ -2590,8 +2621,13 @@ export class ToolCallStreamFilter {
        * 这时三路标记都没命中，而 pending 往往很短（≤ HOLD_BACK）⇒ 必须在**早退之前**扣住，
        * 否则半截前缀当正文吐出去，后面补成 `DO:{` 就晚了（DSML 半截前缀踩过同款）。
        * 只在**行首**判：正文里随口的 "D" 不受影响。
+       *
+       * 🔴 2026-11-04 第二次：主协议改成 `LIDOW:` 后这个正则忘了跟上 —— 只认 `D/DO/DO:`。
+       * 于是「长正文 + 分块边界正好落在 `LIDOW`」时，半截前缀被当正文推出去，后面补上的
+       * `:{"name":…}` 再也拼不回标记 ⇒ **整条调用上屏、且不执行**（实测已复现）。
+       * 现在按 `LIDOW` 的每个前缀 + 大写变体都扣留（`/i` 与 `DO_MARKER_RE` 同口径）。
        */
-      const partialDo = /(?:^|\n)[ \t]*(?:D|DO|DO:)[ \t]*$/.exec(this.pending)
+      const partialDo = /(?:^|\n)[ \t]*(?:L(?:I(?:D(?:O(?:W)?)?)?)?|D(?:O)?):?[ \t]*$/i.exec(this.pending)
       if (partialDo) {
         const holdFrom = partialDo.index + (partialDo[0].startsWith('\n') ? 1 : 0)
         out.text += this.pending.slice(0, holdFrom)
