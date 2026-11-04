@@ -1048,15 +1048,16 @@ test('★ 锚点不许吞正文：普通 JSON 对象照常上屏，未闭合的�
   }
 })
 
-test('★ 协议指令要求用围栏包裹（这是本次修复的核心意图）', () => {
-  // ⚠️ 这三条缺一不可：只查 `includes('dsh-tool')` 是**虚守卫** —— 围栏示例行里也有这个词，
-  // 把"必须用围栏包裹"那句话删掉，用例照样全绿（变异时亲自踩到）。
+test('★ 协议指令要求用 DO: 前缀（2026-11-04 起的主协议）', () => {
+  // ⚠️ 判据要点：光有示例行里那个 `DO:{` 是**虚守卫** —— 把"必须写在行首"那句话删掉，示例还在、
+  // 用例照样绿（改围栏协议时踩过一次同样的坑）。所以这里同时要求：
+  // ① 示例（`DO:{"name"`）② "begins with DO:" 的**规则性表述** ③ 规则 6 的重复要求。
   assert.ok(
-    TOOL_PROTOCOL_INSTRUCTIONS.includes('inside a fenced code block'),
-    '必须明确要求"把 JSON 放进围栏里"（只出现围栏示例不够）',
+    TOOL_PROTOCOL_INSTRUCTIONS.includes('begins with DO:'),
+    '必须明确要求"行首写 DO:"（只出现示例不够）',
   )
-  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('dsh-tool'), '提示词必须指定围栏语言名')
-  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('Always wrap'), '规则里必须重复要求包裹')
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('DO:{"name"'), '示例必须给出 DO 形态')
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('DO: is the form to use'), '规则里必须重复要求用 DO:')
   assert.ok(
     TOOL_PROTOCOL_INSTRUCTIONS.includes('Do NOT use XML/HTML-like markup'),
     'XML 禁令要保留（防 DSML 那类私有标记）',

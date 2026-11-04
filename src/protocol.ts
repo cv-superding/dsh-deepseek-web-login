@@ -182,22 +182,20 @@ const PROTOCOL_SLACK_CHARS = 96
 
 export const TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. When you need a tool, output a single JSON object inside a fenced code block, with no other text before or after it:
+You can call tools to complete the user's task. To call one, write a single line that begins with DO: followed by exactly one JSON object, with no other text on that line:
 
-\`\`\`dsh-tool
-{"tool_calls":[{"name":"<tool-name>","arguments":{<json-arguments>}}]}
-\`\`\`
+DO:{"name":"<tool-name>","arguments":{<json-arguments>}}
 
 Rules:
-1. Put every tool you want to run in the "tool_calls" array (usually exactly one; a batch is allowed).
-2. Stop immediately after the closing fence. The runner executes the call(s) and returns the results to you as the next message.
+1. One call per line. To run several tools, put each on its own DO: line (a batch is allowed; usually exactly one).
+2. Stop immediately after the DO: line. The runner executes the call(s) and returns the results to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
-4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
+4. When no tool is needed, answer normally in plain text and do NOT write any DO: line.
 5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
 5b. Two things break the JSON most often — check them before you emit:
    (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
    (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. Always wrap the JSON in a \`\`\`dsh-tool fence (see the example above). Do NOT use XML/HTML-like markup instead: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. The fence is the only accepted form. An unfenced object or any such markup leaks into the visible transcript and into the web conversation.
+6. DO: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. Anything other than a DO: line leaks into the visible transcript and into the web conversation.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
 8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
 9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
@@ -218,22 +216,20 @@ Rules:
  */
 export const SERIAL_TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. When you need a tool, output a single JSON object inside a fenced code block, with no other text before or after it:
+You can call tools to complete the user's task. To call one, write a single line that begins with DO: followed by exactly one JSON object, with no other text on that line:
 
-\`\`\`dsh-tool
-{"tool_calls":[{"name":"<tool-name>","arguments":{<json-arguments>}}]}
-\`\`\`
+DO:{"name":"<tool-name>","arguments":{<json-arguments>}}
 
 Rules:
-1. Put exactly ONE tool in the "tool_calls" array — one call per message, never a batch.
-2. Stop immediately after the closing fence. The runner executes the call and returns the result to you as the next message.
+1. Exactly ONE DO: line per message — one call, never a batch.
+2. Stop immediately after the DO: line. The runner executes the call and returns the result to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
-4. When no tool is needed, answer normally in plain text and do NOT emit that JSON.
+4. When no tool is needed, answer normally in plain text and do NOT write any DO: line.
 5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
 5b. Two things break the JSON most often — check them before you emit:
    (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
    (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. Always wrap the JSON in a \`\`\`dsh-tool fence (see the example above). Do NOT use XML/HTML-like markup instead: no angle-bracket wrapper tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. The fence is the only accepted form. An unfenced object or any such markup leaks into the visible transcript and into the web conversation.
+6. DO: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. Anything other than a DO: line leaks into the visible transcript and into the web conversation.
 7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
 8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
 9. Do NOT batch. Emit one call, stop, and wait for its real result before you decide the next step. Needing several tools means several successive messages, one call each — the user has turned batching off for this session, so a multi-call array works against them.
@@ -938,7 +934,7 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
        * 我们把那条 assistant 文本原样当历史回灌 ⇒ 模型**照抄** ⇒ 泄漏自我强化。
        * `stripResidualDsml` 是围栏感知的（解释性代码块里的示例不会被吃）。
        */
-      const text = stripResidualDsml(flattenText(blocks).join(''))
+      const text = stripDoCalls(stripResidualDsml(flattenText(blocks).join('')))
       const renderedCalls = renderToolCalls(blocks)
       // 只有**带工具调用**的这一轮才把"下一个 user 文本"预期成工具返回（见上面说明）
       pendingToolCallIds = renderedCalls
@@ -1050,6 +1046,18 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
  * 误判成调用对象。
  */
 const MARKER_RE = /\{\s*(?:"(?:[^"\\]|\\.)*"\s*:[\s\S]{0,240}?)?\s*"tool_calls?"\s*:/
+/**
+ * 🔴 2026-11-04 **主协议**：`DO:{...}`（与模型自己思考链里的工具调用写法一致）。
+ *
+ * 为什么换（用户实测 + 提案）：网页版模型在**思考链**里就是用 `DO:` 写调用的，
+ * 让它用同一套写法，它不需要在两套语法之间切换 —— 我们原来要求的 ```dsh-tool 围栏
+ * 对它来说是"另一种方言"，它时不时退回原生标记（DSML）就是我们一直在擦的泄漏。
+ *
+ * 判据：**行首**（可带缩进）的 `DO:`，后面必须是 `{`（允许空格）。
+ * 行首这个约束很重要 —— 正文里偶尔出现的 "DO:"（解释协议时）不会被当成调用。
+ * 围栏 / XML / DSML 三种**仍然全部支持**（兜底，防模型旧习惯），见 `drain()` 的三路分支。
+ */
+const DO_MARKER_RE = /(^|\n)[ \t]*DO:[ \t]*(?=\{)/
 /**
  * JSON 对象的开头（`{` + 一个带引号的键）。
  *
@@ -1934,7 +1942,14 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
     ? parsed.tool_calls
     : parsed.tool_call && typeof parsed.tool_call === 'object'
       ? [parsed.tool_call]
-      : null
+      : /**
+         * 🔴 2026-11-04：`DO:{"name":"read","arguments":{…}}` 是**单调用**形状（没有 tool_calls 数组）。
+         * 协议改成 DO 之后这是主形态 —— 不认它，主协议就等于没接。
+         * 也容忍 `{"tool":…,"args":…}`（模型常见的另一种叫法）。
+         */
+        typeof parsed.name === 'string' || typeof parsed.tool === 'string'
+        ? [parsed]
+        : null
   if (!raw) return null
   const calls: ToolCallRequest[] = []
   for (const entry of raw) {
@@ -2097,6 +2112,36 @@ export function stripStrayToolMarkup(text: string): string {
  * 2026-11-03 合并过一次，直接打红了 6 条流式用例（`check-dsml-stray` / `check-dsml-doubled-bars`）。
  * 所以分开：流式路径保持原函数不动，**最终正文**再补这一刀。
  */
+/**
+ * 切掉正文里残留的 `DO:{…}` 调用行（**围栏感知**：解释性代码块里的示例不动）。
+ *
+ * 正常路径上 `DO:` 在流式捕获阶段就被摘走了（`drain()` 的 `useDo` 分支），
+ * 这里兜的是两条**兜不住**的路：
+ *  - 解析失败被 abandon 之后的回吐；
+ *  - 历史回灌 —— 上一轮残留的 `DO:` 会被模型照抄（和 DSML 同一个坑，2026-11-03 实测）。
+ */
+export function stripDoCalls(text: string): string {
+  if (!text || !text.includes('DO:')) return text
+  const ranges = fencedRanges(text)
+  const re = /(^|\n)([ \t]*)DO:[ \t]*(?=\{)/g
+  let out = ''
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    if (insideFence(match.index, ranges)) continue
+    const cutFrom = match.index + match[1].length
+    const bodyStart = match.index + match[0].length
+    const balanced = extractBalancedJson(text.slice(bodyStart))
+    // 对象后面紧跟的那个换行一起吃掉 —— 否则删完留下一个空行（与流式路径的 residual 同口径）
+    const after = balanced ? bodyStart + balanced.end : text.length
+    const cutTo = balanced ? after + (/^[ \t]*\r?\n/.exec(text.slice(after))?.[0]?.length ?? 0) : text.length
+    out += text.slice(cursor, cutFrom)
+    cursor = cutTo
+    re.lastIndex = cutTo
+  }
+  return cursor === 0 ? text : out + text.slice(cursor)
+}
+
 export function stripResidualDsml(text: string): string {
   if (!text) return text
   if (!/DSML/i.test(text)) return text
@@ -2273,6 +2318,16 @@ export class ToolCallStreamFilter {
    * （`check-auto-continue` N03 / `check-tools-section` 各有用例守着）。
    */
   private sawCallFence = false
+  /** 本次流里命中过 `DO:` 主协议标记（0.6.39 的 `fenced` 统计口径要算上它）。 */
+  private sawDo = false
+  /**
+   * 当前捕获是不是 `DO:` 触发的。
+   *
+   * 用途只有一个：`DO:` 那一行被摘走之后，**它后面的那个换行也要吃掉** ——
+   * 否则正文里会留下一个空行（`"答案\n"` + 残行 `"\n"` ⇒ `"答案\n\n"`，实测）。
+   * 围栏形态没有这个问题（闭栏自带边界），所以只在 do 路径上做。
+   */
+  private captureDo = false
 
   constructor(knownTools?: ReadonlySet<string>) {
     this.knownTools = knownTools
@@ -2347,9 +2402,19 @@ export class ToolCallStreamFilter {
      * ⚠️ 不要用 `abandoned` 门控：证据由 `out.rejected.raw` 承载，而 `out.text` 是**另一段**
      * 可见正文 —— 一旦整轮里出现过一次解析失败就永久关掉清理，会把后续 DSML 全放上屏。
      */
-    out.text = stripResidualDsml(out.text)
+    out.text = stripDoCalls(stripResidualDsml(out.text))
     if (this.abandoned) out.rejected = this.abandoned
     return out
+  }
+
+  /**
+   * 捕获结束后的**残行**处理：围栏形态剥闭栏，`DO:` 形态吃掉紧随其后的一个换行。
+   * 两种形态都会把 `captureDo` 复位（一次捕获只服务一个标记）。
+   */
+  private residual(rest: string): string {
+    const wasDo = this.captureDo
+    this.captureDo = false
+    return wasDo ? rest.replace(/^[ \t]*\r?\n/, '') : stripCallFence(rest)
   }
 
   private drain(out: FilterOutput): void {
@@ -2373,11 +2438,11 @@ export class ToolCallStreamFilter {
           const calls = parseXmlToolCalls(block)
           if (calls) {
             out.calls.push(...calls)
-            if (this.sawCallFence) out.fenced = true // 🔴 0.6.39：与 JSON 路径同口径
+            if (this.sawCallFence || this.sawDo) out.fenced = true // 🔴 0.6.39：与 JSON 路径同口径
           } else if (looksLikeToolCallBlock('xml', block)) this.abandoned ??= { raw: block, mode: 'xml', reason: 'unparsable' }
           else out.text += stripStrayToolMarkup(block)
           this.capture = null
-          this.pending = stripCallFence(captured.buffer.slice(end)) + this.pending
+          this.pending = this.residual(captured.buffer.slice(end)) + this.pending
           continue
         }
         const balanced = extractBalancedJson(captured.buffer)
@@ -2398,12 +2463,12 @@ export class ToolCallStreamFilter {
           // 判据 = `sawCallFence`（在 `drain()` 里命中开栏时置位，见 1934 附近）——
           // 它是"本次调用带围栏"的**权威信号**，而且天然跨 `push`：
           // 开栏到达与 JSON 到达可以不在同一个分块里，逐字符分块尤其如此。
-          if (this.sawCallFence) out.fenced = true
+          if (this.sawCallFence || this.sawDo) out.fenced = true
           this.capture = null
           // 🔴 0.6.38：协议改成 ```dsh-tool 包裹后，这里剩下的是**带语言名的闭栏**。
           // 旧的 FENCE_HEAD_RE 只认行首裸围栏（`^[ \t]*\n?```[ \t]*\n?`）⇒ 闭栏剥不掉，
           // 一行 ``` 就漏进正文（实测"逐字符"分块必现）。
-          this.pending = stripCallFence(captured.buffer.slice(balanced.end)) + this.pending
+          this.pending = this.residual(captured.buffer.slice(balanced.end)) + this.pending
           continue
         }
         // 形状不符：能进到捕获态就说明 MARKER_RE 命中过（`{"tool_calls":`），
@@ -2412,17 +2477,35 @@ export class ToolCallStreamFilter {
         if (looksLikeToolCallBlock('json', head)) this.abandoned ??= { raw: head, mode: 'json', reason: 'unparsable' }
         else out.text += head
         this.capture = null
-        this.pending = captured.buffer.slice(balanced.end) + this.pending
+        this.pending = this.residual(captured.buffer.slice(balanced.end)) + this.pending
         continue
       }
 
-      // 找最早的完整标记（JSON 或 XML）
+      // 找最早的完整标记（DO / JSON / XML 三路，取最早的那个）
+      const doMarker = DO_MARKER_RE.exec(this.pending)
       const jsonMarker = MARKER_RE.exec(this.pending)
       const xmlMarker = XML_STARTER_RE.exec(this.pending)
+      const doIndex = doMarker?.index ?? -1
       const jsonIndex = jsonMarker?.index ?? -1
       const xmlIndex = xmlMarker?.index ?? -1
-      const useXml = xmlIndex !== -1 && (jsonIndex === -1 || xmlIndex < jsonIndex)
-      const index = useXml ? xmlIndex : jsonIndex
+      const index = [doIndex, jsonIndex, xmlIndex].filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? -1
+      const useDo = index >= 0 && index === doIndex
+      const useXml = !useDo && index >= 0 && index === xmlIndex
+      if (useDo) {
+        /**
+         * `DO:{…}`：把 `DO:` 前缀连同行首缩进一起**从正文里摘掉**，buffer 从 `{` 开始
+         * ⇒ 后面走的还是同一条 JSON 配平 + 解析路径（不用第二套解析器）。
+         * 行首那个换行保留（它是正常正文的一部分）。
+         */
+        const keepNewline = doMarker && doMarker[1] ? doMarker[1].length : 0
+        const matchLen = doMarker ? doMarker[0].length : 0
+        out.text += this.pending.slice(0, index + keepNewline)
+        this.sawDo = true
+        this.captureDo = true
+        this.capture = { mode: 'json', buffer: this.pending.slice(index + matchLen) }
+        this.pending = ''
+        continue
+      }
       if (index !== -1) {
         // 🔴 0.6.38：head 里的围栏（` ```dsh-tool `）也必须剥掉 —— 它是**调用块的配套标签**，
         // 不是正文。旧判据 FENCE_TAIL_RE 要求前导换行 + 行尾位置，逐字符分块时
@@ -2450,6 +2533,19 @@ export class ToolCallStreamFilter {
         this.sawCallFence = true
         out.text += this.pending.slice(0, ownFence.index)
         this.pending = this.pending.slice(ownFence.index)
+        return
+      }
+      /**
+       * 🔴 2026-11-04：`DO:` 前缀可能只到一半（`…\nD` / `…\nDO` / `…\nDO:`）——
+       * 这时三路标记都没命中，而 pending 往往很短（≤ HOLD_BACK）⇒ 必须在**早退之前**扣住，
+       * 否则半截前缀当正文吐出去，后面补成 `DO:{` 就晚了（DSML 半截前缀踩过同款）。
+       * 只在**行首**判：正文里随口的 "D" 不受影响。
+       */
+      const partialDo = /(?:^|\n)[ \t]*(?:D|DO|DO:)[ \t]*$/.exec(this.pending)
+      if (partialDo) {
+        const holdFrom = partialDo.index + (partialDo[0].startsWith('\n') ? 1 : 0)
+        out.text += this.pending.slice(0, holdFrom)
+        this.pending = this.pending.slice(holdFrom)
         return
       }
       if (this.pending.length <= HOLD_BACK_CHARS) return

@@ -57,7 +57,7 @@ DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ ch
 | **① 登录捕获**（只做一次） | 开一个**独立 profile** 的浏览器窗口让你登录，把页面自己发出的请求头读一份存下来：`Authorization: Bearer`、域 cookie、反爬头 `x-hif-dliq` / `x-hif-leim`、一批 `x-client-*` | Electron 的 `webRequest.onBeforeSendHeaders` |
 | **② 请求构造**（每次调用） | 自己拼 `POST /api/v0/chat/completion`；PoW 自己解：先要 `create_pow_challenge`，再用 SHA3 WASM 算出答案塞进 `x-ds-pow-response` | 插件自己的 HTTP 客户端 |
 | **③ 发送** | 默认**交给系统 Edge / Chrome 的网络栈**发出（CDP 驱动真实页面），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node | 见下方「传输层」 |
-| **④ 解析与对接** | 自己解 `response/fragments` 的 SSE 帧、分思考与正文通道；工具调用走**提示词协议**（网页端没有原生 function calling） | 自研解析器 |
+| **④ 解析与对接** | 自己解 `response/fragments` 的 SSE 帧、分思考与正文通道；工具调用走**提示词协议**（网页端没有原生 function calling；主形态是行首 `DO:{...}`） | 自研解析器 |
 
 **唯一沾到"截获"的只有第 ① 步**，而且那一步是「读一份 + 清掉自己的痕迹」：同一个回调顺手把请求头里的
 Electron 品牌（UA 与 UA-CH）删掉，否则网页端会判「使用环境异常」。它**不改写业务请求、也不转发任何东西**，

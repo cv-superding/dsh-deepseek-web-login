@@ -79,7 +79,7 @@ await test('rule 3~8 在两版里逐字相同（JSON 正确性防线不许漂移
 
 await test('两版各含自己的语义标志，且不互相串台', () => {
   assert.match(TOOL_PROTOCOL_INSTRUCTIONS, /a batch is allowed/, '批量版必须明确允许批量')
-  assert.match(SERIAL_TOOL_PROTOCOL_INSTRUCTIONS, /exactly ONE tool in the "tool_calls" array/)
+  assert.match(SERIAL_TOOL_PROTOCOL_INSTRUCTIONS, /Exactly ONE DO: line/, '串行版必须明确"一条消息只有一个 DO: 行"')
   assert.doesNotMatch(
     SERIAL_TOOL_PROTOCOL_INSTRUCTIONS,
     /a batch is allowed/,
@@ -226,7 +226,7 @@ await test('默认（什么都没设）⇒ 发出去的就是串行版 —— 0.
   const prompt = await capturePrompt({})
   assert.match(
     prompt,
-    /exactly ONE tool in the "tool_calls" array/,
+    /Exactly ONE DO: line/,
     '默认必须是"一次只发一个工具调用"。要改回默认批量，先把这条用例连同 CHANGELOG 一起改。',
   )
   assert.doesNotMatch(prompt, /a batch is allowed/, '默认路径不该出现批量版那句')
@@ -236,7 +236,7 @@ await test('默认（什么都没设）⇒ 发出去的就是串行版 —— 0.
 await test('显式 serialToolCalls:false ⇒ 才用批量版', async () => {
   const prompt = await capturePrompt({ serialToolCalls: false })
   assert.match(prompt, /a batch is allowed/, '显式允许并行时才该是批量版')
-  assert.doesNotMatch(prompt, /exactly ONE tool in the "tool_calls" array/)
+  assert.doesNotMatch(prompt, /Exactly ONE DO: line/)
   assert.ok(
     prompt.includes(TOOL_PROTOCOL_INSTRUCTIONS),
     '整段批量版指令要原样出现（不是被改过几个字的变体）',
@@ -295,7 +295,7 @@ await test('续写轮也用同一版指令（只改首轮⇒同一会话里指�
   prompts.forEach((prompt, index) => {
     assert.match(
       prompt,
-      /exactly ONE tool in the "tool_calls" array/,
+      /Exactly ONE DO: line/,
       `第 ${index + 1}/${prompts.length} 次调用（续写轮）也必须用串行版 —— 只改首轮的话续写那轮回退批量版`,
     )
   })
