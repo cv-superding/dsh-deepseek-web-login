@@ -2,6 +2,21 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.0.4 — 2026-11-04（指令里点名 DSML）
+
+用户对照了 `xingling66666/fuckds`（那个项目用 `DO:{...}` 当工具协议，DSML 只做兜底解析），
+问我们为什么不做同样的事。核对结论：
+
+- **fuckds**：协议是 `DO:{…}` 单行标记，DSML 只在 `src/prompt/dsml.mjs` 里做**兜底解析**
+  （`parseDsmlCalls` / `findDsmlBlocks` / `findDsmlStart`）；它靠"协议不同"让模型不必吐 DSML。
+- **我们**：协议是 ```dsh-tool 围栏；兜底件其实齐了（`normalizeDsml` 归一化、`stripResidualDsml` 剥离、
+  `parseParameterValue` 的 `string="false"` JSON 解码、流式 `DsmlFilter`）。
+  唯一缺的是**指令里没点名 DSML** —— 只说"不要用 XML/HTML 那种尖括号"。
+
+2.0.4 只改指令第 6 条：**点名 DSML**（说明它是网页模型的私有分隔符方言、不会被本插件执行、
+会在对话里显示成乱码并被下一轮回灌），但**不写出标记字面量**（`check-bundle` 的
+「host 提示词不再写出私有标记字面量」守的就是这条：给模型看样例等于教它怎么写）。
+
 ## 2.0.3 — 2026-11-03（三个实测反馈）
 
 ### 1. 登录状态页整页空白（2.0.2 引入的回归）
