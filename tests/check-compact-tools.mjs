@@ -70,6 +70,48 @@ await test('工具名与"这工具干什么"的那句话必须留着', () => {
   assert.ok(section.includes('Read a UTF-8 text file.'), '工具用途描述丢了')
 })
 
+// ── 长尾策略（2026-11-04）：默认 `hide`，只留白名单 + 一句"还有 N 个但没写" ──
+const tailTools = [
+  ...['read_image', 'web_search', 'web_fetch'].map((n) => ({ name: n, description: 'useful', parameters: { q: { type: 'string' } } })),
+  ...['team_task_create', 'session_search', 'terminal_open', 'ralph', 'workflow', 'create_worktree'].map((n) => ({
+    name: n,
+    description: 'A long explanation the model rarely needs. '.repeat(3).trim(),
+    parameters: { p: { type: 'string' } },
+  })),
+]
+
+await test('长尾默认 hide：只留白名单，且明确说"其余工具没写、参数不可猜"', () => {
+  delete process.env.DSH_WEB_LOGIN_TAIL_TOOLS
+  const section = buildToolSection([...tools, ...tailTools], 56000)
+  assert.ok(section.includes('web_search'), '白名单工具该留')
+  assert.ok(!section.includes('team_task_create'), '实验性工具该被藏起来')
+  assert.ok(!section.includes('session_search'), '实验性工具该被藏起来')
+  assert.ok(section.includes('more tools exist'), '必须告诉模型"还有别的工具但没写"（否则它会瞎猜参数）')
+  assert.ok(section.includes('NOT guessable'), '必须明确禁止猜参数')
+})
+
+await test('长尾 names 档：全部都列（签名），但只列签名', () => {
+  process.env.DSH_WEB_LOGIN_TAIL_TOOLS = 'names'
+  try {
+    const section = buildToolSection([...tools, ...tailTools], 56000)
+    assert.ok(section.includes('team_task_create'), 'names 档该列出全部')
+    assert.ok(!section.includes('A long explanation'), 'names 档不该带描述')
+  } finally {
+    delete process.env.DSH_WEB_LOGIN_TAIL_TOOLS
+  }
+})
+
+await test('长尾 full 档：签名 + 描述（老行为）', () => {
+  process.env.DSH_WEB_LOGIN_TAIL_TOOLS = 'full'
+  try {
+    const section = buildToolSection([...tools, ...tailTools], 56000)
+    assert.ok(section.includes('team_task_create'), 'full 档该列出全部')
+    assert.ok(section.includes('A long explanation'), 'full 档该带描述')
+  } finally {
+    delete process.env.DSH_WEB_LOGIN_TAIL_TOOLS
+  }
+})
+
 if (failures.length) {
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)
   for (const failure of failures) console.log(' -', failure)

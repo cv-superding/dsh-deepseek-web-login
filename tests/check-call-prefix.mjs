@@ -372,6 +372,26 @@ await test('技能目录：三种档位都可用（off 原样 / all 全删 / 默
   }
 })
 
+await test('🔴 站点注入的 `<ds_safety>` 块不许上屏（2026-11-04 真机）', () => {
+  // 真机样本：这一轮既没有工具调用也没有正常回答，界面上就是这段乱码 + 一个 "Safe"
+  const sample =
+    '<ds_safety>用户未成年/ 分类归属】[判定]用户要求测试工具，内容为技术性工具测试，未涉及政治敏感内容。[规则无</ds_safety>Safe'
+  assert.equal(stripResidualDsml(sample), '', '整块都该剥掉')
+
+  const mixed = `先看结果：\n${sample}\n然后继续做别的事。`
+  const out = stripResidualDsml(mixed)
+  assert.ok(out.includes('先看结果'), '前面的正文被吃了')
+  assert.ok(out.includes('然后继续做别的事'), '后面的正文被吃了')
+  assert.ok(!out.includes('ds_safety'), '标签还在')
+  assert.ok(!out.includes('[判定]'), '分类正文还在')
+  assert.ok(!/^\s*Safe\s*$/m.test(out), '落单的 Safe 尾巴还在')
+})
+
+await test('兜底：`</｜｜DSML｜｜` 这类半截残片也要剥干净', () => {
+  const out = stripResidualDsml('正文</｜｜DSML｜｜parameter></｜｜DSML｜｜')
+  assert.equal(out, '正文', `残片没剥干净：${JSON.stringify(out)}`)
+})
+
 if (failures.length) {
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项 ❌`)
   for (const failure of failures) console.log(' -', failure)

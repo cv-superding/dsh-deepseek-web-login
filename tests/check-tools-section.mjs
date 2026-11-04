@@ -1,6 +1,8 @@
 // 本文件测的是**详细渲染**（参数说明、3200 上限）：显式关掉紧凑模式。
 // 紧凑模式的行为由 tests/check-compact-tools.mjs 单独守（默认开）。
 process.env.DSH_WEB_LOGIN_COMPACT_TOOLS = '0'
+// 长尾也用 full 档：这两个文件测的是**完整渲染**（含长尾描述）。
+process.env.DSH_WEB_LOGIN_TAIL_TOOLS = 'full'
 
 /**
  * 回归：工具目录（buildToolSection）必须把 DSH 下发的**全部**工具告诉模型。

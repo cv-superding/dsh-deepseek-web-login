@@ -125,6 +125,29 @@ function descriptionLimit(): number {
  * 只是看不到长篇说明（"遇错怎么办"那类指引只对常用工具才值得每轮都带着）。
  * 要调整就把名字增删进这个集合 —— 这是唯一的开关。
  */
+/**
+ * 长尾工具策略（**只作用于本 provider 发出的提示词**，不动宿主的 profile）：
+ *  - `hide`（默认）：只留一张"还有这些工具"的白名单，其余**不列**（模型不会去用它们）；
+ *  - `names`：全部长尾只列签名（名字 + 参数），不带描述；
+ *  - `full`：老行为（签名 + 描述）。
+ *
+ * 为什么需要：宿主的实验性 bundle 会带进二十多个工具（团队/会话搜索/终端/ralph/worktree…），
+ * 对"用网页版求稳"的场景纯属噪声。**改宿主 profile 是错的做法** —— 那是全局的，
+ * 用户切到 API 调别的模型时那些功能就没了；而这里的裁剪**只影响网页版请求**。
+ * ⚠️ 模型看不见的工具不会被调用；万一它从历史里学到一个，调用照样能执行（我们只转发）。
+ */
+type TailMode = 'hide' | 'names' | 'full'
+
+function tailMode(): TailMode {
+  const raw = String(process.env.DSH_WEB_LOGIN_TAIL_TOOLS ?? '').trim().toLowerCase()
+  if (raw === 'full') return 'full'
+  if (raw === 'names') return 'names'
+  return 'hide'
+}
+
+/** `hide` 档下仍然值得列出来的长尾工具（日常真会用到、参数又不直观的那几个）。 */
+const TAIL_KEEP: ReadonlySet<string> = new Set(['web_search', 'web_fetch', 'read_image', 'present'])
+
 const CORE_TOOLS = new Set([
   'pwsh',
   'bash',
@@ -170,9 +193,21 @@ function tailSentence(text: string): string {
  * 让模型知道有这个工具、但不会照着残缺签名瞎传参（它会被兜底文案要求去问用户）。
  */
 function formatTailTool(tool: ToolSchemaLike): string {
-  // 紧凑模式：长尾描述同样受 220 上限管 —— 否则一句两万字的描述（宿主真给得出来）照样把目录撑爆
-  const sentence = truncate(tailSentence(String(tool.description ?? '')), descriptionLimit())
   const signature = buildToolSignature(tool, false)
+  /**
+   * 紧凑模式：长尾**只留签名，不要描述**。
+   *
+   * 实测（2026-11-04）：40 个长尾工具里描述占了大头（3,691 → 约 1,700 字符），
+   * 而模型要做的判断只是"有没有一个能干这事的工具"—— 名字 + 参数签名就够，
+   * 那句 "Read one full unabridged event…" 在调用时也帮不上忙。
+   */
+  // 是否带描述由**长尾档位**决定（`full` 才带），与"工具描述整体压不压"无关：
+  // 两档混用会出现"选了 full 却看不到描述"（2026-11-04 用例当场抓到）。
+  if (tailMode() !== 'full') {
+    return signature === null ? `\`${tool.name}\`` : `\`${signature.replace(/\s+/g, ' ').trim()}\``
+  }
+  // 详细模式：描述受 220 上限管 —— 否则一句两万字的描述照样把目录撑爆
+  const sentence = truncate(tailSentence(String(tool.description ?? '')), descriptionLimit())
   if (signature === null) return `\`${tool.name}\` — ${sentence}`
   return `\`${signature.replace(/\s+/g, ' ').trim()}\` — ${sentence}`
 }
@@ -205,24 +240,21 @@ const PROTOCOL_SLACK_CHARS = 96
 
 export const TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. To call one, write a single line that begins with LIDOW: followed by exactly one JSON object, with no other text on that line:
+To call a tool, write one line that begins with LIDOW: followed by exactly one JSON object, nothing else on that line:
 
 LIDOW:{"name":"<tool-name>","arguments":{<json-arguments>}}
 
 Rules:
 1. One call per line. To run several tools, put each on its own LIDOW: line (a batch is allowed; usually exactly one).
-2. Stop immediately after the LIDOW: line. The runner executes the call(s) and returns the results to you as the next message.
+2. Stop immediately after the last LIDOW: line. The runner executes the call(s) and returns the results to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT write any LIDOW: line.
-5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
-5b. Two things break the JSON most often — check them before you emit:
-   (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
-   (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. LIDOW: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. Anything other than a DO: line leaks into the visible transcript and into the web conversation.
-7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
-8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
-9. Keep each batch SMALL — at most 3 calls, and prefer exactly 1. If you need more, send them in successive steps. Long payloads are the ones that most often come out malformed.
-10. Each call must be able to run on its own: no shared shell variables across calls, no dependence on another call in the same batch.`
+5. "arguments" must be valid JSON: double-quoted strings, no trailing commas. Escape inner double quotes as \", never put a real line break inside a value (write \n), escape Windows backslashes as \\ (e.g. "C:\\Users\\me"), and close every brace — one missing "}" discards the call.
+6. LIDOW: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage.
+7. Always answer in the same language the user writes in (the JSON itself is language-neutral).
+8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now.
+9. Keep each batch SMALL — at most 3 calls, prefer exactly 1. Long payloads come out malformed most often.
+10. Each call must run on its own: no shared shell variables, no dependence on another call in the same batch.`
 
 /**
  * 「一次只调用一个工具」版协议指令 —— **0.5.0 起的默认**（用户可在「防风控」页切回批量）。
@@ -239,7 +271,7 @@ Rules:
  */
 export const SERIAL_TOOL_PROTOCOL_INSTRUCTIONS = `# Tool Calling Protocol
 
-You can call tools to complete the user's task. To call one, write a single line that begins with LIDOW: followed by exactly one JSON object, with no other text on that line:
+To call a tool, write one line that begins with LIDOW: followed by exactly one JSON object, nothing else on that line:
 
 LIDOW:{"name":"<tool-name>","arguments":{<json-arguments>}}
 
@@ -248,15 +280,12 @@ Rules:
 2. Stop immediately after the LIDOW: line. The runner executes the call and returns the result to you as the next message.
 3. Never fabricate, guess, or simulate tool output — always wait for the real result.
 4. When no tool is needed, answer normally in plain text and do NOT write any LIDOW: line.
-5. "arguments" must be valid JSON (double-quoted strings, no trailing commas). When a value is a Windows path, escape backslashes as \\\\ (e.g. "C:\\\\Users\\\\me"); an unescaped single backslash makes the whole object unparsable. Close every brace: the call object and its "arguments" object each need their OWN closing "}" — one missing "}" makes the whole batch unparsable and the call will be discarded.
-5b. Two things break the JSON most often — check them before you emit:
-   (a) QUOTES INSIDE A VALUE. A shell/PowerShell command very often contains double quotes, e.g. Get-ChildItem "$env:USERPROFILE\\.dsh". Every such inner double quote MUST be escaped as \\" inside the JSON string. An unescaped one ends the string early and discards the whole call.
-   (b) LINE BREAKS INSIDE A VALUE. Never put a real line break inside a string; write \\n instead. When a command needs several statements, join them with ";" on ONE line, or use \\n escapes — do not paste them as actual newlines. Prefer single quotes inside commands to reduce escaping.
-6. LIDOW: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage. Anything other than a DO: line leaks into the visible transcript and into the web conversation.
-7. Always answer in the same language the user writes in (these instructions are English only for precision; the JSON itself is language-neutral).
-8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now. A payload that replays earlier calls or embeds tool results is discarded and costs a retry.
-9. Do NOT batch. Emit one call, stop, and wait for its real result before you decide the next step. Needing several tools means several successive messages, one call each — the user has turned batching off for this session, so a multi-call array works against them.
-10. Unlike a batch, a call here MAY build on the previous step's result — read what came back and use it. That is the point of one-at-a-time. But never invent a result you have not received.`
+5. "arguments" must be valid JSON: double-quoted strings, no trailing commas. Escape inner double quotes as \", never put a real line break inside a value (write \n), escape Windows backslashes as \\ (e.g. "C:\\Users\\me"), and close every brace — one missing "}" discards the call.
+6. LIDOW: is the form to use — do NOT wrap the object in a markdown fence. Do NOT use XML/HTML-like markup instead: no angle-bracket tags (no <tool_calls>, <invoke>, <parameter>), and **never emit DSML**, i.e. the private delimiter-prefixed variants of the web model: not executed here, rendered as literal garbage.
+7. Always answer in the same language the user writes in (the JSON itself is language-neutral).
+8. NEVER reproduce the transcript. Do not restate previous turns, "[Tool Result …]" blocks, tool output, or the current prompt. Emit ONLY the calls you want to run right now.
+9. Do NOT batch. Emit one call, stop, and wait for its real result before deciding the next step. Needing several tools means several successive messages, one call each — the user has turned batching off for this session, so a multi-call array works against them.
+10. A call MAY build on the previous step's result — read what came back and use it. But never invent a result you have not received.`
 
 /**
  * 本次请求该用哪一份协议指令。
@@ -525,7 +554,15 @@ export function buildToolSignature(tool: ToolSchemaLike, withParamDocs = true): 
       return Object.keys(node).length === 0 ? `${tool.name}()` : null
     }
 
-    const lines = [`${tool.name}(${args.join(', ')})`]
+    /**
+     * 紧凑模式：从签名里去掉**只在被拒后才用**的那两个参数
+     * （`sandbox_permissions` / `justification`）。它们每个约 120 字符，十个工具就是一千二，
+     * 而模型平时根本不该主动传 —— 真被沙箱拦了，宿主的报错会告诉它怎么办。
+     * ⚠️ 只是**不展示**，不影响调用：模型若从别处得知，传了也照收。
+     */
+    const hidden = new Set(compactTools() ? ['sandbox_permissions', 'justification'] : [])
+    const kept = args.filter((arg) => !hidden.has(arg.split(':')[0].replace('?', '').trim()))
+    const lines = [`${tool.name}(${kept.join(', ')})`]
     // 长尾工具不带参数说明（`withParamDocs=false`）—— 那是它们体积的另一半。
     // 紧凑模式上限为 0 ⇒ 一行参数说明都不发（名字 + 类型在签名行里）
     const limit = paramDescLimit()
@@ -624,8 +661,29 @@ export function buildToolSection(
     parts.push(block)
   }
 
-  // ② 长尾工具：一行一个
-  if (tailTools.length > 0) {
+  // ② 长尾工具：一行一个（策略见 tailMode）
+  if (tailTools.length > 0 && tailMode() === 'hide') {
+    const kept = tailTools.filter((tool) => TAIL_KEEP.has(String(tool?.name ?? '')))
+    const hidden = tailTools.length - kept.length
+    if (kept.length > 0) parts.push('', '## Other tools', '', 'Same syntax; signature only.')
+    for (const tool of kept) {
+      const line = `- ${formatTailTool(tool)}`
+      if (budget - line.length < 0) break
+      budget -= line.length
+      parts.push(line)
+    }
+    if (hidden > 0) {
+      /**
+       * 明确告诉模型"还有别的工具但这里没写"。
+       * 不写这句的后果：模型会**猜**工具名和参数（实测过 61 个工具里 26 个被静默猜错）。
+       * 写这句 + 要求它先问用户，才是可用的降级。
+       */
+      parts.push(
+        `\n(${hidden} more tools exist in this session but are not described here — ` +
+          'their names and parameters are NOT guessable. If the task truly needs one, ask the user.)',
+      )
+    }
+  } else if (tailTools.length > 0) {
     const header = [
       '',
       '## Other tools',
@@ -2328,10 +2386,58 @@ export function stripSkillsCatalog(text: string): string {
   return out
 }
 
+/**
+ * 切掉**没有标签名**的 DSML 残片（`</｜｜DSML｜｜`、`<｜DSML`）。
+ *
+ * 2026-11-04 用户截图：正文里冒出 `</｜｜DSML｜｜parameter></｜｜DSML｜｜` —— 后半截没有标签名，
+ * `cutDsmlMarkup` 的扫描器要求 `[A-Za-z_]+`，于是它整段留在正文里。
+ */
+function stripNamelessDsmlFragments(text: string): string {
+  if (!/DSML/i.test(text)) return text
+  const masked = maskCodeSpans(text)
+  const re = new RegExp(`<\\s*\\/?\\s*(?:${DSML_PREFIX_ONLY})\\s*\\/?>?`, 'gi')
+  let out = ''
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = re.exec(masked)) !== null) {
+    // 有标签名的交给 cutDsmlMarkup（那里能做栈配对、整段删）
+    if (/[a-zA-Z_]/.test(match[0])) continue
+    out += text.slice(cursor, match.index)
+    cursor = re.lastIndex
+  }
+  return cursor === 0 ? text : out + text.slice(cursor)
+}
+
+/**
+ * 剥掉**站点自己注入的标记块**（`<ds_safety>…</ds_safety>` 这类）。
+ *
+ * 2026-11-04 用户实测：网页端把安全分类塞进了正文 ——
+ *   `<ds_safety>…[判定]…[规则无</ds_safety>Safe`
+ * 这一轮既没有工具调用也没有正常回答（界面看着就"停下来了"）。判据放宽到 `ds_*` 家族：
+ * 这类标签是宿主内部产物，任何情况下都不该出现在回答里。
+ */
+function stripHostMarkers(text: string): string {
+  if (!text || !/ds_[a-z]/i.test(text)) return text
+  let out = text
+  // 成对块（含未闭合到段尾的）
+  out = out.replace(/<ds_[a-z0-9_]+\b[^>]*>[\s\S]*?<\/ds_[a-z0-9_]+>/gi, '')
+  out = out.replace(/<ds_[a-z0-9_]+\b[^>]*>[\s\S]*$/i, '')
+  // 落单标签 + 紧跟的 `Safe` 尾巴
+  out = out.replace(/<\/?ds_[a-z0-9_]+\b[^>]*>/gi, '')
+  out = out.replace(/(^|\n)[ \t]*Safe[ \t]*(?=\n|$)/g, '$1')
+  return out
+}
+
 export function stripResidualDsml(text: string): string {
   if (!text) return text
-  if (!/DSML/i.test(text)) return text
-  return stripDegenerateMarkup(cutDsmlMarkup(text))
+  // ⚠️ 顺序要紧：`ds_safety` 那段里**没有** "DSML" 字样，先做 DSML 的早退会把它漏过去。
+  let out = stripHostMarkers(text)
+  if (/DSML/i.test(out)) {
+    out = stripNamelessDsmlFragments(stripDegenerateMarkup(cutDsmlMarkup(out)))
+    // 兜底：`<` 后面紧跟全角/半角竖线的**半截**残片（`</｜｜DSML｜｜` 这类没有标签名、也没有收尾的）
+    out = out.replace(/<\/?\s*[|｜][^<>\n]{0,24}DSML[^<>\n]{0,24}/gi, '')
+  }
+  return out
 }
 
 /** DSML 标签名（带前缀才算标记；无前缀的 `<invoke>` 是正文里可以讨论的普通 XML）。 */

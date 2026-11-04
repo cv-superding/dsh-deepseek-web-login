@@ -31,6 +31,11 @@
  *
  * 用法: node tests/check-harness-capabilities.mjs
  */
+
+// 本文件断言的是**完整渲染**（deferLoading 之外一律列出、head 逐字节稳定）：
+// 长尾的 `hide` 档会故意不列实验性工具 ⇒ 这里固定 full。
+process.env.DSH_WEB_LOGIN_TAIL_TOOLS = 'full'
+
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
