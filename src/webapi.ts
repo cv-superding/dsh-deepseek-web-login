@@ -2868,6 +2868,9 @@ async function openCompletion(
         sessionId,
         accountKey: accountKey(auth),
         reused,
+        // 末尾预填只给"真的要模型产出工具调用"的请求（带结构化 prompt = chat）；
+        // 内部请求（session-title / compaction）没有 entries，applyPrime 也会跳过。
+        prime: Boolean(params.promptParts),
         ...(contextChains.get(slotKey) ? { chain: contextChains.get(slotKey)! } : {}),
       })
     let feed = planFeed(lease.sessionId, lease.reused)

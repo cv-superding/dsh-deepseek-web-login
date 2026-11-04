@@ -2,6 +2,44 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.2.0 — 2026-11-04（前缀改 `LIDOW:` + 末尾预填）
+
+### 1. 主前缀 `DO:` → `LIDOW:`
+指令、示例、解析、剥离全部改用 `LIDOW:`。`DO:` 保留为**兼容别名**（解析层同时认），
+但指令里只出现 `LIDOW:`。
+
+### 2. 末尾预填（`context-feed.applyPrime`）——本轮的重点
+把「下一步该写什么」的**开头**放到 prompt 的**最末尾**：
+
+```
+…（最后一条消息）
+LIDOW:
+```
+
+模型只需续写 `{"name":…,"arguments":{…}}`。动机：我们的提示词动辄十几万字符，格式要求写在
+最前面的固定头里；模型的**近因位**敏感性决定了它越到后面越容易漂回原生标记（DSML）。
+把开头摆到它鼻子底下，等于替它把第一个 token 定好。
+
+- **只给真 chat**：`FeedInput.prime` 由 `webapi` 在带 `promptParts` 的请求上置 true；
+  纯函数 `decideFeed` 默认**不预填**（几十条字面量断言都建立在这个前提上）。
+- **预填不进链**：`entries` 不含它 —— 否则它只在"最后一个条目"出现，下一轮那条变成中间条目、
+  内容与链里存的不一致 ⇒ 前缀断裂 ⇒ 每轮全量重发（`check-context-feed` 有用例守）。
+- **可切换**：`DSH_WEB_LOGIN_PROTOCOL_PRIME = lidow（默认）| dsml | off`。
+  `dsml` 只在验证"模型是不是只在母语语法下才听话"时用，副作用是**网页端/分享页会原样显示那段标记**
+  （插件能拦住 DSH 侧的显示，拦不住站点渲染模型输出）。
+
+### 3. 续写形态
+预填之后模型往往**不再重复**前缀，只写 `{"name":…,"arguments":…}`。解析新增行首裸调用锚点，
+但收紧成 **name 与 arguments 必须成对**：否则正文代码块里的 `{"name":"demo","version":"1.0.0"}`
+会被当成调用吞掉（`logic-test` 的"锚点不许吞正文"当场变红）。
+
+### 用例
+- `tests/check-call-prefix.mjs`（原 `check-do-protocol`，10 项：解析 / 逐字符 / 两条 / 别名 /
+  半截前缀 / 非行首不误判 / 预填续写 / 围栏兜底 / 围栏感知剥离 / 历史剥离 / 指令与预算）。
+- `check-context-feed` 新增 `prime=true` 用例（末尾有 `LIDOW:` 且不进链）。
+- `check-context-chain`、`check-resume-after-restart` 显式 `DSH_WEB_LOGIN_PROTOCOL_PRIME=off`
+  —— 它们断言的是 prompt 字面量，与预填无关。
+
 ## 2.1.0 — 2026-11-04（工具协议换成 `DO:`）
 
 **主协议从 ```dsh-tool 围栏改成单行 `DO:{...}`：**

@@ -1,3 +1,7 @@
+// 末尾预填是发送时的装饰：本文件断言的 prompt 字面量都建立在没有预填上 ⇒ 显式关掉
+// （预填本身由 check-context-feed 的 prime=true 用例守）。
+process.env.DSH_WEB_LOGIN_PROTOCOL_PRIME = 'off'
+
 /**
  * 0.6.43：DSH 重启后必须**续上同一对话线**。
  *

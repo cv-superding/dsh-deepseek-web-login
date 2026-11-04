@@ -107,6 +107,14 @@ export interface FeedInput {
   chain?: ChainState
   /** serializePrompt 用的预算，用来给增量设一个上限。 */
   maxChars?: number
+  /**
+   * 末尾预填（`LIDOW:`）开关。
+   *
+   * **默认关**：`decideFeed` 是纯函数，几十条用例都在比对返回的 prompt 字面量；
+   * 默认开会让它们全体变红，而且"预填"本质是**发送策略**，不是链判定的一部分。
+   * 只有真的要走"模型产出工具调用"的那条路（webapi 里带 promptParts 的 chat 请求）才置 true。
+   */
+  prime?: boolean
 }
 
 import { CONTINUE_INSTRUCTION, TOOL_CALL_RETRY_INSTRUCTION } from './protocol.ts'
@@ -323,7 +331,57 @@ function canExtendChain(prev: readonly string[], next: readonly string[]): boole
  * 同层的另一条消息（「修改 / 重新生成」+ `n / n`），也就是"聊着聊着分叉了"。
  * 只有**真的没有链**时（新会话 / 换了会话 / 换了账号）才发根消息（见 `detach`）。
  */
+/**
+ * 🔴 2026-11-04 **末尾预填**（用户提案）：把「下一步该写什么」的开头放到 prompt 的最末尾。
+ *
+ * 为什么要放在**末尾**：模型对**近因位**最敏感。我们的提示词动辄十几万字符，格式要求却写在
+ * 最前面的 head 里 —— 实测（用户反馈"模型退化"）表现为：前几轮还听话，越到后面越容易退回
+ * 网页端的原生标记（DSML）。把开头摆到它鼻子底下，等于替它把第一个 token 定好。
+ *
+ * 三种取值（环境变量 `DSH_WEB_LOGIN_PROTOCOL_PRIME`）：
+ *  - `lidow`（默认）：末尾写 `LIDOW:` ⇒ 模型只需续写 `{"name":…}`。**网页端零副作用**。
+ *  - `dsml`：末尾写网页端原生的调用块开头 —— 只在验证"模型是不是只在母语语法下才听话"时用。
+ *    ⚠️ 副作用：模型会按 DSML 输出，**网页端/分享页会把那段标记原样显示出来**（插件能拦住
+ *    DSH 侧的显示，拦不住站点怎么渲染模型输出）。
+ *  - `off`：不预填。
+ *
+ * ⚠️ 预填**不进链**（`entries` 不含它）：它是"发送时的装饰"，不能成为链的一部分 ——
+ * 否则它只在"最后一个条目"出现，下一轮那条变成中间条目、内容变了 ⇒ 链前缀断裂
+ * （`not-appended` ⇒ 每轮全量重发）。
+ */
+export type ProtocolPrime = 'lidow' | 'dsml' | 'off'
+
+const PRIME_TEXTS: Record<ProtocolPrime, string> = {
+  lidow: 'LIDOW:',
+  dsml: '<｜｜DSML｜｜calls>',
+  off: '',
+}
+
+export function currentProtocolPrime(): ProtocolPrime {
+  const raw = String(process.env.DSH_WEB_LOGIN_PROTOCOL_PRIME ?? '').trim().toLowerCase()
+  if (raw === 'off' || raw === 'dsml') return raw
+  // `do` 是 2.1.0 的旧名字，保留兼容
+  if (raw === 'lidow' || raw === 'do') return 'lidow'
+  return 'lidow'
+}
+
+/** 只给**真的要模型产出工具调用**的请求加预填（内部请求没有 entries）。 */
+function applyPrime<T extends { prompt: string }>(decision: T, input: FeedInput): T {
+  if (input.prime !== true) return decision
+  const prime = PRIME_TEXTS[currentProtocolPrime()]
+  if (!prime) return decision
+  if (!Array.isArray(input.entries) || input.entries.length === 0) return decision
+  const prompt = decision.prompt
+  if (!prompt) return decision
+  const tail = prompt.endsWith('\n') ? '' : '\n'
+  return { ...decision, prompt: `${prompt}${tail}${prime}` }
+}
+
 export function decideFeed(input: FeedInput): FeedDecision {
+  return applyPrime(decideFeedInner(input), input)
+}
+
+function decideFeedInner(input: FeedInput): FeedDecision {
   const full = input.full
   if (input.mode !== 'chained') return { prompt: full, parentMessageId: null, next: undefined, reason: 'mode-full' }
 

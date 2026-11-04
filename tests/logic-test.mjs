@@ -1048,16 +1048,16 @@ test('★ 锚点不许吞正文：普通 JSON 对象照常上屏，未闭合的�
   }
 })
 
-test('★ 协议指令要求用 DO: 前缀（2026-11-04 起的主协议）', () => {
+test('★ 协议指令要求用 LIDOW: 前缀（2026-11-04 起的主协议）', () => {
   // ⚠️ 判据要点：光有示例行里那个 `DO:{` 是**虚守卫** —— 把"必须写在行首"那句话删掉，示例还在、
   // 用例照样绿（改围栏协议时踩过一次同样的坑）。所以这里同时要求：
   // ① 示例（`DO:{"name"`）② "begins with DO:" 的**规则性表述** ③ 规则 6 的重复要求。
   assert.ok(
-    TOOL_PROTOCOL_INSTRUCTIONS.includes('begins with DO:'),
+    TOOL_PROTOCOL_INSTRUCTIONS.includes('begins with LIDOW:'),
     '必须明确要求"行首写 DO:"（只出现示例不够）',
   )
-  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('DO:{"name"'), '示例必须给出 DO 形态')
-  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('DO: is the form to use'), '规则里必须重复要求用 DO:')
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('LIDOW:{"name"'), '示例必须给出 DO 形态')
+  assert.ok(TOOL_PROTOCOL_INSTRUCTIONS.includes('LIDOW: is the form to use'), '规则里必须重复要求用 DO:')
   assert.ok(
     TOOL_PROTOCOL_INSTRUCTIONS.includes('Do NOT use XML/HTML-like markup'),
     'XML 禁令要保留（防 DSML 那类私有标记）',

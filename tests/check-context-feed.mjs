@@ -959,5 +959,36 @@ test('★ 诊断留痕的路径必须跟着 DSH_HOME 走（否则跑批会污染
   )
 })
 
+test('★ 末尾预填：prime=true 时 prompt 末尾是 LIDOW:，且**不进链**', () => {
+  // 预填是"发送时的装饰"：只影响这一次发出去的 prompt。
+  // 一旦进了 entries，下一轮那条变成中间条目、内容与链里存的不一致 ⇒ 前缀断裂 ⇒ 每轮全量重发。
+  const decision = decideFeed({
+    mode: 'chained',
+    full: 'HEAD\n\nUser: 你好',
+    head: 'HEAD',
+    entries: ['User: 你好'],
+    sessionId: 's1',
+    accountKey: 'a1',
+    reused: false,
+    prime: true,
+  })
+  assert.ok(decision.prompt.endsWith('LIDOW:'), `prompt 末尾没有预填：${JSON.stringify(decision.prompt.slice(-40))}`)
+  assert.ok(
+    decision.next && !decision.next.entries.some((entry) => entry.includes('LIDOW:')),
+    '预填不许写进链（entries）',
+  )
+  // 默认（不传 prime）不加 —— 纯函数那几十条字面量断言都建立在这个前提上
+  const plain = decideFeed({
+    mode: 'chained',
+    full: 'HEAD\n\nUser: 你好',
+    head: 'HEAD',
+    entries: ['User: 你好'],
+    sessionId: 's1',
+    accountKey: 'a1',
+    reused: false,
+  })
+  assert.ok(!plain.prompt.endsWith('LIDOW:'), '默认不该预填')
+})
+
 console.log(failed === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failed} 项 ❌`)
 if (failed > 0) process.exitCode = 1
