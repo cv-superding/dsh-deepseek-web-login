@@ -757,14 +757,22 @@ export async function readPageUserToken(timeoutMs = 1_500): Promise<string> {
    * 页面被关掉/卡住时我们就会永远 await，界面上表现为"一直在思考、没有任何报错"
    * （用户 2026-11-04 实测）。这里超时就当"读不到"，走原来的 `auth.token` 路径。
    */
-  const state = await Promise.race([
-    readTransportPageState().catch(() => null),
-    new Promise<null>((resolve) => {
-      const timer = setTimeout(() => resolve(null), timeoutMs)
-      // 别把定时器留住（Node 里 unref 让它不阻塞退出）
-      ;(timer as any).unref?.()
-    }),
-  ])
+  const state = await (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        readTransportPageState().catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), timeoutMs)
+          // 别把定时器留住（Node 里 unref 让它不阻塞退出）
+          ;(timer as any).unref?.()
+        }),
+      ])
+    } finally {
+      // CDP 先返回时超时定时器还挂着（靠 unref 只是不阻塞退出）⇒ 该清就清。
+      if (timer) clearTimeout(timer)
+    }
+  })()
   return state?.userToken ?? ''
 }
 

@@ -26,7 +26,7 @@ import {
   uploadImageFile,
   type SessionCleaner,
 } from './webapi.ts'
-import { CONTINUE_INSTRUCTION, TOOL_CALL_RETRY_INSTRUCTION, collectImageRefs, imageUploadName, looksLikeUnexecutedToolProgram, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, ReasoningSanitizer, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
+import { CONTINUE_INSTRUCTION, TOOL_CALL_RETRY_INSTRUCTION, collectImageRefs, collectToolParamNames, imageUploadName, looksLikeUnexecutedToolProgram, serializePromptParts, stripSystemMarkers, SystemMarkerStreamFilter, BoilerplateFilter, drainTextPipeline, ToolCallStreamFilter, ReasoningSanitizer, TranscriptEchoGuard, type ToolSchemaLike } from './protocol.ts'
 
 /**
  * 把「被丢弃的完整载荷」落盘，专供事后定位。
@@ -1275,9 +1275,15 @@ export function createAdapter(deps: AdapterDeps) {
     const prompt = promptParts.full
 
     const knownNames = new Set<string>((options?.tools ?? []).map((tool: any) => String(tool?.name ?? '')))
+    /**
+     * 🔴 2026-11-04：把**这一轮真的下发的工具 schema** 交给解析器 —— 扁平形态
+     * （`{"name":"write","file_path":…}`）只接受 schema 声明过的键，`meta` 之类信封字段
+     * 不再混进 arguments。schema 缺失/未知工具仍保持宽松（未知工具要照实执行、让运行器报错）。
+     */
+    const toolParamNames = collectToolParamNames((options?.tools ?? []) as ToolSchemaLike[])
     // 自动续写的每一轮用全新的过滤器/守卫实例（上一轮的状态在轮次收尾时已吐净），
     // 否则跨请求的行缓冲会让续写内容与 hold 的尾部乱序。
-    let filter = new ToolCallStreamFilter(knownNames)
+    let filter = new ToolCallStreamFilter(knownNames, toolParamNames)
     // 思考通道净化器（0.6.28）：此前思考是**原样直通**的，标记既上网页端、又进历史
     // ⇒ 下一轮被当增量重发 ⇒ 变成网页端可见的正文垃圾。见 ReasoningSanitizer 的说明。
     let reasoningSanitizer = new ReasoningSanitizer()
@@ -1682,7 +1688,7 @@ export function createAdapter(deps: AdapterDeps) {
         })
         currentPrompt = promptParts.full
         // 上一轮的过滤器/守卫状态已在上面收尾时吐净；续写用全新实例
-        filter = new ToolCallStreamFilter(knownNames)
+        filter = new ToolCallStreamFilter(knownNames, toolParamNames)
         reasoningSanitizer = new ReasoningSanitizer()
         echoGuard = new TranscriptEchoGuard()
         systemMarkerFilter = new SystemMarkerStreamFilter()

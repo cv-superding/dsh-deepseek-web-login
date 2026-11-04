@@ -25,6 +25,7 @@ const {
   stripResidualDsml,
   stripDoCalls,
   serializePrompt,
+  collectToolParamNames,
   TOOL_PROTOCOL_INSTRUCTIONS,
 } =
   await import('../src/protocol.ts')
@@ -43,8 +44,8 @@ async function test(name, fn) {
 }
 
 /** 把分块推过过滤器，返回最终可见正文与调用。 */
-function run(chunks) {
-  const filter = new ToolCallStreamFilter()
+function run(chunks, toolParams) {
+  const filter = new ToolCallStreamFilter(undefined, toolParams)
   let text = ''
   const calls = []
   for (const chunk of chunks) {
@@ -103,6 +104,48 @@ await test('围栏兜底仍可用（模型旧习惯不该直接失败）', () =>
   assert.equal(text.trim(), '')
 })
 
+// ── 2026-11-04：围栏里的「举例」不许被当成调用执行 ────────────────────────────
+// 现场：模型在 ```js 代码块里写一遍 `LIDOW:{"name":…}` 解释协议，
+// 旧实现与围栏无关 ⇒ 照抓照执行（用户看到工具被莫名其妙地调用）。
+
+await test('⚠️ 已知限制：围栏里的"举例调用"照旧会被执行（举例保护已关闭）', () => {
+  // 试过"带语言名的围栏 + 前文举例语气 ⇒ 不执行"，但它和**既有的围栏兜底**直接冲突：
+  // 模型非常爱用 ```json 包**真调用**，任何"像举例"的判据都会把真调用吞掉（静默不执行、白跑一轮）。
+  // 取舍：**宁可执行一次举例，也不要让真调用静默失效**。判据函数与围栏追踪器都留在
+  // protocol.ts 里（`inNonCallFence`），等有足够真机样本再定阈值。
+  const raw = '看这个例子：\n```js\nLIDOW:{"name":"read","arguments":{"file_path":"a.txt"}}\n```\n以上是协议。'
+  const { calls, text } = run([raw])
+  assert.equal(calls.length, 1, '当前行为：围栏里的调用照旧执行（见注释与 CHANGELOG）')
+  assert.ok(!text.includes('LIDOW:{"name"'), `调用原文不该上屏：${JSON.stringify(text)}`)
+})
+
+await test('★ 裸 ``` 围栏仍按调用处理（它是"模型不听话"的兜底路径）', () => {
+  // 与"带语言名的围栏算示例"是**两种意图**：
+  //  · ```json / ```js 之类的围栏 ⇒ 说明式举例，不执行；
+  //  · 裸 ```（没语言名）⇒ 多半是模型拿围栏包真调用（我们协议明确要求不用围栏，它仍会包），
+  //    这条兜底不能关，否则真调用静默失效、白跑一轮。
+  const raw = '```\nLIDOW:{"name":"read","arguments":{"file_path":"a.txt"}}\n```'
+  const { calls } = run([raw])
+  assert.equal(calls.length, 1, '裸围栏里的调用必须照常执行')
+})
+
+await test('代码块**闭合之后**的真调用照常执行（围栏状态不许闩死）', () => {
+  const raw = '```js\nconst a = 1\n```\nLIDOW:{"name":"read","arguments":{"file_path":"a.txt"}}\n'
+  const { text, calls } = run([raw])
+  assert.equal(calls.length, 1, '代码块之后的调用必须照旧执行')
+  assert.equal(calls[0].name, 'read')
+  assert.ok(text.includes('const a = 1'), '代码块本身要保留')
+  assert.ok(!/LIDOW:/.test(text), '真调用不该上屏')
+})
+
+await test('```lidow 围栏也是调用围栏（照旧执行）', () => {
+  const raw = '```lidow\n{"name":"read","arguments":{"file_path":"a.txt"}}\n```'
+  const { text, calls } = run([raw])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].name, 'read')
+  assert.ok(!/"name"\s*:/.test(text), `调用对象不该上屏：${JSON.stringify(text)}`)
+})
+
 await test('stripDoCalls：围栏外切掉、围栏内的示例不动', () => {
   assert.equal(stripDoCalls('前\nLIDOW:{"name":"read","arguments":{}}\n后'), '前\n后')
   const fenced = '```\nLIDOW:{"name":"read","arguments":{}}\n```'
@@ -151,6 +194,51 @@ await test('★ 扁平参数形态：{"name":"write","file_path":…} 直接当�
   assert.equal(args.file_path, 'F:////a////b.html')
   assert.equal(args.content, '<html></html>')
   assert.ok(!('name' in args), 'name 不该混进参数里')
+})
+
+// ── 2026-11-04：扁平形态只接受**本轮 schema 声明过的键** ─────────────────────
+// 现场：`{"name":"x","meta":{…}}` 的 `meta` 是信封字段，旧实现"除 name/tool 之外全当参数"
+// ⇒ 被塞进 arguments，工具报 unexpected property。
+// ⚠️ schema 缺失 / 未知工具名时**必须保持宽松**（未知工具要照实执行，让运行器报 unknown tool）。
+
+const SCHEMAS = collectToolParamNames([
+  { name: 'write', description: '', parameters: { file_path: { type: 'string' }, content: { type: 'string' } } },
+  { name: 'shell', description: '', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+])
+
+await test('★ 扁平参数：schema 没声明的键（meta）不许进 arguments', () => {
+  const calls = parseToolCallJson(
+    JSON.stringify({ name: 'write', file_path: 'a.html', content: '<html/>', meta: { trace: 1 } }),
+    SCHEMAS,
+  )
+  assert.equal(calls?.length, 1)
+  const args = JSON.parse(calls[0].arguments)
+  assert.deepEqual(args, { file_path: 'a.html', content: '<html/>' }, `信封字段混进参数了：${calls[0].arguments}`)
+})
+
+await test('★ 标准 JSON Schema 包裹形态也按 properties 收键', () => {
+  const calls = parseToolCallJson(
+    JSON.stringify({ name: 'shell', command: 'ls', meta: { x: 1 } }),
+    SCHEMAS,
+  )
+  assert.deepEqual(JSON.parse(calls[0].arguments), { command: 'ls' })
+})
+
+await test('★ 未知工具名保持宽松（不许因为没 schema 就丢参数）', () => {
+  const calls = parseToolCallJson(JSON.stringify({ name: 'unknown_tool', foo: 1, meta: 2 }), SCHEMAS)
+  assert.equal(calls?.length, 1, '未知工具必须照实执行，让运行器报 unknown tool')
+  assert.deepEqual(JSON.parse(calls[0].arguments), { foo: 1, meta: 2 })
+})
+
+await test('★ 完全不传 schema 时保持旧行为（宽松）', () => {
+  const calls = parseToolCallJson(JSON.stringify({ name: 'write', file_path: 'a', meta: 1 }))
+  assert.deepEqual(JSON.parse(calls[0].arguments), { file_path: 'a', meta: 1 })
+})
+
+await test('★ 过滤器把 schema 一路带到解析处（LIDOW 扁平调用）', () => {
+  const { calls } = run(['LIDOW:{"name":"write","file_path":"a","meta":{"x":1}}\n'], SCHEMAS)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(JSON.parse(calls[0].arguments), { file_path: 'a' })
 })
 
 await test('★ 长正文 + 分块边界落在半截 LIDOW 上：整条调用不许漏上屏（DO→LIDOW 改名时漏掉的那条）', () => {

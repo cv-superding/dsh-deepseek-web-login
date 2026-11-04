@@ -128,6 +128,42 @@ test('full 模式：即使没有结构化 prompt 也不受影响', () => {
   assert.equal(d.reason, 'mode-full')
 })
 
+// ── 2026-11-04：全量模式不再往"已有内容的会话"里发根消息 ─────────────────────
+// 旧实现恒发 parent=null ⇒ 网页端把全量 prompt 渲染成同一条消息的另一个版本
+// （「修改 / 重新生成」+ `n / n`）。但全量模式必须**复用会话**（请求密度是风控敏感项），
+// 所以正解是挂到上一条 assistant 下面，而不是换会话/换根消息。
+test('★ full 模式 + 会话非空 ⇒ parent 指向最后一条 assistant（不发根消息）', () => {
+  const d = decideFeed({
+    mode: 'full',
+    full: 'FULL-PROMPT',
+    sessionId: 'sess-1',
+    accountKey: 'acc-1',
+    reused: true,
+    lastAssistantId: 321,
+  })
+  assert.equal(d.prompt, 'FULL-PROMPT', '全量模式的 prompt 形态不许变')
+  assert.equal(d.parentMessageId, 321, '★ 有上一条 assistant 就必须挂上去，parent=null 会让网页端分叉')
+  assert.equal(d.next, undefined, '全量模式仍然不建链')
+  assert.equal(d.reason, 'mode-full')
+})
+
+test('★ full 模式 + 新会话（reused=false）⇒ 仍是根消息', () => {
+  const d = decideFeed({
+    mode: 'full',
+    full: 'X',
+    sessionId: 'sess-1',
+    accountKey: 'acc-1',
+    reused: false,
+    lastAssistantId: 321,
+  })
+  assert.equal(d.parentMessageId, null, '新会话里那个 id 属于别的会话，不能拿来当 parent')
+})
+
+test('★ full 模式 + 会话是空的（没有 lastAssistantId）⇒ 仍是根消息', () => {
+  const d = decideFeed({ mode: 'full', full: 'X', sessionId: 'sess-1', accountKey: 'acc-1', reused: true })
+  assert.equal(d.parentMessageId, null)
+})
+
 // ── 链式：能续就发增量 ──────────────────────────────────────────────────
 
 test('链式 + 严格追加：只发新增条目，parent 指上一轮 assistant', () => {

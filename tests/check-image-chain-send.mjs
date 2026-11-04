@@ -200,10 +200,15 @@ await test('full 模式（默认）不受影响：每轮都发全部', async () 
   const b1 = await runRound({ transport: t, entries: [E1], refFileIds: ['f1'], id: 2 })
   const b2 = await runRound({ transport: t, entries: [E1, E2], refFileIds: ['f1'], id: 4 })
   applyContextMode('chained') // 后面还有用例
-  assert.equal(b1.parent_message_id, null)
-  assert.equal(b2.parent_message_id, null, 'full 模式恒为根消息')
+  assert.equal(b1.parent_message_id, null, '新会话的第一条是根消息')
+  // 2026-11-04：全量模式第二轮挂到上一条 assistant（否则网页端会渲染成"修改/重新生成"分叉）
+  assert.equal(b2.parent_message_id, 2, 'full 模式第二轮要挂到上一条 assistant 上')
   assert.deepEqual(b1.ref_file_ids, ['f1'])
-  assert.deepEqual(b2.ref_file_ids, ['f1'], 'full 模式不参与"只发新增"的优化')
+  /**
+   * 🔴 2026-11-04 改：全量模式第二轮现在挂了 parent（不再是根消息）⇒ 服务端上下文里**已经有那张图**，
+   * 于是参考图走"只发新增"的差集 ⇒ 第二轮 `[]`。这比重复发更省、也更像真人（同一对话里不重传图）。
+   */
+  assert.deepEqual(b2.ref_file_ids, [], '已经挂在同一对话线上 ⇒ 图不必重发')
 })
 
 // ── 0.6.27：图片账本必须**按会话**分开 ──────────────────────────────────────

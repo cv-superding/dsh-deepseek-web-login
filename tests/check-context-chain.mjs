@@ -123,14 +123,19 @@ const E3 = 'User: 第二问'
 
 console.log('链式投喂接线')
 
-await test('默认 full 模式：即使传了 parts，也照旧发全量 + parent=null', async () => {
+await test('默认 full 模式：发全量；第一轮是根消息，第二轮挂到上一条 assistant 上（不分叉）', async () => {
   resetSessionReuse()
   applyContextMode('full')
   const { transport } = mkTransport()
   const a = await runRound({ transport, entries: [E1], sse: sseWithId(2) })
   const b = await runRound({ transport, entries: [E1, E2], sse: sseWithId(3) })
-  assert.equal(a.body.parent_message_id, null)
-  assert.equal(b.body.parent_message_id, null, 'full 模式不许出现父消息')
+  assert.equal(a.body.parent_message_id, null, '新会话的第一条只能是根消息')
+  /**
+   * 🔴 2026-11-04 改：全量模式**不再是**恒发根消息。
+   * 往"已有内容的会话"里发 `parent=null` 会在网页端渲染成「修改 / 重新生成」+ `n/n` 分叉；
+   * 现在全量模式把上一条 assistant 的 id 当 parent（仍复用同一会话，请求密度不变）。
+   */
+  assert.equal(b.body.parent_message_id, 2, '全量模式要挂到上一条 assistant 上，不许发根消息')
   assert.equal(b.body.prompt, b.full, 'full 模式必须重发全量')
   assert.equal(contextChainInfo(), undefined, 'full 模式不该记链')
 })

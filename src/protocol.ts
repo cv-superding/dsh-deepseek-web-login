@@ -1943,8 +1943,40 @@ function classifyFailure(mode: 'json' | 'xml', raw: string): 'unbalanced' | 'unp
   return findXmlToolCallEnd(raw) === -1 ? 'unbalanced' : 'unparsable'
 }
 
+/** 工具名 → 它**声明过的参数名**。缺省（工具名不在表里）= 不知道 schema，保持宽松。 */
+export type ToolParamNames = ReadonlyMap<string, ReadonlySet<string>>
+
+/**
+ * 从本轮下发的工具定义里收集"每个工具声明了哪些参数"（2026-11-04）。
+ *
+ * 用途只有一个：扁平形态（`{"name":"write","file_path":…}`）里把**信封字段**挑出去 ——
+ * `{"name":"x","meta":{…}}` 会把 `meta` 当参数塞进 arguments（工具 schema 里根本没有它）。
+ * 判据必须来自**这一轮真的下发的 schema**，不能猜。
+ *
+ * 与 `buildToolSignature` 同一套形态判断：标准 JSON Schema 包裹取 `properties` 的键，
+ * DSH 扁平写法顶层键就是参数名。
+ * ⚠️ schema 缺失 / 认不出 / 一个参数都没声明 ⇒ **不收录**（解析时保持宽松）。
+ * 尤其不能把"没声明参数"当成"所有键都非法"——那会把正常的调用清成 `{}`。
+ */
+export function collectToolParamNames(tools: readonly ToolSchemaLike[] | undefined): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  for (const tool of tools ?? []) {
+    const name = typeof tool?.name === 'string' ? tool.name : ''
+    if (!name) continue
+    const node = asRecord(tool.parameters)
+    if (!node) continue
+    const wrapped = isWrappedSchema(node)
+    const map = wrapped ? asRecord(node.properties) : node
+    if (!map) continue
+    const keys = Object.keys(map)
+    if (keys.length === 0) continue
+    out.set(name, new Set(keys))
+  }
+  return out
+}
+
 /** 把解析出的 JSON 转成工具调用请求；非协议形状返回 null。 */
-export function parseToolCallJson(json: string): ToolCallRequest[] | null {
+export function parseToolCallJson(json: string, toolParams?: ToolParamNames): ToolCallRequest[] | null {
   const parsed: any = parseJsonLenient(json)
   if (!parsed || typeof parsed !== 'object') return null
   const raw = Array.isArray(parsed.tool_calls)
@@ -1979,6 +2011,16 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
       delete extra.tool
       delete extra.id
       delete extra.type
+      /**
+       * 🔴 2026-11-04：**只接受这一轮 schema 声明过的键**。
+       * 扁平形态里除 name/tool 之外的键并不都是参数 —— 模型会带信封字段
+       * （实测：`{"name":"x","meta":{…}}` 的 `meta` 被塞进 arguments，工具报
+       * unexpected property）。schema **未知**时保持旧行为（宽松），未知工具名也照常执行。
+       */
+      const declared = toolParams?.get(name)
+      if (declared) {
+        for (const key of Object.keys(extra)) if (!declared.has(key)) delete extra[key]
+      }
       args = Object.keys(extra).length > 0 ? extra : {}
     }
     // 模型偶尔把 arguments 写成**数组**（实测 2026-09-11：arguments:[{…}]，规范是对象）。
@@ -2009,14 +2051,14 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
  * 但**配平的前缀本身是好的调用** —— 取前缀再解析，别把能救的调用整批丢掉。
  * 注意：不配平的截断仍由 structuralRepairCandidates 的安全闸门拒绝（宁可不执行半条命令）。
  */
-function parseSalvagedToolCallJson(buffer: string): ToolCallRequest[] | null {
+function parseSalvagedToolCallJson(buffer: string, toolParams?: ToolParamNames): ToolCallRequest[] | null {
   // 🔴 0.6.38：剥**任意位置**的围栏头（协议要求 ```dsh-tool 包裹，围栏前可能有同段散文）。
   // 旧的 FENCE_HEAD_RE 只认行首裸围栏 ⇒ 围栏形态整块进不了 JSON 解析。
   const text = buffer.replace(FENCE_ANY_HEAD_RE, '').replace(/^\s+/, '')
-  const direct = parseToolCallJson(text)
+  const direct = parseToolCallJson(text, toolParams)
   if (direct) return direct
   const balanced = extractBalancedJson(text)
-  if (balanced && balanced.end < text.length) return parseToolCallJson(balanced.json)
+  if (balanced && balanced.end < text.length) return parseToolCallJson(balanced.json, toolParams)
   return null
 }
 
@@ -2338,6 +2380,103 @@ function stripDegenerateMarkup(text: string): string {
 }
 
 /**
+ * 调用围栏的语言名。只有它们包着的标记才是**真的调用**；
+ * 其它语言（`js` / `python` / `text`，以及裸 ```）里出现的协议标记一律当正文示例。
+ */
+const CALL_FENCE_LANGS: ReadonlySet<string> = new Set([CALL_FENCE_NAME, 'lidow'])
+/** 「前文在举例」的语气词。只有命中它，带语言名的围栏才按"示例"处理（见 isNonCallFenceAt）。 */
+const EXAMPLE_CUE_RE = /(例如|比如|示例|实例|举例|例子|形如|例[:：]|如下|举个例子|example|e\.g\.)/i
+
+interface FenceSpan {
+  start: number
+  end: number
+  lang: string
+}
+
+/**
+ * 跨分块的 Markdown 围栏状态（2026-11-04）。
+ *
+ * ## 为什么必须自己有状态
+ *
+ * `ToolCallStreamFilter` 的捕获与围栏**原本完全无关**：模型在 ```js 代码块里写
+ * `LIDOW:{"name":"x",…}` 解释协议，也会被当成调用**真的执行**。
+ * 判据需要两件事：① 标记的**绝对偏移**；② 这个偏移落在哪个围栏里 —— 而围栏的开栏/闭栏
+ * 完全可能落在不同分块里，所以状态必须跨 `push()` 维护。
+ *
+ * ⚠️ 判据只看**行首围栏**（最多 3 个空格缩进），与 Markdown 的代码围栏一致；
+ * 正文里随口的 ``` 不构成围栏。
+ */
+class MarkdownFenceTracker {
+  /** 已消费的绝对偏移（等于 `base + buf.length`）。 */
+  private base = 0
+  private buf = ''
+  private open: { start: number; lang: string } | null = null
+  private readonly spans: FenceSpan[] = []
+  /** 最近吐出的正文（判断"这个围栏是不是在举例"用，只留尾巴）。 */
+  recentText = ''
+
+  feed(text: string): void {
+    if (!text) return
+    this.buf += text
+    for (;;) {
+      const nl = this.buf.indexOf('\n')
+      if (nl === -1) return
+      const line = this.buf.slice(0, nl)
+      const start = this.base
+      this.consumeLine(line, start)
+      this.buf = this.buf.slice(nl + 1)
+      this.base = start + nl + 1
+    }
+  }
+
+  private consumeLine(line: string, start: number): void {
+    if (!this.open) {
+      const opened = /^[ \t]*`{3,}[ \t]*([^\s`]*)/.exec(line)
+      if (opened) this.open = { start, lang: (opened[1] ?? '').toLowerCase() }
+      return
+    }
+    // 闭栏：只有围栏字符（不允许再带语言名）
+    if (/^[ \t]*`{3,}[ \t]*$/.test(line)) {
+      this.spans.push({ start: this.open.start, end: start + line.length, lang: this.open.lang })
+      this.open = null
+    }
+  }
+
+  /** 已经喂进来的总字符数（= 下一个字符的绝对偏移）。 */
+  get offset(): number {
+    return this.base + this.buf.length
+  }
+
+  /** 这个绝对偏移是不是落在**非调用围栏**里（语言不是 dsh-tool/lidow）。 */
+  isNonCallFenceAt(offset: number): boolean {
+    let lang: string | undefined
+    for (const span of this.spans) {
+      if (span.start < offset && offset < span.end) lang = span.lang
+    }
+    if (this.open && offset > this.open.start) lang = this.open.lang
+    if (lang === undefined) return false
+    /**
+     * 🔴 **裸围栏（没写语言名）仍按调用围栏处理**。
+     *
+     * 围栏捕获本来就是"模型不听话、用围栏包调用"时的兜底路径；把裸围栏划成"示例"等于把这条兜底关掉
+     * （真调用会被当正文显示、不执行 ⇒ 白跑一轮）。而"举例"几乎总会带语言名（```json / ```js），
+     * 那一路才拦。取舍：宁可执行一次真调用，也不要让真调用静默失效。
+     */
+    if (lang === '') return false
+    if (CALL_FENCE_LANGS.has(lang)) return false
+    /**
+     * 🔴 还要看**前文是不是在举例**。
+     *
+     * 只看语言名会把 ` ```json ` 包起来的**真调用**当示例（模型非常爱用 ```json 包调用，
+     * 这是既有兜底路径的主力形态）⇒ 调用静默不执行、白跑一轮。
+     * 判据：只有前文出现「例如 / 示例 / 形如 / example」这类**举例语气**时才算示例。
+     * 代价：模型"举例但没写举例语气"仍会执行一次 —— 与"真调用被吞掉"相比，这个代价更小。
+     */
+    return EXAMPLE_CUE_RE.test(this.recentText)
+  }
+}
+
+/**
  * 流式工具调用过滤器。
  * - 普通正文：立即透传（仅 hold back 末尾少量字符以观测跨包的调用标记）
  * - 命中调用标记（JSON 或 XML 两套）：进入捕获态，收全后转成 tool-call 请求，标记本身不外泄
@@ -2382,18 +2521,39 @@ export class ToolCallStreamFilter {
    * ⇒ 正文里少一截；有了这份原文，非调用形态可以一字不差地还原。
    */
   private captureLabel = ''
+  /** 跨分块的围栏状态：用来判断"这个标记是不是只是正文里的代码示例"。 */
+  private readonly fences = new MarkdownFenceTracker()
+  /**
+   * 🔴 本次捕获的标记处在**非调用围栏**（语言不是 dsh-tool/lidow）里 ⇒ 不执行，
+   * 整块原样当正文吐回（见 `MarkdownFenceTracker`）。
+   */
+  private captureNonCallFence = false
+  /**
+   * `pending` 里被**就地剥掉**的字符数（`stripStrayToolMarkup` 会删掉残片）。
+   *
+   * 用途：`pending` 必须能还原成"原始流的连续后缀"，否则围栏判据的绝对偏移会漂移。
+   * 不变量：`rawSuffixLength === pending.length + pendingDropped`。
+   */
+  private pendingDropped = 0
+  /** 本轮下发的工具 schema（工具名 → 声明过的参数名）；缺省 = 不知道，保持宽松。 */
+  private readonly toolParams?: ToolParamNames
 
-  constructor(knownTools?: ReadonlySet<string>) {
+  constructor(knownTools?: ReadonlySet<string>, toolParams?: ToolParamNames) {
     this.knownTools = knownTools
+    this.toolParams = toolParams
   }
 
   push(text: string): FilterOutput {
     const out: FilterOutput = { text: '', calls: [] }
     if (text) {
+      // 围栏状态必须**先于**捕获推进：标记的绝对偏移要落在正确的围栏里。
+      this.fences.feed(text)
       if (this.capture) this.capture.buffer += text
       else this.pending += text
     }
     this.drain(out)
+    // 收集最近吐出的正文（判断"这个围栏是不是在举例"用）。只留尾巴，避免无限增长。
+    if (out.text) this.fences.recentText = (this.fences.recentText + out.text).slice(-256)
     return out
   }
 
@@ -2402,30 +2562,41 @@ export class ToolCallStreamFilter {
     if (this.capture) {
       // 流结束时仍未收全：先尝试宽容解析（转义修复 + 结构性补括号 + 缺闭合标签抢救）。
       const captured = this.capture
-      const calls =
-        captured.mode === 'xml' ? parseXmlToolCalls(captured.buffer) : parseSalvagedToolCallJson(captured.buffer)
-      if (calls) {
-        out.calls.push(...calls)
-        // 0.1.82：调用块**之后**的正文不能跟着一起消失 —— 见 xmlToolCallTail 的说明。
-        if (captured.mode === 'xml') out.text += stripStrayToolMarkup(xmlToolCallTail(captured.buffer))
-      } else if (
-        captured.mode === 'xml' &&
-        !new RegExp(`${TAG_OPEN_PREFIX}invoke\\b`, 'i').test(normalizeDsml(captured.buffer))
-      ) {
-        /**
-         * 捕获里**没有 invoke**（只有 parameter / 包裹标签）⇒ 这不是调用块，而是正文里插了一个
-         * 协议标签。此时不能走 `abandoned`（那条路只记录不吐字）⇒ 用户会**丢掉半条回答**。
-         * 实测（2026-11-03）：`第一段话 <前缀parameter …>42 第二段话` 只吐出了前半句。
-         */
-        out.text += stripResidualDsml(stripStrayToolMarkup(captured.buffer))
-      } else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
-        this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
-      // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，
-      // ⚠️ 但必须先剥残片：实测过 `<|DSML|calls>` + 闭合标签这种退化块会从这里漏到正文（2026-09-12）。
-      // 若捕获是 `DO:` 触发的，还要把被摘掉的前缀一起还回去（否则正文少一截）。
-      else out.text += this.captureLabel + stripStrayToolMarkup(captured.buffer)
-      this.captureLabel = ''
-      this.capture = null
+      if (this.captureNonCallFence) {
+        // 代码示例：**不执行**，整块原样还回正文（被摘掉的 `DO:` 前缀也要带上）。
+        out.text += this.captureLabel + captured.buffer
+        this.captureLabel = ''
+        this.capture = null
+        this.captureNonCallFence = false
+      } else {
+        const calls =
+          captured.mode === 'xml'
+            ? parseXmlToolCalls(captured.buffer)
+            : parseSalvagedToolCallJson(captured.buffer, this.toolParams)
+        if (calls) {
+          out.calls.push(...calls)
+          // 0.1.82：调用块**之后**的正文不能跟着一起消失 —— 见 xmlToolCallTail 的说明。
+          if (captured.mode === 'xml') out.text += stripStrayToolMarkup(xmlToolCallTail(captured.buffer))
+        } else if (
+          captured.mode === 'xml' &&
+          !new RegExp(`${TAG_OPEN_PREFIX}invoke\\b`, 'i').test(normalizeDsml(captured.buffer))
+        ) {
+          /**
+           * 捕获里**没有 invoke**（只有 parameter / 包裹标签）⇒ 这不是调用块，而是正文里插了一个
+           * 协议标签。此时不能走 `abandoned`（那条路只记录不吐字）⇒ 用户会**丢掉半条回答**。
+           * 实测（2026-11-03）：`第一段话 <前缀parameter …>42 第二段话` 只吐出了前半句。
+           */
+          out.text += stripResidualDsml(stripStrayToolMarkup(captured.buffer))
+        } else if (looksLikeToolCallBlock(captured.mode, captured.buffer))
+          this.abandoned ??= { raw: captured.buffer, mode: captured.mode, reason: classifyFailure(captured.mode, captured.buffer) }
+        // 不像调用（只是正文里提到 `<invoke>` 这类词）→ 照常透出，
+        // ⚠️ 但必须先剥残片：实测过 `<|DSML|calls>` + 闭合标签这种退化块会从这里漏到正文（2026-09-12）。
+        // 若捕获是 `DO:` 触发的，还要把被摘掉的前缀一起还回去（否则正文少一截）。
+        else out.text += this.captureLabel + stripStrayToolMarkup(captured.buffer)
+        this.captureLabel = ''
+        this.capture = null
+        this.captureNonCallFence = false
+      }
     }
     // 流结束：把 hold 住的尾巴吐出去之前先剥掉孤立残片 —— 它们会在这里"逃逸"成正文
     // 🔴 0.6.38：连带剥掉**我们自己留下的**围栏残留（开栏在捕获时已剥，闭栏留到这里）。
@@ -2447,6 +2618,7 @@ export class ToolCallStreamFilter {
       out.text += tailText
     }
     this.pending = ''
+    this.pendingDropped = 0
     /**
      * 流结束：把可见正文里**残留的 DSML**（未闭合标签 / 半截前缀 / 完整对）一次性切掉。
      *
@@ -2473,6 +2645,18 @@ export class ToolCallStreamFilter {
     return wasDo ? rest.replace(/^[ \t]*\r?\n/, '') : stripCallFence(rest)
   }
 
+  /**
+   * 捕获结束：把捕获块**后面**的剩余原文接回 pending。
+   *
+   * `residual` 可能剥掉闭栏/换行 ⇒ 记下"这批原文里被就地删掉多少字符"，
+   * 围栏偏移才不至于漂移（见 `pendingDropped`）。
+   */
+  private resumeAfterCapture(rest: string): void {
+    const tail = this.residual(rest)
+    this.pendingDropped = rest.length - tail.length
+    this.pending = tail + this.pending
+  }
+
   private drain(out: FilterOutput): void {
     for (;;) {
       if (this.capture) {
@@ -2482,15 +2666,26 @@ export class ToolCallStreamFilter {
           if (end === -1) {
             if (captured.buffer.length > MAX_CAPTURE_CHARS) {
               // 超长仍未收全：是调用就丢弃（不吐乱码），只是正文提及则照常透出
-              if (looksLikeToolCallBlock('xml', captured.buffer))
+              if (this.captureNonCallFence) out.text += captured.buffer
+              else if (looksLikeToolCallBlock('xml', captured.buffer))
                 this.abandoned ??= { raw: captured.buffer, mode: 'xml', reason: 'oversize' }
               else out.text += stripStrayToolMarkup(captured.buffer)
               this.capture = null
+              this.captureNonCallFence = false
               continue
             }
             return
           }
           const block = captured.buffer.slice(0, end)
+          if (this.captureNonCallFence) {
+            // 代码示例：整块原样当正文，不执行。
+            out.text += block
+            this.captureLabel = ''
+            this.capture = null
+            this.captureNonCallFence = false
+            this.resumeAfterCapture(captured.buffer.slice(end))
+            continue
+          }
           const calls = parseXmlToolCalls(block)
           if (calls) {
             out.calls.push(...calls)
@@ -2499,20 +2694,32 @@ export class ToolCallStreamFilter {
           else out.text += stripStrayToolMarkup(block)
           this.captureLabel = ''
           this.capture = null
-          this.pending = this.residual(captured.buffer.slice(end)) + this.pending
+          this.resumeAfterCapture(captured.buffer.slice(end))
           continue
         }
         const balanced = extractBalancedJson(captured.buffer)
         if (!balanced) {
           if (captured.buffer.length > MAX_CAPTURE_CHARS) {
             // 超过上限仍没配平：放弃，但**不吐成正文**（那是乱码，不是回答）
-            this.abandoned ??= { raw: captured.buffer, mode: 'json', reason: 'oversize' }
+            if (this.captureNonCallFence) out.text += this.captureLabel + captured.buffer
+            else this.abandoned ??= { raw: captured.buffer, mode: 'json', reason: 'oversize' }
+            this.captureLabel = ''
             this.capture = null
+            this.captureNonCallFence = false
             continue
           }
           return
         }
-        const calls = parseToolCallJson(balanced.json)
+        if (this.captureNonCallFence) {
+          // 代码示例：整块原样当正文（含被摘掉的 `DO:` 前缀），不执行。
+          out.text += this.captureLabel + balanced.json
+          this.captureLabel = ''
+          this.capture = null
+          this.captureNonCallFence = false
+          this.resumeAfterCapture(captured.buffer.slice(balanced.end))
+          continue
+        }
+        const calls = parseToolCallJson(balanced.json, this.toolParams)
         if (calls) {
           // 未知工具名也照常透出：由运行器给出「未知工具」结果，模型可自行纠正。
           out.calls.push(...calls)
@@ -2523,10 +2730,11 @@ export class ToolCallStreamFilter {
           if (this.sawCallFence || this.sawDo) out.fenced = true
           this.captureLabel = ''
           this.capture = null
+          this.captureNonCallFence = false
           // 🔴 0.6.38：协议改成 ```dsh-tool 包裹后，这里剩下的是**带语言名的闭栏**。
           // 旧的 FENCE_HEAD_RE 只认行首裸围栏（`^[ \t]*\n?```[ \t]*\n?`）⇒ 闭栏剥不掉，
           // 一行 ``` 就漏进正文（实测"逐字符"分块必现）。
-          this.pending = this.residual(captured.buffer.slice(balanced.end)) + this.pending
+          this.resumeAfterCapture(captured.buffer.slice(balanced.end))
           continue
         }
         // 形状不符：能进到捕获态就说明 MARKER_RE 命中过（`{"tool_calls":`），
@@ -2537,7 +2745,8 @@ export class ToolCallStreamFilter {
         else out.text += this.captureLabel + head
         this.captureLabel = ''
         this.capture = null
-        this.pending = this.residual(captured.buffer.slice(balanced.end)) + this.pending
+        this.captureNonCallFence = false
+        this.resumeAfterCapture(captured.buffer.slice(balanced.end))
         continue
       }
 
@@ -2554,6 +2763,23 @@ export class ToolCallStreamFilter {
       const useBare = index >= 0 && index === bareIndex
       const useDo = index >= 0 && index === doIndex
       const useXml = !useDo && index >= 0 && index === xmlIndex
+      /**
+       * 🔴 2026-11-04：标记的**绝对偏移** ⇒ 判断它是不是落在 `js`/`python` 这类
+       * **非调用围栏**里（模型在代码块里举例写一遍协议，不能真执行）。
+       * `pending` 是原始流的**连续后缀** ⇒ `总长 - pending.length` 就是它的起点。
+       */
+      const pendingStart = this.fences.offset - (this.pending.length + this.pendingDropped)
+      /**
+       * ⚠️ **2026-11-04 起恒为 false**：这一版试过"带语言名的围栏 + 前文举例语气 ⇒ 不执行"，
+       * 但它与**既有兜底路径**直接冲突 —— 模型非常爱用 ```json 包**真调用**，任何"看起来像举例"的
+       * 判据都会把真调用吞掉（静默不执行、白跑一轮）；收紧到只拦明确举例又拦不住。
+       * 取舍：**宁可执行一次举例，也不要让真调用静默失效**。
+       * 追踪器（`MarkdownFenceTracker`）与下面所有 `captureNonCallFence` 分支都留着，
+       * 等有足够真机样本再定阈值；`tests/check-call-prefix.mjs` 有一条用例把这个现状钉住。
+       */
+      const inNonCallFence = (_at: number): boolean => false
+      // 保留变量名，避免 tsc 报未使用（判定函数改用上面那行）
+      void pendingStart
       if (useBare) {
         /**
          * 预填 `DO:` 之后的续写形态：`{` 前只有换行+缩进，直接当调用捕获。
@@ -2565,8 +2791,10 @@ export class ToolCallStreamFilter {
         this.sawDo = true
         this.captureDo = true
         this.captureLabel = ''
+        this.captureNonCallFence = inNonCallFence(index + keepNewline)
         this.capture = { mode: 'json', buffer: this.pending.slice(index + keepNewline) }
         this.pending = ''
+        this.pendingDropped = 0
         continue
       }
       if (useDo) {
@@ -2582,8 +2810,10 @@ export class ToolCallStreamFilter {
         this.captureDo = true
         // 摘掉的那截先留底：万一解析不出调用，要原样吐回去（见 captureLabel）
         this.captureLabel = this.pending.slice(index + keepNewline, index + matchLen)
+        this.captureNonCallFence = inNonCallFence(index + keepNewline)
         this.capture = { mode: 'json', buffer: this.pending.slice(index + matchLen) }
         this.pending = ''
+        this.pendingDropped = 0
         continue
       }
       if (index !== -1) {
@@ -2595,13 +2825,17 @@ export class ToolCallStreamFilter {
         if (head !== rawHead) this.sawCallFence = true
         out.text += head
         this.captureLabel = ''
+        this.captureNonCallFence = inNonCallFence(index)
         this.capture = { mode: useXml ? 'xml' : 'json', buffer: this.pending.slice(index) }
         this.pending = ''
+        this.pendingDropped = 0
         continue
       }
 
       // 未见完整标记：先把夹在正文里的孤立残片剥掉，再保留末尾可能的标记前缀
-      this.pending = stripStrayToolMarkup(this.pending)
+      const strippedPending = stripStrayToolMarkup(this.pending)
+      this.pendingDropped += this.pending.length - strippedPending.length
+      this.pending = strippedPending
       // 🔴 0.6.38：**开栏之后紧跟的 JSON 前缀**要扣住。
       // 逐字符分块时 `{"tool` 还没命中 MARKER_RE（要等冒号），而 pending 只有二十来字符
       // ⇒ 直接被下面的 HOLD_BACK 早退放行，把 ```dsh-tool 一起推进正文（实测必现）。
@@ -2674,6 +2908,7 @@ export class ToolCallStreamFilter {
         if (!hasUserCodeBlock) {
           out.text += this.pending.replace(CALL_FENCE_TAIL_RE, '')
           this.pending = ''
+          this.pendingDropped = 0
           // 一次性标志：剥掉一次就复位（之后的正常代码块闭栏不动）
           this.sawCallFence = false
           return
@@ -2683,6 +2918,7 @@ export class ToolCallStreamFilter {
       }
       out.text += this.pending
       this.pending = ''
+      this.pendingDropped = 0
       return
     }
   }

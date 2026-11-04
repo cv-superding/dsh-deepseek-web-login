@@ -611,9 +611,116 @@ async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
  */
 /**
  * 缓存：`stored` = 我们手里那份，`live` = 页面里那份。
- * 30 秒内复用，避免每个请求都跑一次 CDP evaluate。
+ *
+ * ⚠️ 缓存时长**不是常量**：见 `liveTokenCacheTtl`。页面还没就绪时读到空 token，
+ * 若也按 30s 缓存，自愈就会白白晚 30 秒（用户重启后那 30 秒里全是 invalid token）。
  */
-let liveTokenCache: { stored: string; live: string; at: number } | null = null
+let liveTokenCache: { stored: string; live: string; at: number; ttl: number } | null = null
+
+/**
+ * 这次读到的页面 token 值得缓存多久（毫秒）。**纯函数**，便于单测。
+ *
+ *  - `too-short`（页面还没就绪 / 未登录 / 读崩）：只缓存 **2s**。请求密度不变，
+ *    但页面一就绪就能立刻自愈，不再被 30s 的窗口挡在门外；
+ *  - `other-account`（页面还是别的号）：**不缓存** —— 页面随时可能被重装成当前号；
+ *  - 其余（采纳了新 token / 与手里那份相同）：30s，避免每个请求都跑一次 CDP。
+ */
+export function liveTokenCacheTtl(decision: { adopt: boolean; reason?: 'too-short' | 'same' | 'other-account' }): number {
+  if (decision.reason === 'other-account') return 0
+  if (decision.reason === 'too-short') return 2_000
+  return 30_000
+}
+
+/** 页面 token 采纳过程的诊断留痕（复用 `diagnostics/` 目录与 jsonl 口径，不新造目录）。 */
+export function liveTokenDiagnosticsPath(): string {
+  return join(webLoginDir(), 'diagnostics', 'live-token.jsonl')
+}
+
+function noteLiveTokenDiagnostic(kind: 'persist-failed', detail?: unknown): void {
+  try {
+    const file = liveTokenDiagnosticsPath()
+    mkdirSync(join(file, '..'), { recursive: true, mode: 0o700 })
+    const line =
+      JSON.stringify({
+        at: new Date().toISOString(),
+        kind,
+        detail: String((detail as any)?.message ?? detail ?? '').slice(0, 200),
+      }) + '\n'
+    let size = 0
+    try {
+      size = statSync(file).size
+    } catch {
+      /* 首次写入 */
+    }
+    if (size + Buffer.byteLength(line) > 4_000_000) return
+    appendFileSync(file, line, { encoding: 'utf8', mode: 0o600 })
+  } catch {
+    /* 留痕失败不影响主流程 */
+  }
+}
+
+/** `withLiveToken` 的可注入依赖（测试用；不传就是真实实现）。 */
+export interface LiveTokenDeps {
+  readPageToken?: () => Promise<string>
+  listAccounts?: () => readonly { id: string; token: string }[]
+  updateAccount?: (id: string, patch: { token: string; capturedAt: string }) => unknown
+  now?: () => number
+}
+
+/** 只给测试用：清掉模块级缓存，用例之间互不干扰。 */
+export function resetLiveTokenCacheForTest(): void {
+  liveTokenCache = null
+}
+
+/**
+ * 🔴 用**页面里的 token**（如果它已经换过）。
+ *
+ * 症状（2026-11-04 用户实测）：重启 DSH 后 2~5 秒面板就变红，报
+ * `Authorization Failed (invalid token)`；而同一时刻后台探活 1 分钟前还是通过的。
+ * 机制：传输层页面启动/重载时，站点自己刷新 `localStorage.userToken` ⇒ 我们快照里那份
+ * 立刻作废。**不是封号**，是我们拿着旧 token 去撞。
+ *
+ * 做法：读页面的 token；不同且形状像 token（≥32）就**采纳并落盘**（下次启动也用它），
+ * 本请求用新的发。读不到（没有页面/没有会话/测试环境）就原样返回 —— 不改变既有行为。
+ *
+ * ⚠️ 采纳前不额外验证（那要多一次请求）；如果页面的号与本记录不是同一个，
+ * 后续 `validateAuth` 会立刻暴露，而不是悄悄用错号跑一整轮。
+ */
+export async function withLiveToken(auth: WebAuth, deps: LiveTokenDeps = {}): Promise<WebAuth> {
+  const readPageToken = deps.readPageToken ?? readPageUserToken
+  const now = (deps.now ?? Date.now)()
+  if (liveTokenCache && liveTokenCache.stored === auth.token && now - liveTokenCache.at < liveTokenCache.ttl) {
+    return liveTokenCache.live === auth.token ? auth : { ...auth, token: liveTokenCache.live }
+  }
+  let pageToken = ''
+  try {
+    pageToken = await readPageToken()
+  } catch {
+    pageToken = ''
+  }
+  const accounts = (deps.listAccounts ?? listAccounts)()
+  const decision = decideLiveToken({ storedToken: auth.token, pageToken, accounts })
+  const ttl = liveTokenCacheTtl(decision)
+  if (!decision.adopt) {
+    if (ttl > 0) liveTokenCache = { stored: auth.token, live: auth.token, at: now, ttl }
+    return auth
+  }
+  try {
+    // `capturedAt` 一起刷新：这份凭证是**刚从页面采纳的新 token**，不是上一次捕获时那份。
+    // 不刷新的话请求前的 AUTH 快速失败会拿「旧 token 的失败结论」把它误杀（见 freshAuthFailure）。
+    const target = accounts.find((item) => item.token === auth.token)
+    if (target) {
+      const update = deps.updateAccount ?? updateAccount
+      update(target.id, { token: pageToken, capturedAt: new Date(now).toISOString() })
+    }
+  } catch (error) {
+    // 🔴 落盘失败**不再静默吞掉**：下次启动仍会用旧 token（就是上面那个掉号现场）。
+    // 留一条诊断，事后能回答"为什么采纳了却没生效"。
+    noteLiveTokenDiagnostic('persist-failed', error)
+  }
+  liveTokenCache = { stored: auth.token, live: pageToken, at: now, ttl }
+  return { ...auth, token: pageToken }
+}
 
 /**
  * 页面里的 token 能不能采纳 —— 纯函数，便于单测（现场行为见 `withLiveToken`）。
@@ -657,50 +764,6 @@ export function freshAuthFailure(
   const born = record?.capturedAt ? Date.parse(record.capturedAt) : Number.NaN
   if (Number.isFinite(born) && at < born) return undefined
   return failure.message || '登录态已失效'
-}
-
-/**
- * 🔴 用**页面里的 token**（如果它已经换过）。
- *
- * 症状（2026-11-04 用户实测）：重启 DSH 后 2~5 秒面板就变红，报
- * `Authorization Failed (invalid token)`；而同一时刻后台探活 1 分钟前还是通过的。
- * 机制：传输层页面启动/重载时，站点自己刷新 `localStorage.userToken` ⇒ 我们快照里那份
- * 立刻作废。**不是封号**，是我们拿着旧 token 去撞。
- *
- * 做法：读页面的 token；不同且形状像 token（≥32）就**采纳并落盘**（下次启动也用它），
- * 本请求用新的发。读不到（没有页面/没有会话/测试环境）就原样返回 —— 不改变既有行为。
- *
- * ⚠️ 采纳前不额外验证（那要多一次请求）；如果页面的号与本记录不是同一个，
- * 后续 `validateAuth` 会立刻暴露，而不是悄悄用错号跑一整轮。
- */
-async function withLiveToken(auth: WebAuth): Promise<WebAuth> {
-  const now = Date.now()
-  if (liveTokenCache && liveTokenCache.stored === auth.token && now - liveTokenCache.at < 30_000) {
-    return liveTokenCache.live === auth.token ? auth : { ...auth, token: liveTokenCache.live }
-  }
-  let pageToken = ''
-  try {
-    pageToken = await readPageUserToken()
-  } catch {
-    pageToken = ''
-  }
-  const accounts = listAccounts()
-  const decision = decideLiveToken({ storedToken: auth.token, pageToken, accounts })
-  if (!decision.adopt) {
-    // 页面还是**别的号** ⇒ 不缓存：页面随时可能被重装成当前号，缓存 30s 会让自愈白等
-    if (decision.reason !== 'other-account') liveTokenCache = { stored: auth.token, live: auth.token, at: now }
-    return auth
-  }
-  try {
-    // `capturedAt` 一起刷新：这份凭证是**刚从页面采纳的新 token**，不是上一次捕获时那份。
-    // 不刷新的话请求前的 AUTH 快速失败会拿「旧 token 的失败结论」把它误杀（见 freshAuthFailure）。
-    const target = accounts.find((item) => item.token === auth.token)
-    if (target) updateAccount(target.id, { token: pageToken, capturedAt: new Date(now).toISOString() })
-  } catch {
-    // 落盘失败不影响本次请求（只是下次启动又得再采纳一次）
-  }
-  liveTokenCache = { stored: auth.token, live: pageToken, at: now }
-  return { ...auth, token: pageToken }
 }
 
 async function solvePow(challenge: PoWChallenge, wasmUrl: string): Promise<number> {
@@ -2245,6 +2308,14 @@ interface SessionSlot {
   turns: number
   /** 最近一次使用的时刻，用来淘汰最久没用的那条。 */
   at: number
+  /**
+   * 这个会话里**最后一条 assistant 的 message_id**（2026-11-04）。
+   *
+   * 全量模式靠它把下一轮的 `parent_message_id` 挂到上一条回答下面，避免往已有内容的会话里
+   * 发根消息（网页端会渲染成「修改 / 重新生成」+ `n / n`）。链式模式的父 id 存在链里，
+   * 这里是**全量模式专用**；换会话/退役时随槽一起消失，不会串到别的会话上。
+   */
+  lastAssistantId?: number
   cleanup?: (id: string) => void
 }
 const reuseSlots = new Map<string, SessionSlot>()
@@ -2333,7 +2404,7 @@ let lastChainKey: string | undefined
 interface PersistedState {
   version: 1
   savedAt: number
-  slots: { key: string; sessionId: string; turns: number; at: number }[]
+  slots: { key: string; sessionId: string; turns: number; at: number; lastAssistantId?: number }[]
   chains: { key: string; state: ChainState }[]
 }
 
@@ -2387,7 +2458,13 @@ function persistResumeState(opts?: { persist?: boolean }): void {
     const payload: PersistedState = {
       version: 1,
       savedAt: Date.now(),
-      slots: [...reuseSlots.values()].map((s) => ({ key: s.key, sessionId: s.sessionId, turns: s.turns, at: s.at })),
+      slots: [...reuseSlots.values()].map((s) => ({
+        key: s.key,
+        sessionId: s.sessionId,
+        turns: s.turns,
+        at: s.at,
+        ...(typeof s.lastAssistantId === 'number' ? { lastAssistantId: s.lastAssistantId } : {}),
+      })),
       chains,
     }
     const text = JSON.stringify(payload)
@@ -2417,7 +2494,14 @@ function restoreResumeState(): void {
     for (const slot of parsed.slots ?? []) {
       if (!slot?.key || !slot.sessionId) continue
       // ⚠️ 不恢复 cleanup：它只能在本次进程里由 leaseSession 重新挂上。
-      reuseSlots.set(slot.key, { key: slot.key, sessionId: slot.sessionId, turns: slot.turns, at: slot.at })
+      reuseSlots.set(slot.key, {
+        key: slot.key,
+        sessionId: slot.sessionId,
+        turns: slot.turns,
+        at: slot.at,
+        // 全量模式的父消息 id：重启后必须续上，否则下一轮又变成根消息（网页端分叉）。
+        ...(typeof slot.lastAssistantId === 'number' ? { lastAssistantId: slot.lastAssistantId } : {}),
+      })
     }
     for (const rec of parsed.chains ?? []) {
       if (!rec?.key || !rec.state?.sessionId || !Array.isArray(rec.state.entries)) continue
@@ -2963,8 +3047,16 @@ async function openCompletion(
     // 链式投喂：决定本轮发全量还是增量、parent 指向谁。判据在 context-feed.ts（纯函数）：
     // 模式=chained 且「复用了同一会话 + 条目严格追加 + 头部/账号都没变」才发增量，
     // 任何一条不满足都退回全量 + parent=null（= 0.1.61 及以前的行为）。
-    const planFeed = (sessionId: string, reused: boolean) =>
-      decideFeed({
+    const planFeed = (sessionId: string, reused: boolean) => {
+      /**
+       * 🔴 全量模式的父消息 id 只能来自**同一个**网页端会话的槽。
+       * 槽在换会话时已被替换（`leaseSession`）⇒ `slot.sessionId !== sessionId` 时这里拿到
+       * undefined，正确的行为就是发根消息（新会话本来就是空的）。
+       */
+      const slotForFeed = reuseSlots.get(slotKey)
+      const lastAssistantId =
+        slotForFeed && slotForFeed.sessionId === sessionId ? slotForFeed.lastAssistantId : undefined
+      return decideFeed({
         mode: currentContextMode(),
         ...(params.promptParts
           ? {
@@ -2982,8 +3074,10 @@ async function openCompletion(
         // 末尾预填只给"真的要模型产出工具调用"的请求（带结构化 prompt = chat）；
         // 内部请求（session-title / compaction）没有 entries，applyPrime 也会跳过。
         prime: Boolean(params.promptParts),
+        ...(typeof lastAssistantId === 'number' ? { lastAssistantId } : {}),
         ...(contextChains.get(slotKey) ? { chain: contextChains.get(slotKey)! } : {}),
       })
+    }
     let feed = planFeed(lease.sessionId, lease.reused)
     // 0.6.10：**重开链（parent=null）不能在"复用来的"会话里发根消息** —— 那会在同一个网页端
     // 会话里造出同一条消息的兄弟分支（网页端显示成「修改 / 重新生成」+ `n / n`），
@@ -3585,6 +3679,21 @@ export async function* streamWebCompletion(
       contextChains.delete(sentChainKey)
       if (lastChainKey === sentChainKey) lastChainKey = undefined
       persistResumeState() // 🔴 0.6.43
+    }
+    /**
+     * 🔴 2026-11-04：全量模式记住"这个会话里最后一条 assistant 的 message_id"。
+     *
+     * 下一轮 `decideFeed` 把 `parent_message_id` 指向它（而不是 null）⇒ 不会有根消息
+     * 落进已有内容的会话，网页端也就不会渲染成「修改 / 重新生成」+ `n / n`。
+     * 判据与链式记账同一套：流正常跑完、没被污染、真的拿到了 ready 帧的 id。
+     * ⚠️ 只记 `mode-full`：内部请求（no-parts）的槽是脚手架，跟用户的对话无关。
+     */
+    if (sentFeed?.reason === 'mode-full' && roundOk && !poisoned && typeof responseMessageId === 'number') {
+      const slot = reuseSlots.get(slotKey)
+      if (slot && slot.sessionId === sessionId) {
+        slot.lastAssistantId = responseMessageId
+        persistResumeState()
+      }
     }
     release?.()
   }

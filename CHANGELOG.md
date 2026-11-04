@@ -2,6 +2,39 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.3.6 — 2026-11-04（上一轮审计留下的 5 项风险，全部修掉）
+
+### 1. 全量模式不再往「已有内容的会话」里发根消息
+`parent_message_id: null` 落进非空会话 ⇒ 网页端渲染成「修改 / 重新生成」+ `n/n` 分叉。
+修法是给每个网页端会话记住**最后一条 assistant 的 message_id**（挂在 `SessionSlot` 上、随
+`resume-state.json` 落盘），全量模式派发时若有它就把它当 parent。
+**请求密度不变**（仍然复用会话），所以既没有分叉，也没有多建会话的代价。
+
+### 2. 「围栏里的举例调用不执行」——**实现后放弃，已回退**（诚实的失败记录）
+原本想做：` ```json ` / ` ```js ` 这类围栏里、且前文有"例如/示例"语气 ⇒ 当说明、不执行。
+实现后与**既有兜底路径**直接冲突：模型非常爱用 ```json 包**真调用**，任何"像举例"的判据都会把
+真调用吞掉（静默不执行、白跑一轮）；收紧到只拦明确举例又拦不住（举例语气词常常在 pending 里）。
+取舍：**宁可执行一次举例，也不要让真调用静默失效。**
+现状：围栏追踪器（`MarkdownFenceTracker`）与 `captureNonCallFence` 的各条分支都留着，
+`inNonCallFence` 恒返回 `false`；`check-call-prefix` 里有一条**「已知限制」**用例把这个现状钉住。
+
+### 3. 扁平参数只收 schema 声明过的键
+`parseToolCallJson` 的扁平分支原本"除 name/tool/id/type 之外全当参数"，会把 `meta` 这类信封字段
+也塞进 arguments。现在把**本轮下发的工具 schema** 一路传到解析处，扁平形态只保留**声明过的**键；
+schema 缺失 / 认不出 / 零参数 / 未知工具名 ⇒ 保持宽松（不丢参数、不丢调用）。
+
+### 4. `withLiveToken` 的两个静默行为
+- 读到**空 token**（页面还没就绪）原本也缓存 30 秒 ⇒ 自愈最多晚 30 秒；现在只缓存 2 秒。
+- 采纳成功但**落盘失败**原本被空 catch 吞掉；现在写一条 `diagnostics/live-token.jsonl` 留痕。
+
+### 5. 两处小边界
+- `readPageUserToken` 的 1.5s 超时定时器在 CDP 先返回时现在会 `clearTimeout`；
+- `openWebWindow` 记模块级 `lastWebWindowChild`：重复点击直接回 `alreadyOpen`，不再重复 spawn；
+  `clearBrowserLoginProfile` 会先把它杀掉（退出清理能收干净）。
+
+**用例**：`check-call-prefix` 16→25、`check-context-feed` 70→73、`check-session-reuse` 18→19、
+`check-live-token` 10→14、`check-browser-login` 18→19。每条都做过变异验证；未改动任何既有断言的意图。
+
 ## 2.3.5 — 2026-11-04（独立审计修掉的 6 个 bug）
 
 本轮由**独立审计**（子代理）过了一遍解析/投喂/传输三条主线，逐条修 + 逐条加用例，

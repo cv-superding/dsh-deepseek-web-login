@@ -103,6 +103,17 @@ export interface FeedInput {
   sessionId: string
   accountKey: string
   reused: boolean
+  /**
+   * 这个网页端会话里**最后一条 assistant 的 message_id**（全量模式用）。
+   *
+   * 🔴 2026-11-04：全量模式以前恒发 `parent_message_id: null`。一旦那条根消息落进一个
+   * **已经有内容**的会话，网页端就把它渲染成同一条消息的另一个版本
+   * （「修改 / 重新生成」+ `n / n`）。但全量模式又必须复用会话（请求密度是风控敏感项，
+   * 见 `check-session-reuse`）⇒ 不能靠"每轮换新会话"解决。
+   * 正确做法是把全量 prompt 挂在**上一条 assistant** 下面：没有分叉，也不多建会话。
+   * 只有会话真的是空的时候（没有这个 id）才发根消息。
+   */
+  lastAssistantId?: number
   /** 当前链（没有则 undefined）。 */
   chain?: ChainState
   /** serializePrompt 用的预算，用来给增量设一个上限。 */
@@ -204,14 +215,15 @@ export function needsFreshSession(
   allowRestartSwap: boolean = currentFreshSessionOnRestart(),
 ): boolean {
   /**
-   * 🔴 2026-11-03 改：**全量模式也要拦**。
+   * 🔴 2026-11-03 改：**全量模式也要拦** —— 但 2026-11-04 起它不需要走"换会话"这条路了。
    *
-   * 旧注释的理由是"全量模式每轮都是根消息，一律换会话会 +2 请求/轮"。但那个取舍换来的是
-   * **用户直接可见的坏形态**：根消息落进已有内容的会话 ⇒ 网页端渲染成「修改 / 重新生成」+ `n / n`。
-   * 正确性优先：宁可多建一个会话（会话清理会成批删），也不要把对话弄成分叉。
+   * 旧方案是"根消息落进已有内容的会话 ⇒ 换一个新会话"。那会每轮多建一个会话
+   * （`+2 请求/轮`），而请求密度本身就是风控敏感项。
+   * 现在 `decideFeed` 在全量模式下会把 `parent_message_id` 指向上一条 assistant
+   * （`FeedInput.lastAssistantId`）⇒ 只要会话非空，就**没有根消息**，这里自然不需要拦。
+   * 真的没有上一条 assistant（空会话/首轮失败）时发根消息是正确的，也不该换会话。
    *
-   * 全量模式仍然保留（面板可切），只是它现在**每轮一个干净会话** —— 语义上也更对：
-   * 我们的 prompt 本来就是全量，会话里不需要任何历史。
+   * 所以下面这条只在**链式模式**下仍然有效：重开链发根消息时是否换新会话。
    */
   if (mode !== 'chained' && !(feed.parentMessageId === null && reused)) return false
   // 0.6.18：没有结构化 parts 的请求（session-title / compaction 等）在链式模式下也走全量，
@@ -398,7 +410,19 @@ export function decideFeed(input: FeedInput): FeedDecision {
 
 function decideFeedInner(input: FeedInput): FeedDecision {
   const full = input.full
-  if (input.mode !== 'chained') return { prompt: full, parentMessageId: null, next: undefined, reason: 'mode-full' }
+  if (input.mode !== 'chained') {
+    /**
+     * 🔴 全量模式也**不再往已有内容的会话里发根消息**（2026-11-04）。
+     *
+     * `parentMessageId: null` 只在"这个会话确实是空的"时成立 —— 也就是拿不到
+     * `lastAssistantId` 的时候。有它就必须挂上去：会话复用保持不变（请求密度不变），
+     * 网页端也不会渲染出「修改 / 重新生成」+ `n / n`。
+     * 判据里带 `reused`：新会话（reused=false）本来就没有历史，id 也不该来自别的会话。
+     */
+    const parentMessageId =
+      input.reused && typeof input.lastAssistantId === 'number' ? input.lastAssistantId : null
+    return { prompt: full, parentMessageId, next: undefined, reason: 'mode-full' }
+  }
 
   const head = input.head
   const entries = input.entries

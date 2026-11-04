@@ -394,6 +394,20 @@ async function cdpJson(port: number, endpoint: '/json/version' | '/json/list', s
  */
 /** R7：本插件最近一次拉起的浏览器子进程（clearBrowserLoginProfile 清理失败时杀它重试）。 */
 let lastSpawnedChild: ChildProcess | undefined
+/**
+ * `openWebWindow` 拉起的网页版窗口（2026-11-04）。
+ *
+ * 为什么要单独记：那个窗口是 `detached: true` 的，不记引用就**没人能杀它**
+ * （退出/清 profile 时 `lastSpawnedChild` 可能指向别的进程）。
+ * 同时用它挡住重复点击：同一个 profile 再点一次不再 spawn 第二个标签页/实例，
+ * 直接回报"已打开"。
+ */
+let lastWebWindowChild: ChildProcess | undefined
+
+/** 这个子进程还活着吗（`killed` 之后 exitCode 可能暂时仍是 null）。 */
+function childAlive(child: ChildProcess | undefined): child is ChildProcess {
+  return !!child && child.exitCode === null && child.signalCode === null && child.killed !== true
+}
 
 export function isDeepSeekPage(target: any): boolean {
   try {
@@ -745,23 +759,43 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
  * ⚠️ 与传输层用的 `transport-profile` 是**两个目录**（见 browser-transport 的 PROFILE_DIR）⇒
  * 这里开有头窗口不会和后台那个无头实例抢锁。
  */
-export async function openWebWindow(options: { profileDir?: string; url?: string } = {}): Promise<{
+export interface OpenWebWindowOptions {
+  profileDir?: string
+  url?: string
+  /** 只给测试用：替换浏览器探测（离线用例不许真启浏览器）。 */
+  browser?: BrowserCandidate
+  /** 只给测试用：替换 spawn（离线用例不许真启浏览器）。 */
+  spawnBrowser?: (path: string, args: string[]) => ChildProcess
+}
+
+export async function openWebWindow(options: OpenWebWindowOptions = {}): Promise<{
   ok: boolean
   error?: string
   browser?: string
+  /** true = 上一次打开的那个窗口还活着，本次没有再 spawn（重复点击）。 */
+  alreadyOpen?: boolean
 }> {
-  const browser = findSystemBrowser()
+  const browser = options.browser ?? findSystemBrowser()
   if (!browser) return { ok: false, error: '没找到系统浏览器（Edge/Chrome）' }
+  /**
+   * 🔴 重复点击不许再 spawn：同一 profile 再开一次会让网页端多出标签页/实例，
+   * 而那个进程又不在 `lastSpawnedChild` 里 ⇒ 退出清理杀不掉。
+   */
+  if (childAlive(lastWebWindowChild)) return { ok: true, browser: browser.path, alreadyOpen: true }
   const profileDir = options.profileDir ?? DEFAULT_PROFILE_DIR
+  const args = buildBrowserArgs(profileDir, options.url ?? `${DS_BASE}/`)
   let child: ChildProcess
   try {
-    child = spawn(browser.path, buildBrowserArgs(profileDir, options.url ?? `${DS_BASE}/`), {
-      detached: true,
-      stdio: 'ignore',
-    })
+    child =
+      options.spawnBrowser?.(browser.path, args) ??
+      spawn(browser.path, args, {
+        detached: true,
+        stdio: 'ignore',
+      })
   } catch (error: any) {
     return { ok: false, error: String(error?.message ?? error) }
   }
+  lastWebWindowChild = child
   /**
    * ⚠️ spawn 的失败大多是**异步**到达的（ENOENT / EACCES / 被安全软件拦截）。
    * 不挂 'error' 监听时它不是被 catch 接住，而是变成**未捕获异常** —— 会把整个 DSH 宿主
@@ -777,6 +811,7 @@ export async function openWebWindow(options: { profileDir?: string; url?: string
     try {
       child.kill()
     } catch {}
+    if (lastWebWindowChild === child) lastWebWindowChild = undefined
     return { ok: false, error: `启动 ${browser.name} 失败：${spawnError.message}` }
   }
   child.unref()
@@ -784,6 +819,17 @@ export async function openWebWindow(options: { profileDir?: string; url?: string
 }
 
 export function clearBrowserLoginProfile(profileDir = DEFAULT_PROFILE_DIR): boolean {
+  /**
+   * ⚠️ 网页版窗口（`openWebWindow` 拉起的那个）用的是**同一个** profile 目录：
+   * 不先杀掉它，Windows 上 `rmSync` 必 EBUSY（连带登录态清不掉），其他平台上则会
+   * "清完了但那个窗口还开着"。所以**无条件先杀**，再清目录。
+   */
+  try {
+    lastWebWindowChild?.kill()
+  } catch {
+    /* 没有可杀的进程就算了 */
+  }
+  lastWebWindowChild = undefined
   try {
     rmSync(profileDir, { recursive: true, force: true })
     return true

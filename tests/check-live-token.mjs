@@ -13,19 +13,37 @@
  * 用法: node tests/check-live-token.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-live-token-'))
 
-const { decideLiveToken, freshAuthFailure } = await import('../src/webapi.ts')
+const {
+  decideLiveToken,
+  freshAuthFailure,
+  liveTokenCacheTtl,
+  liveTokenDiagnosticsPath,
+  resetLiveTokenCacheForTest,
+  withLiveToken,
+} = await import('../src/webapi.ts')
 
 let passed = 0
 const failures = []
 function test(name, fn) {
   try {
     fn()
+    passed += 1
+    console.log(`  ✓ ${name}`)
+  } catch (error) {
+    failures.push(`${name}: ${error.message}`)
+    console.log(`  ✗ ${name}\n      ${error.message}`)
+  }
+}
+
+async function testAsync(name, fn) {
+  try {
+    await fn()
     passed += 1
     console.log(`  ✓ ${name}`)
   } catch (error) {
@@ -118,6 +136,85 @@ test('宿主真的先自愈、再快速失败（顺序反了会把能自愈的�
   const failAt = src.indexOf('freshAuthFailure(record)')
   assert.ok(healAt > 0, '没接 withLiveToken')
   assert.ok(failAt > healAt, 'withLiveToken 必须在快速失败之前')
+})
+
+// ── 2026-11-04：withLiveToken 的两个静默行为 ────────────────────────────────
+
+console.log('页面 token 的缓存与留痕')
+
+test('缓存时长：读到空 token 只缓存 2s，别的号干脆不缓存', () => {
+  assert.ok(liveTokenCacheTtl({ adopt: false, reason: 'too-short' }) <= 2_000)
+  assert.equal(liveTokenCacheTtl({ adopt: false, reason: 'other-account' }), 0)
+  assert.ok(liveTokenCacheTtl({ adopt: true }) >= 30_000)
+})
+
+await testAsync('★ 页面还没就绪（空 token）⇒ 3 秒后必须重新读并自愈，别等 30 秒', async () => {
+  resetLiveTokenCacheForTest()
+  let now = 1_000_000
+  let reads = 0
+  const deps = {
+    readPageToken: async () => (++reads === 1 ? '' : PAGE),
+    listAccounts: () => [{ id: 'A', token: STORED }],
+    updateAccount: () => {},
+    now: () => now,
+  }
+  const first = await withLiveToken({ token: STORED }, deps)
+  assert.equal(first.token, STORED, '第一次页面还没就绪，只能用手里那份')
+  now += 1_000
+  assert.equal((await withLiveToken({ token: STORED }, deps)).token, STORED, '2s 内仍用短缓存（别每个请求都读 CDP）')
+  now += 2_000
+  assert.equal(
+    (await withLiveToken({ token: STORED }, deps)).token,
+    PAGE,
+    '★ 空 token 被缓存了 30s ⇒ 页面就绪后还得再等 27 秒才自愈',
+  )
+})
+
+await testAsync('★ 采纳 token 落盘失败必须留痕（旧实现空 catch 吞掉）', async () => {
+  resetLiveTokenCacheForTest()
+  const file = liveTokenDiagnosticsPath()
+  rmSync(file, { force: true })
+  const out = await withLiveToken(
+    { token: STORED },
+    {
+      readPageToken: async () => PAGE,
+      listAccounts: () => [{ id: 'A', token: STORED }],
+      updateAccount: () => {
+        throw new Error('EACCES: read-only')
+      },
+      now: () => 2_000_000,
+    },
+  )
+  assert.equal(out.token, PAGE, '落盘失败不影响本次请求')
+  assert.ok(existsSync(file), '落盘失败没有留痕 ⇒ 下次启动仍用旧 token 且无从排查')
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /persist-failed/)
+  assert.match(text, /EACCES/)
+})
+
+await testAsync('★ readPageUserToken：CDP 先返回时要清掉超时定时器', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let target
+  let cleared = false
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    const timer = realSetTimeout(fn, ms, ...rest)
+    if (ms === 50) target = timer
+    return timer
+  }
+  globalThis.clearTimeout = (timer) => {
+    if (timer === target) cleared = true
+    return realClearTimeout(timer)
+  }
+  try {
+    const { readPageUserToken } = await import('../src/browser-transport.ts')
+    // 没有传输层会话 ⇒ readTransportPageState 立刻返回 null，走 Promise.race 的"CDP 先返回"分支
+    assert.equal(await readPageUserToken(50), '')
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+  assert.ok(cleared, '★ CDP 先返回后没有 clearTimeout（旧实现只靠 unref 兜着）')
 })
 
 if (failures.length) {

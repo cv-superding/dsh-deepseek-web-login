@@ -18,8 +18,10 @@
  * 用法: node tests/check-browser-login.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
-import { buildBrowserArgs, transportExtraArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders, openWebWindow } from '../src/browser-login.ts'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { buildBrowserArgs, transportExtraArgs, buildCookieHeader, findSystemBrowser, parseDevToolsActivePort, pickExtraHeaders, openWebWindow, clearBrowserLoginProfile } from '../src/browser-login.ts'
 import { canOpenElectronWindowWith } from '../src/login.ts'
 import { unwrapStoredToken } from '../src/auth.ts'
 
@@ -28,6 +30,15 @@ const failures = []
 function test(name, fn) {
   try {
     fn()
+    passed += 1
+  } catch (error) {
+    failures.push(`x ${name}: ${error?.message ?? error}`)
+  }
+}
+
+async function testAsync(name, fn) {
+  try {
+    await fn()
     passed += 1
   } catch (error) {
     failures.push(`x ${name}: ${error?.message ?? error}`)
@@ -203,6 +214,51 @@ test('openWebWindow：spawn 的异步错误必须被接住（ENOENT 不许带崩
   const block = src.slice(from, to)
   assert.ok(block.includes("child.on('error'"), '没有 error 监听 ⇒ 异步 spawn 失败会变成未捕获异常')
   assert.ok(block.includes('spawnError'), '没有把异步失败收集起来如实回报')
+})
+
+// ── 2026-11-04：openWebWindow 的重复点击与退出清理 ──────────────────────────
+// 现场：连点两下「打开网页版」⇒ 同一 profile 起两个标签页/实例；而且那个子进程
+// 没有模块级引用 ⇒ 退出/清 profile 时谁也杀不掉它。
+
+function fakeChild() {
+  return {
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    on() {
+      return this
+    },
+    unref() {},
+    kill() {
+      this.killed = true
+      this.exitCode = 0
+    },
+  }
+}
+
+await testAsync('★ 重复点击不重复 spawn：第二次直接回 alreadyOpen，退出清理能杀掉那个窗口', async () => {
+  const profileDir = join(mkdtempSync(join(tmpdir(), 'dsh-open-web-')), 'profile')
+  const children = []
+  let spawns = 0
+  const options = {
+    profileDir,
+    browser: { name: 'Fake', path: 'F:/fake/browser.exe' },
+    spawnBrowser: () => {
+      spawns += 1
+      const child = fakeChild()
+      children.push(child)
+      return child
+    },
+  }
+  const first = await openWebWindow(options)
+  assert.equal(first.ok, true, `第一次应该打开：${JSON.stringify(first)}`)
+  const second = await openWebWindow(options)
+  assert.equal(spawns, 1, '★ 重复点击又 spawn 了一个：同一 profile 会多开标签页，而且旧进程没人记账')
+  assert.equal(second.ok, true)
+  assert.equal(second.alreadyOpen, true, '第二次必须如实回报"已打开"')
+  // 退出/清登录态：必须能杀掉它（旧实现只记 browserLogin 那个 lastSpawnedChild）
+  assert.equal(clearBrowserLoginProfile(profileDir), true)
+  assert.equal(children[0].killed, true, '★ 退出清理没杀掉 openWebWindow 拉起的窗口')
 })
 
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)

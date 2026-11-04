@@ -46,6 +46,10 @@ async function test(name, fn) {
 }
 
 const SSE_OK = 'data: {"v":{"response":{"content":"hi"}}}\n\ndata: [DONE]\n\n'
+/** 带首帧 `event: ready` 的流 —— 全量模式要靠它记住"最后一条 assistant 的 id"。 */
+const SSE_READY =
+  'event: ready\ndata: {"request_message_id":1,"response_message_id":7}\n\n' +
+  'data: {"v":{"response":{"content":"hi"}}}\n\ndata: [DONE]\n\n'
 const SSE_HEADERS = { 'content-type': 'text/event-stream; charset=utf-8' }
 
 /** 假 transport：记录建了几个会话。 */
@@ -139,6 +143,38 @@ await test('复用时不产生删除请求（旧行为是每轮建一个立刻�
   // 自证：必须真的跑通并产出正文，否则"没删"只是因为压根没执行
   assert.equal(r.text, 'hi', '用例必须真的走到流结束（自证）')
   assert.deepEqual(r.deleted, [], `复用模式下不该回收当前会话，实际: ${JSON.stringify(r.deleted)}`)
+})
+
+await test('★ 全量模式：复用同一会话时，第二轮 parent 指向上一条 assistant（不发根消息）', async () => {
+  resetSessionReuse()
+  const { created, transport } = mkTransport()
+  const bodies = []
+  setFetchImpl(async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body ?? '{}')))
+    return new Response(SSE_READY, { status: 200, headers: SSE_HEADERS })
+  })
+  for (let i = 0; i < 2; i += 1) {
+    for await (const _ of streamWebCompletion(
+      authA,
+      {
+        prompt: 'P',
+        thinkingEnabled: false,
+        modelType: 'default',
+        idleTimeoutMs: 5_000,
+        promptParts: CHAT_PARTS,
+        onDeleteSession: () => {},
+      },
+      transport,
+    )) void _
+  }
+  assert.equal(created.length, 1, '全量模式仍然复用同一个会话（请求密度不能变）')
+  assert.equal(bodies.length, 2)
+  assert.equal(bodies[0].parent_message_id, null, '空会话的第一轮是根消息')
+  assert.equal(
+    bodies[1].parent_message_id,
+    7,
+    '★ 第二轮必须挂到上一条 assistant 下面；parent=null ⇒ 网页端「修改 / 重新生成」分叉',
+  )
 })
 
 await test('到达轮次上限后轮换：建新会话，并把旧的交出来回收', async () => {
