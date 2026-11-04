@@ -27,6 +27,7 @@ const {
   resetLiveTokenCacheForTest,
   withLiveToken,
 } = await import('../src/webapi.ts')
+const { isLoggedOutUrl } = await import('../src/browser-transport.ts')
 
 let passed = 0
 const failures = []
@@ -215,6 +216,13 @@ await testAsync('★ readPageUserToken：CDP 先返回时要清掉超时定时�
     globalThis.clearTimeout = realClearTimeout
   }
   assert.ok(cleared, '★ CDP 先返回后没有 clearTimeout（旧实现只靠 unref 兜着）')
+})
+
+await test('🔴 传输层页面被踢到登录页 ⇒ 必须判成"已登出"（用户实测卡 4 分 53 秒）', () => {
+  assert.equal(isLoggedOutUrl('https://chat.deepseek.com/sign_in'), true)
+  assert.equal(isLoggedOutUrl('https://chat.deepseek.com/sign_in?redirect=%2F'), true)
+  assert.equal(isLoggedOutUrl('https://chat.deepseek.com/a/chat/s/abc'), false)
+  assert.equal(isLoggedOutUrl(''), false, '读不到 URL 时不许判登出（会误伤）')
 })
 
 if (failures.length) {

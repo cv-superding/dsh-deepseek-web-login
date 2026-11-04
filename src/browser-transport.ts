@@ -810,6 +810,33 @@ export async function readTransportPageState(): Promise<PageObservation | null> 
  * （`pageSessionFromHeaders(rawHeaders)`）。心跳里再去取账号等于多开一条凭据通路，
  * 还得处理"取到的是哪个号"。作废签名最省、也最不容易写错。
  */
+/**
+ * 传输层页面**是否已登出**（站点把我们踢到 `/sign_in` / `/login`）。
+ *
+ * 🔴 2026-11-04 用户实测：页面停在 `chat.deepseek.com/sign_in`（"登录信息已失效，请重新登录"），
+ * 请求照样发出去 —— 打在一个**匿名页面**上，站点既不回数据也不关连接，我们一路等到超时，
+ * 界面上就是"深度求索中，用时 4 分 53 秒"，而且账号看起来一直掉。
+ * 判据只用 `location.href`（本地 CDP，不发网络请求）；读不到就返回 `false`（按"没登出"处理，
+ * 不能因为探针失败把人挡住）。
+ */
+export async function transportPageLoggedOut(timeoutMs = 1_500): Promise<boolean> {
+  const state = await Promise.race([
+    readTransportPageState().catch(() => null),
+    new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs)
+      ;(timer as any).unref?.()
+    }),
+  ])
+  if (!state) return false
+  return isLoggedOutUrl(String(state.url ?? ''))
+}
+
+/** 纯函数版判据（便于单测）：URL 落在登录页就说明站点已把我们踢出去。 */
+export function isLoggedOutUrl(url: string): boolean {
+  if (!url) return false
+  return /\/(sign_in|signin|login|sign_up)\b/i.test(url)
+}
+
 export function markTransportPageSessionStale(): void {
   const session = activeSession
   if (!session) return

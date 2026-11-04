@@ -34,7 +34,7 @@ import {
 // 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
 import { currentContextMode, decideFeed, effectiveReuseLimit, firstDifference, needsFreshSession, type ChainState, type FeedDecision, type FeedReason } from './context-feed.ts'
 // 🔴 0.6.42：PoW 改在浏览器页面内求解（见 `solvePow`）。
-import { readPageUserToken, solvePowInPage, systemBrowserAvailable } from './browser-transport.ts'
+import { readPageUserToken, solvePowInPage, systemBrowserAvailable, transportPageLoggedOut } from './browser-transport.ts'
 import { listAccounts, updateAccount } from './accounts.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
@@ -3382,6 +3382,19 @@ export async function* streamWebCompletion(
    * （2026-11-04：掉号自愈被快速失败挡在门外，表现就是明明能自愈却一直报 AUTH）。
    */
   auth = await withLiveToken(auth)
+  /**
+   * 🔴 页面已经登出（站点把传输层踢到 `/sign_in`）⇒ **立刻报错**，别再发。
+   *
+   * 2026-11-04 用户实测：这种状态下请求发出去，站点不回数据也不关连接，
+   * 界面卡"深度求索中，用时 4 分 53 秒"，用户还以为是我们把节奏调太慢了。
+   * 判据是本地读 `location.href`（不发网络请求）；读不到当"没登出"，不误伤。
+   */
+  if (await transportPageLoggedOut().catch(() => false)) {
+    throw new AdapterLlmError(
+      '传输层页面已登出（站点提示"登录信息已失效"）—— 点账号行的「网页版」在弹出窗口里重新登录，完了关掉窗口再重试；或直接换一个号',
+      'AUTH',
+    )
+  }
   /**
    * 🔴 请求前快速失败：如果探活/校验**刚刚**判定这份 token 失效（`lastVerifyError` 且 < 2 分钟），
    * 直接抛 AUTH —— 不要再走一遍建会话/PoW/SSE。

@@ -721,6 +721,94 @@ function Panel(): any {
       ),
     )
 
+    /**
+     * 一键重登（2026-11-04 用户要求："重登还得重敲账号密码，太麻烦"）。
+     *
+     * 走的是 `browserLogin({credentials})` —— 密码在**页面上下文**里填，不在 Node 侧发
+     * （直连登录接口会被判 RISK_DEVICE_DETECTED）。勾了"记住密码"才在本机明文存一份
+     * （`~/.dsh/web-login/credentials.json`，0600），不写进账号记录、不参与导出。
+     */
+    const credMsg = el('p', 'dsw-hint', '')
+    const credBox = el('div', 'dsw-row')
+    credBox.style.marginTop = '10px'
+    const emailInput = el('input', 'dsw-input') as HTMLInputElement
+    emailInput.type = 'text'
+    emailInput.placeholder = '邮箱 / 手机号'
+    emailInput.autocomplete = 'username'
+    const passInput = el('input', 'dsw-input') as HTMLInputElement
+    passInput.type = 'password'
+    passInput.placeholder = '密码'
+    passInput.autocomplete = 'current-password'
+    const rememberWrap = el('label', 'dsw-hint')
+    const rememberInput = el('input') as HTMLInputElement
+    rememberInput.type = 'checkbox'
+    rememberWrap.append(rememberInput, el('span', undefined, ' 记住密码（本机明文）'))
+    const autoLoginBtn = el('button', 'dsw-btn ghost', '用密码自动登录') as HTMLButtonElement
+    const useSavedBtn = el('button', 'dsw-btn ghost', '用已保存密码重登') as HTMLButtonElement
+    credBox.append(emailInput, passInput, rememberWrap, autoLoginBtn, useSavedBtn)
+    loginCard.append(credBox, credMsg)
+    loginCard.append(
+      el(
+        'p',
+        'dsw-hint',
+        '「用密码自动登录」= 在插件自己的窗口里自动填表提交（页面上下文，避开风控），不必手敲验证码流程之外的东西。' +
+          '「用已保存密码重登」= 掉号后一键恢复；密码是本机明文存的，只在勾选后写入，可随时清除。',
+      ),
+    )
+
+    const runAutoLogin = async (payload: Record<string, unknown>, btn: HTMLButtonElement): Promise<void> => {
+      btn.disabled = true
+      const original = btn.textContent
+      btn.textContent = '登录中…'
+      try {
+        const result = await api('/login/browser', { method: 'POST', body: JSON.stringify(payload) })
+        if (result?.started === false) {
+          credMsg.textContent = `登录窗口打不开：${result?.reason ?? '未知原因'}`
+          return
+        }
+        credMsg.textContent = result?.autoLoginError
+          ? `自动登录没成功（${result.autoLoginError}），请在弹出的窗口里手动登录`
+          : '登录成功，凭证已捕获'
+        await refresh(false).catch(() => undefined)
+        await syncSavedState()
+      } catch (error: any) {
+        credMsg.textContent = `登录失败：${error?.message ?? error}`
+      } finally {
+        btn.disabled = false
+        btn.textContent = original
+      }
+    }
+
+    autoLoginBtn.addEventListener('click', () => {
+      const email = emailInput.value.trim()
+      const password = passInput.value
+      if (!email || !password) {
+        credMsg.textContent = '先填邮箱和密码（或用「用已保存密码重登」）'
+        return
+      }
+      void runAutoLogin({ credentials: { email, password }, remember: rememberInput.checked }, autoLoginBtn)
+    })
+
+    useSavedBtn.addEventListener('click', () => {
+      void runAutoLogin({ useSaved: true }, useSavedBtn)
+    })
+
+    // 有没有存过密码：没存过就别给"用已保存密码重登"制造错误期待
+    const syncSavedState = async (): Promise<void> => {
+      try {
+        const light = await api('/status?light=1')
+        const saved = Boolean(light?.hasSavedCredential)
+        useSavedBtn.disabled = !saved
+        useSavedBtn.title = saved
+          ? '用本机保存的邮箱/密码一键重登（页面上下文自动填表）'
+          : '本机还没保存过密码：先填一次并勾选「记住密码」'
+      } catch {
+        useSavedBtn.disabled = true
+      }
+    }
+    void syncSavedState()
+
+
     // ── 账号库：多账号并存 + 一键切换 ────────────────────────────────
     // 为什么值得有：以前换号的代价是「退出 → 清浏览器分区 → 重新登录 → 等捕获」，
     // 期间原来的号也回不去了。现在保存过的账号都在库里，切换即时生效。

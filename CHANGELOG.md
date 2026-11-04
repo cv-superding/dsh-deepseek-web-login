@@ -2,6 +2,35 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.4.0 — 2026-11-04（掉号不再干等；重登不再手输密码）
+
+用户实测两件最痛的事：账号掉线后 DSH 卡"深度求索中"四五分钟没有报错；每次重登都要重敲
+邮箱密码。这两件都在这一版解决。
+
+### 1. 页面已登出 ⇒ 请求前**立刻**失败（不再空等）
+诊断依据（用户三张截图）：传输层页面停在 `chat.deepseek.com/sign_in`（"登录信息已失效"），
+而请求照样发出去 —— 打在一个**匿名页面**上，站点不回数据也不关连接，
+界面就一直是"深度求索中，用时 4 分 53 秒"。
+- 新增 `transportPageLoggedOut()` / `isLoggedOutUrl()`（`src/browser-transport.ts`）：
+  请求前用**纯本地 CDP** 读 `location.href`（不发网络请求，1.5s 硬超时）；
+- 判据命中 ⇒ 抛 AUTH，文案直接给操作步骤（点「网页版」重登 / 换号）；
+- 读不到 URL ⇒ 当"没登出"（不误伤）。
+
+### 2. 记住密码 + 一键重登
+- 新增 `src/credentials.ts`：`~/.dsh/web-login/credentials.json`，**明文**、`0600`、原子写；
+  按**账号 id + 邮箱**双键存（账号删了重建、id 变了，靠邮箱仍能找回）；
+  删除时两条一起删，另有 `clearAllCredentials()`。
+- `/login/browser` 三种输入：`credentials`（面板手填）/ `useSaved: true`（读本机）/ 都没有（原手动窗口）；
+  `remember: true` 且登录**成功**才保存。登录仍在**页面上下文**里做
+  （`browserLogin({credentials})`，直连登录接口会被判 `RISK_DEVICE_DETECTED`）。
+- `/status` 增加 `hasSavedCredential`（**只报布尔**，不吐凭据）；新增 `POST /credentials/clear`。
+- 面板登录卡：邮箱 / 密码 / ☑ 记住密码（本机明文）+「用密码自动登录」「用已保存密码重登」
+  （没存过时后者置灰并说明原因）。
+
+**用例**：新增 `tests/check-credentials.mjs`（7 项：存取 / 空值不写 / 0600 / id 变了按邮箱找回 /
+删除两条 / 清空文件 / 只存三字段）；`check-live-token` 10→15（登出判据，含"读不到 URL 不许判登出"）。
+写用例时当场抓到一个真 bug：`clearCredential` 先删 key 再读 email ⇒ 邮箱那条残留，等于没删。
+
 ## 2.3.9 — 2026-11-04（提示词瘦身：目录 + 协议 + 签名；剥站点安全块）
 
 用户实测首屏两万五千字符、模型还往 DSML 漂。逐段量了之后按"谁产生的谁负责"处理 ——
