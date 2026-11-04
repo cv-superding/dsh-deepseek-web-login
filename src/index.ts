@@ -1565,11 +1565,19 @@ export function apply(ctx: any, config: Config = {}): void {
             }
             if (req.method === 'POST' && route === '/open-web') {
               /**
-               * 打开网页版（看网页端聊天记录）。
-               * 只对**当前账号**有意义：窗口用的是登录时那个 profile 分区，
-               * 换号要重登才会换分区（所以面板上只给当前账号显示这个按钮）。
+               * 🔴 打开**传输层那个分区**（`transport-profile`），不是登录用的 `browser-profile`。
+               *
+               * 为什么改（2026-11-04 用户实测）：点开的是 `browser-profile`，页面停在 `sign_in` ——
+               * 那个分区本来就没登录过（账号是靠 Chrome 捕获的），而发请求、需要过人机验证的是
+               * **传输层**那个分区。开错了分区，用户面对一个空白登录页，根本没法过验证。
+               *
+               * 所以：① 先把无头传输关掉（让出 profile 锁，否则新窗口只会把 URL 转发给无头实例、
+               * 用户什么也看不到）；② 用同一个 profile 开**可见**窗口 —— 用户在里面登录/过验证，
+               * 会话就落在传输层自己的分区里，下次请求直接用上。
                */
-              const opened = await openWebWindow()
+              const transportDir = join(webLoginDir(), 'transport-profile')
+              await shutdownBrowserTransport().catch(() => {})
+              const opened = await openWebWindow({ profileDir: transportDir })
               sendJson(res, opened.ok ? 200 : 500, opened)
               return
             }

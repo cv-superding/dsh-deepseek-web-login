@@ -97,6 +97,18 @@ test('🔴 每个 pane 都必须真的被填进内容（"建了不挂" = 整页�
   }
 })
 
+test('🔴 网页版按钮必须打开**传输层**分区（不是登录用的 browser-profile）', () => {
+  // 2026-11-04 用户实测：点开的是 browser-profile，页面停在 sign_in —— 那个分区没登录过，
+  // 而发请求、要过人机验证的是 transport-profile。开错分区等于给用户一个空白登录页。
+  // 路由在**主机侧**（src/index.ts），不在客户端源码里
+  const host = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const at = host.indexOf("route === '/open-web'")
+  assert.ok(at > 0, '/open-web 路由不见了')
+  const route = host.slice(at, at + 900)
+  assert.ok(route.includes('transport-profile'), '必须用 transport-profile 开窗口')
+  assert.ok(route.includes('shutdownBrowserTransport'), '必须先关掉无头传输，否则 URL 会被转发给无头实例（用户看不到）')
+})
+
 if (failures.length) {
   for (const f of failures) console.log('  ' + f)
   console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`)

@@ -1113,13 +1113,21 @@ function Panel(): any {
          * 只给**当前账号**显示 —— 窗口用的是登录时那个 profile 分区，别的号切不过去（会撒谎）。
          */
         const webBtn = el('button', 'dsw-btn ghost dsw-preset', '网页版') as HTMLButtonElement
-        webBtn.title = '用当前账号的登录态打开 chat.deepseek.com（看网页端的聊天记录）'
+        webBtn.title =
+          '打开传输层那个浏览器分区（真正发请求的那个）：能看网页端聊天记录，也能在里面过人机验证/重新登录'
         webBtn.addEventListener('click', () => {
           void (async () => {
             webBtn.disabled = true
             try {
               const result = await api('/open-web', { method: 'POST', body: '{}' })
-              if (result?.ok) paintRowMsg(item.id, '✅ 已用该账号的登录态打开网页版', 'ok')
+              if (result?.ok)
+                paintRowMsg(
+                  item.id,
+                  result?.alreadyOpen
+                    ? '✅ 窗口已开着（同一个分区），直接在里面操作即可'
+                    : '✅ 已打开传输层窗口：在里面登录 / 过人机验证，完了回 DSH 重试',
+                  'ok',
+                )
               else paintRowMsg(item.id, `❌ 打不开：${result?.error ?? '未知原因'}`, 'err')
             } catch (error: any) {
               paintRowMsg(item.id, `❌ 打不开：${error?.message ?? error}`, 'err')
