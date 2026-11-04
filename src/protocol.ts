@@ -88,7 +88,29 @@ export interface FilterOutput {
  * `workflow` 的 2500 字符里是 agent() / pipeline() / parallel() 的钩子签名。
  * 把它们砍掉，模型一遇错就只能瞎猜 —— 实测这两个工具正是 rejected.jsonl 里失败最多的。
  */
-const MAX_DESCRIPTION_CHARS = 3_200
+/**
+ * 🔴 2026-11-04（用户实测：首屏仍然太长）：**紧凑工具目录**（默认开）。
+ *
+ * 现实：宿主给的单个工具描述能到**两千字符**（shell 那个工具把沙箱规则、命名管道、
+ * ConstrainedLanguage 全写了进去）。我们原来逐字照发、上限 3,200 —— 十个核心工具就是一万多字符，
+ * 比协议本身大四倍。
+ *
+ * 紧凑模式只保留「这工具干什么」的一句话；参数只留名字与类型（签名行里已经有了）。
+ * 长解释在工具报错/结果里会再出现，不必每轮预支。
+ * 开关：`DSH_WEB_LOGIN_COMPACT_TOOLS=0` 关掉（回到逐字照发）。
+ */
+/**
+ * ⚠️ **必须每次读环境变量**，不能在模块加载时定成常量：ESM 的 import 会在模块体之前求值，
+ * 用例文件里 `process.env.… = '0'` 永远晚一步 ⇒ 测试测不到另一档（2026-11-04 踩过）。
+ */
+function compactTools(): boolean {
+  return String(process.env.DSH_WEB_LOGIN_COMPACT_TOOLS ?? '').trim() !== '0'
+}
+
+/** 工具级描述上限：紧凑 220（一句话），详细 3,200（宿主原文照发）。 */
+function descriptionLimit(): number {
+  return compactTools() ? 220 : 3_200
+}
 
 /**
  * 「核心工具」白名单 —— 只有它们值得在**每轮上下文**里都带上完整描述。
@@ -148,7 +170,8 @@ function tailSentence(text: string): string {
  * 让模型知道有这个工具、但不会照着残缺签名瞎传参（它会被兜底文案要求去问用户）。
  */
 function formatTailTool(tool: ToolSchemaLike): string {
-  const sentence = tailSentence(String(tool.description ?? ''))
+  // 紧凑模式：长尾描述同样受 220 上限管 —— 否则一句两万字的描述（宿主真给得出来）照样把目录撑爆
+  const sentence = truncate(tailSentence(String(tool.description ?? '')), descriptionLimit())
   const signature = buildToolSignature(tool, false)
   if (signature === null) return `\`${tool.name}\` — ${sentence}`
   return `\`${signature.replace(/\s+/g, ' ').trim()}\` — ${sentence}`
@@ -342,7 +365,13 @@ function truncate(text: string, max: number): string {
  * 参数描述是锦上添花：第 160 字符之后通常是举例或边角说明（`path` 这类参数压根没有），
  * 砍掉它比砍掉工具级描述划算得多 —— 工具级描述里藏的是「遇错怎么办」。
  */
-const MAX_PARAM_DESC_CHARS = 160
+/**
+ * 参数说明上限：紧凑 0（不发），详细 160。
+ * 名字与类型在签名行里已经有了，参数说明只是散文。
+ */
+function paramDescLimit(): number {
+  return compactTools() ? 0 : 160
+}
 
 /** 嵌套展开的深度上限：异常 schema（自引用、深层嵌套）不该把工具目录撑爆。 */
 const MAX_SIGNATURE_DEPTH = 4
@@ -498,10 +527,12 @@ export function buildToolSignature(tool: ToolSchemaLike, withParamDocs = true): 
 
     const lines = [`${tool.name}(${args.join(', ')})`]
     // 长尾工具不带参数说明（`withParamDocs=false`）—— 那是它们体积的另一半。
-    if (withParamDocs) {
+    // 紧凑模式上限为 0 ⇒ 一行参数说明都不发（名字 + 类型在签名行里）
+    const limit = paramDescLimit()
+    if (withParamDocs && limit > 0) {
       for (const [name, def] of Object.entries(map)) {
         const description = paramDescription(def)
-        if (description) lines.push(`  ${name}: ${truncate(description, MAX_PARAM_DESC_CHARS)}`)
+        if (description) lines.push(`  ${name}: ${truncate(description, limit)}`)
       }
     }
     return lines.join('\n')
@@ -582,7 +613,7 @@ export function buildToolSection(
     const block = [
       '',
       `### ${tool.name}`,
-      truncate(String(tool.description ?? '').replace(/\s+/g, ' ').trim(), MAX_DESCRIPTION_CHARS),
+      truncate(String(tool.description ?? '').replace(/\s+/g, ' ').trim(), descriptionLimit()),
       parametersText,
     ].join('\n')
     if (budget - block.length < 0) {
