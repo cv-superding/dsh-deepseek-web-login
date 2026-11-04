@@ -24,6 +24,8 @@ const {
   parseXmlToolCalls,
   stripResidualDsml,
   stripDoCalls,
+  stripSkillsCatalog,
+  serializePromptParts,
   serializePrompt,
   collectToolParamNames,
   TOOL_PROTOCOL_INSTRUCTIONS,
@@ -306,6 +308,68 @@ await test('★ 坏掉的 DSML 块（有 parameter 标签但解析不出参数�
     !write || JSON.parse(write.arguments ?? '{}').file_path !== undefined || Object.keys(JSON.parse(write.arguments ?? '{}')).length > 0,
     '不该用空参数执行 —— 这次会报 missing required property',
   )
+})
+
+await test('🔴 技能目录默认压成"只留名字"（描述删掉，名字留着 ⇒ 模型仍能自己发现）', () => {
+  const skills = Array.from({ length: 45 }, (_, i) => `- \`skill-${i}\`: ${'A reusable set of instructions. '.repeat(3)}`)
+  const catalog = `<available_skills>\n${skills.join('\n')}\n</available_skills>`
+  const system = `# You are an agent\nAgent Teams is available.\n\n<system-reminder>\n${catalog}\n</system-reminder>`
+  const parts = serializePromptParts({
+    system,
+    messages: [{ role: 'user', content: [{ type: 'text', text: '帮我写个页面' }] }],
+    tools: [],
+  })
+  assert.ok(!parts.full.includes('available_skills'), '目录标签还在')
+  assert.ok(!parts.full.includes('A reusable set of instructions'), '描述没删掉')
+  // 名字必须留着 —— 否则模型"不知道有这个技能"，只能靠用户敲斜杠命令
+  assert.ok(parts.full.includes('skill-0') && parts.full.includes('skill-44'), '技能名被一起删掉了')
+  assert.ok(parts.full.includes('call the \`skill\` tool'), '缺少"怎么加载"的提示')
+  assert.ok(parts.full.includes('Agent Teams is available'), 'system 里的其它内容被误删了')
+  assert.ok(parts.full.length < 1400, `压完还这么长：${parts.full.length}`)
+})
+
+await test('★ 以后新装的技能会自动出现在名字列表里（宿主每轮重新生成目录）', () => {
+  const build = (names) => {
+    const catalog = `<available_skills>\n${names.map((n) => `- \`${n}\`: does something`).join('\n')}\n</available_skills>`
+    return serializePromptParts({
+      system: `# Agent\n\n<system-reminder>\n${catalog}\n</system-reminder>`,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      tools: [],
+    }).full
+  }
+  const beforeInstall = build(['alpha', 'beta'])
+  const afterInstall = build(['alpha', 'beta', 'gamma-new'])
+  assert.ok(!beforeInstall.includes('gamma-new'), '装之前不该有')
+  // 宿主把新技能加进目录 ⇒ 我们这一层原样把它带进名字列表（无需任何配置）
+  assert.ok(afterInstall.includes('gamma-new'), '装之后新技能没出现')
+})
+
+await test('技能目录：`## Skills` 段落形态也要剥，且不吞后面的标题', () => {
+  const text = '# Agent\n\n## Skills\n- one\n- two\n\n## Tools\nkeep me'
+  const out = stripSkillsCatalog(text)
+  assert.ok(!out.includes('- one'), 'Skills 段没剥掉')
+  assert.ok(out.includes('## Tools') && out.includes('keep me'), '把后面的段落吞了')
+})
+
+await test('技能目录：三种档位都可用（off 原样 / all 全删 / 默认只留名字）', () => {
+  const text = '<available_skills>\n- `alpha`: does things\n- `beta`: does more\n</available_skills>'
+  const before = process.env.DSH_WEB_LOGIN_STRIP_SKILLS
+  try {
+    process.env.DSH_WEB_LOGIN_STRIP_SKILLS = 'off'
+    assert.equal(stripSkillsCatalog(text), text, 'off 档还剥了')
+
+    process.env.DSH_WEB_LOGIN_STRIP_SKILLS = 'all'
+    const gone = stripSkillsCatalog(text)
+    assert.ok(!gone.includes('alpha'), 'all 档没删干净')
+
+    delete process.env.DSH_WEB_LOGIN_STRIP_SKILLS
+    const compact = stripSkillsCatalog(text)
+    assert.ok(compact.includes('alpha') && compact.includes('beta'), '默认档该留名字')
+    assert.ok(!compact.includes('does things'), '默认档该删描述')
+  } finally {
+    if (before === undefined) delete process.env.DSH_WEB_LOGIN_STRIP_SKILLS
+    else process.env.DSH_WEB_LOGIN_STRIP_SKILLS = before
+  }
 })
 
 if (failures.length) {

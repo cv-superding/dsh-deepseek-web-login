@@ -878,7 +878,8 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
   if (!Number.isSafeInteger(maxChars) || maxChars < 128) {
     throw new RangeError('maxChars 必须为至少 128 的整数')
   }
-  const system = String(options.system ?? '').trim()
+  // 技能目录在这里就剥掉（见 stripSkillsCatalog）：宿主每轮都塞，模型用不上。
+  const system = stripSkillsCatalog(String(options.system ?? '').trim())
   // ⚠️ F18（2026-09-12 审计）：**按剩余空间给工具目录算预算**，而不是"先渲染满、事后截 head"。
   // 旧做法是先把工具目录渲染到 5.6 万字符，再发现 head 超过 `maxChars * 比例`，
   // 于是 `truncateMiddle` 从**中间**挖掉一块 —— 留下的是**残缺的 JSON Schema**：
@@ -923,7 +924,7 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
     }
     if (message.role === 'system') {
       const text = flattenText(blocks).join('')
-      if (text.trim()) lines.push(`[System]\n${text}`)
+      if (text.trim()) lines.push(`[System]\n${stripSkillsCatalog(text)}`)
       continue
     }
     if (message.role === 'assistant') {
@@ -963,7 +964,8 @@ export function serializePromptParts(options: SerializeOptions): PromptParts {
     }
     // user 角色：可能是纯文本、也可能携带 tool-result 块
     const toolResults = blocks.filter((block) => block?.type === 'tool-result')
-    const text = flattenText(blocks.filter((block) => block?.type !== 'tool-result')).join('')
+    // 技能目录常被宿主塞在 user 条目里（`<system-reminder>` 包着）⇒ 这里也要剥
+    const text = stripSkillsCatalog(flattenText(blocks.filter((block) => block?.type !== 'tool-result')).join(''))
     const imageMarks = blockImageMarks(blocks, options.keptImageKeys)
     const images = imageMarks.length
     if (toolResults.length === 0 && pendingToolCallIds.length > 0 && images === 0 && text.trim()) {
@@ -2219,6 +2221,80 @@ export function stripDoCalls(text: string): string {
     re.lastIndex = cutTo
   }
   return cursor === 0 ? text : out + text.slice(cursor)
+}
+
+/**
+ * 🔴 2026-11-04（用户要求）：**剥掉技能目录**。
+ *
+ * 为什么能剥：`/skill-name` 是**客户端**解析的 —— 用户敲斜杠命令时，宿主会把技能正文直接
+ * 附进那条消息（`<skill_content>`）。模型**不需要**常驻的目录也能用技能。
+ * 而那份目录每条目 200~300 字符 × 几十条，是本项目提示词里**最大的一块**（实测 45 条约 11k），
+ * 且每一轮都跟着 head 走 —— 既费 token，也稀释格式指令（用户观察：模型更容易漂回 DSML）。
+ *
+ * 只剥**目录块**，不动别的东西：
+ *  - `<available_skills>…</available_skills>`（宿主注入的形态）；
+ *  - `## Skills` / `# Skills` 这类标题段（到下一个同级标题或文末）。
+ * 开关：`DSH_WEB_LOGIN_STRIP_SKILLS=0` 关掉（默认**开**）。
+ */
+export type SkillsMode = 'names' | 'off' | 'all'
+
+/** 读开关：默认 `names`（只留技能名），`off` 原样保留，`all` 整块删掉。 */
+export function skillsMode(): SkillsMode {
+  const raw = String(process.env.DSH_WEB_LOGIN_STRIP_SKILLS ?? '').trim().toLowerCase()
+  if (raw === 'off' || raw === '0' || raw === 'keep') return 'off'
+  if (raw === 'all' || raw === 'strip') return 'all'
+  return 'names'
+}
+
+/** 从目录正文里抠出技能名（`- \`name\`: 描述` 或 `- name: 描述`）。 */
+function skillNamesIn(block: string): string[] {
+  const names: string[] = []
+  for (const line of block.split('\n')) {
+    const matched = /^\s*[-*]\s*`?([A-Za-z0-9][\w.-]*)`?\s*[:：]/.exec(line)
+    if (matched) names.push(matched[1])
+  }
+  return names
+}
+
+function renderSkillNames(names: readonly string[]): string {
+  if (names.length === 0) return ''
+  return (
+    `Skills (names only — call the \`skill\` tool with one exact name to load it):\n` +
+    names.join(', ')
+  )
+}
+
+/**
+ * 🔴 2026-11-04（用户要求）：**技能目录只留名字**（默认）。
+ *
+ * 为什么能压：`/skill-name` 与 `skill(name)` 都不需要那条 200~300 字的描述 —— 名字足以让模型
+ * 「知道有这个技能」，正文由 `skill` 工具按需加载。原目录 45 条 ≈ 11k 字符，每轮跟着 head 走，
+ * 既费 token 也稀释格式指令（用户观察：模型更容易漂回 DSML）。只留名字 ≈ 800 字符。
+ *
+ * 三种取值（`DSH_WEB_LOGIN_STRIP_SKILLS`）：
+ *  - 不设 / `names`（默认）：目录压成一行名字；
+ *  - `off`：原样保留（老行为）；
+ *  - `all`：整块删掉（模型完全不知道有技能，只能靠用户敲斜杠命令）。
+ */
+export function stripSkillsCatalog(text: string): string {
+  if (!text) return text
+  const mode = skillsMode()
+  if (mode === 'off') return text
+  const compact = (block: string): string => (mode === 'all' ? '' : renderSkillNames(skillNamesIn(block)))
+
+  let out = text
+  // ① <available_skills>…</available_skills>
+  out = out.replace(/<available_skills\b[^>]*>([\s\S]*?)<\/available_skills>/gi, (_all, body: string) => compact(body))
+  out = out.replace(/<available_skills\s*\/>/gi, '')
+  // ② `# Skills` / `## Skills` 段：到下一个同级或更高级标题（不吞后面的段）
+  out = out.replace(/(^|\n)#{1,2}[ \t]*Skills[ \t]*\n([\s\S]*?)(?=\n#{1,2}[ \t]*[A-Z]|$)/gi, (_all, lead: string, body: string) => {
+    const replacement = compact(body)
+    return replacement ? `${lead}${replacement}` : lead
+  })
+  out = out.replace(/\n{3,}/g, '\n\n')
+  // ⚠️ 不在这里"剥空了就返回原文"： 档把整个 system 都是目录的情形剥成空是**正确结果**，
+  // 返回原文会让用户以为开关没生效（2026-11-04 用例当场抓到）。
+  return out
 }
 
 export function stripResidualDsml(text: string): string {
