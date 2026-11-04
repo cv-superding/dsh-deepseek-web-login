@@ -46,7 +46,7 @@ import {
   type GateSettings,
 } from './gate.ts'
 import { decideAutoSwitch, freshThrottledIds, hasFailoverCandidate, isThrottleSwitchAllowed, type SwitchableAccount } from './auto-switch.ts'
-import { browserLogin, clearBrowserLoginProfile, findSystemBrowser } from './browser-login.ts'
+import { browserLogin, clearBrowserLoginProfile, findSystemBrowser, openWebWindow } from './browser-login.ts'
 import { canOpenElectronWindow, clearLoginPartition, clearLoginState, closeLoginWindow, captureFromPartition, getFingerprintReport, getLastLoginResult, getLoginProgress, isLoginWindowOpen, loginWithToken, logout, openExternalLogin, openLoginWindow } from './login.ts'
 import { beginAddAccount, beginRelogin, commitCapturedAuth, endAddAccount, endRelogin } from './account-add.ts'
 // 自动重登（0.6.14）：凭证库 + "哪些号该重登"的判据都在 relogin.ts（纯逻辑，有离线用例）
@@ -1561,6 +1561,16 @@ export function apply(ctx: any, config: Config = {}): void {
               const mode: NetFetchMode = body?.mode === 'stream' ? 'stream' : 'probe'
               const result = await runNetFetchDiagnostics(getAuth(), mode)
               sendJson(res, result.ok ? 200 : 500, result)
+              return
+            }
+            if (req.method === 'POST' && route === '/open-web') {
+              /**
+               * 打开网页版（看网页端聊天记录）。
+               * 只对**当前账号**有意义：窗口用的是登录时那个 profile 分区，
+               * 换号要重登才会换分区（所以面板上只给当前账号显示这个按钮）。
+               */
+              const opened = openWebWindow()
+              sendJson(res, opened.ok ? 200 : 500, opened)
               return
             }
             if (req.method === 'GET' && (route === '/status' || route === '/')) {

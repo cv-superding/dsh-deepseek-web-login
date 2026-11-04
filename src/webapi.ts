@@ -34,7 +34,8 @@ import {
 // 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
 import { currentContextMode, decideFeed, effectiveReuseLimit, firstDifference, needsFreshSession, type ChainState, type FeedDecision, type FeedReason } from './context-feed.ts'
 // 🔴 0.6.42：PoW 改在浏览器页面内求解（见 `solvePow`）。
-import { solvePowInPage, systemBrowserAvailable } from './browser-transport.ts'
+import { readPageUserToken, solvePowInPage, systemBrowserAvailable } from './browser-transport.ts'
+import { listAccounts, updateAccount } from './accounts.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
 
@@ -417,6 +418,22 @@ function bizErrorMessage(code: number, msg: string): string {
   // 防御：40029 已被信封路径的 throttled 判据接住，正常走不到这里 ——
   // 留着是怕将来有人只动了判据、忘同步文案，至少文案口径还是对的。
   if (code === 40029) return '网页版限流：发得太频繁，稍后自动重试'
+  /**
+   * 🔴 2026-11-04（用户实测）：`40303 CHALLENGE_REQUIRED`。
+   *
+   * 它**不是**"PoW 没算" —— 走到这里的请求都已经带着页面内解出来的 `x-ds-pow-response`
+   * （算不出来会先抛 TRANSPORT，不会落到业务码）。这是站点的**第二道挑战**：
+   * 账号被行为特征标记后，要求一次**人机验证**。自动重试没有意义（验证得人来过），
+   * 所以这里保持不可重试，只把「用户该干什么」写清楚 —— 原文案只有一串英文，等于没说。
+   */
+  if (code === 40303) {
+    return (
+      '站点要求人机验证（code 40303 CHALLENGE_REQUIRED）—— 工具调用/PoW 都已通过，这是风控追加的挑战。' +
+      '处理：① 到「设置 → DeepSeek 网页登录」点「浏览器窗口登录」打开窗口，手工把验证过掉，再回来重试；' +
+      '② 仍然不行就停 10~30 分钟别再发请求（请求密度本身就是触发条件）；' +
+      '③ 或者在「账号库」里换一个号试。'
+    )
+  }
   return `DeepSeek 网页端错误（code ${code}）：${msg}`
 }
 
@@ -592,6 +609,51 @@ async function loadWasmModule(wasmUrl: string): Promise<WebAssembly.Module> {
  * ⚠️ 这条改动会**改变行为**：原来没有浏览器也能跑（Node 侧算），
  * 现在必须有浏览器。这是故意的 —— 但要知道自己正在换的是什么。
  */
+/**
+ * 缓存：`stored` = 我们手里那份，`live` = 页面里那份。
+ * 30 秒内复用，避免每个请求都跑一次 CDP evaluate。
+ */
+let liveTokenCache: { stored: string; live: string; at: number } | null = null
+
+/**
+ * 🔴 用**页面里的 token**（如果它已经换过）。
+ *
+ * 症状（2026-11-04 用户实测）：重启 DSH 后 2~5 秒面板就变红，报
+ * `Authorization Failed (invalid token)`；而同一时刻后台探活 1 分钟前还是通过的。
+ * 机制：传输层页面启动/重载时，站点自己刷新 `localStorage.userToken` ⇒ 我们快照里那份
+ * 立刻作废。**不是封号**，是我们拿着旧 token 去撞。
+ *
+ * 做法：读页面的 token；不同且形状像 token（≥32）就**采纳并落盘**（下次启动也用它），
+ * 本请求用新的发。读不到（没有页面/没有会话/测试环境）就原样返回 —— 不改变既有行为。
+ *
+ * ⚠️ 采纳前不额外验证（那要多一次请求）；如果页面的号与本记录不是同一个，
+ * 后续 `validateAuth` 会立刻暴露，而不是悄悄用错号跑一整轮。
+ */
+async function withLiveToken(auth: WebAuth): Promise<WebAuth> {
+  const now = Date.now()
+  if (liveTokenCache && liveTokenCache.stored === auth.token && now - liveTokenCache.at < 30_000) {
+    return liveTokenCache.live === auth.token ? auth : { ...auth, token: liveTokenCache.live }
+  }
+  let pageToken = ''
+  try {
+    pageToken = await readPageUserToken()
+  } catch {
+    pageToken = ''
+  }
+  if (pageToken.length < 32 || pageToken === auth.token) {
+    liveTokenCache = { stored: auth.token, live: auth.token, at: now }
+    return auth
+  }
+  try {
+    const target = listAccounts().find((item) => item.token === auth.token)
+    if (target) updateAccount(target.id, { token: pageToken })
+  } catch {
+    // 落盘失败不影响本次请求（只是下次启动又得再采纳一次）
+  }
+  liveTokenCache = { stored: auth.token, live: pageToken, at: now }
+  return { ...auth, token: pageToken }
+}
+
 async function solvePow(challenge: PoWChallenge, wasmUrl: string): Promise<number> {
   if (systemBrowserAvailable()) {
     return await solvePowInPage({
@@ -3170,6 +3232,30 @@ export async function* streamWebCompletion(
   params: CompletionParams,
   transport: CompletionTransport = defaultTransport,
 ): AsyncGenerator<WebStreamEvent> {
+  /**
+   * 🔴 请求前快速失败：如果探活/校验**刚刚**判定这份 token 失效（`lastVerifyError` 且 < 2 分钟），
+   * 直接抛 AUTH —— 不要再走一遍建会话/PoW/SSE。
+   *
+   * 为什么需要（2026-11-04 用户实测）：账号掉线后界面一直显示"深度求索中"、**没有任何报错**，
+   * 人只能干等。而实际上服务端早在 2ms 内就回了 `invalid token`。
+   * 判据用**新鲜度**兜住历史上那个坑（一次端点级误判就把健康账号锁死）：超过 2 分钟的旧结论不采信，
+   * 探活成功或重新登录会清掉它。
+   */
+  try {
+    const record = listAccounts().find((item) => item.token === auth.token)
+    const failure = record?.lastVerifyError
+    const at = failure?.at ? Date.parse(failure.at) : Number.NaN
+    if (failure && Number.isFinite(at) && Date.now() - at < 120_000) {
+      throw new AdapterLlmError(
+        `登录态已失效（${failure.message}）—— 请重新登录：面板「浏览器窗口登录」登一次，或在 Chrome 里 F12 取 userToken 粘贴过来（粘贴不会踢掉自己）`,
+        'AUTH',
+      )
+    }
+  } catch (error) {
+    if (error instanceof AdapterLlmError) throw error
+  }
+  // 页面里那份 token 才是活的（见 withLiveToken 的说明）—— 必须在任何请求头构造之前替换。
+  auth = await withLiveToken(auth)
   const controller = new AbortController()
   const signal = params.signal ? AbortSignal.any([params.signal, controller.signal]) : controller.signal
   // 归属键：账号 + DSH 会话（窗口）。这条请求要用的网页端会话与投喂链都挂在它下面。

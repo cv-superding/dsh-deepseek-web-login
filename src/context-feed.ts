@@ -349,10 +349,26 @@ function canExtendChain(prev: readonly string[], next: readonly string[]): boole
  * 否则它只在"最后一个条目"出现，下一轮那条变成中间条目、内容变了 ⇒ 链前缀断裂
  * （`not-appended` ⇒ 每轮全量重发）。
  */
-export type ProtocolPrime = 'lidow' | 'dsml' | 'off'
+export type ProtocolPrime = 'reminder' | 'dsml' | 'off'
 
+/**
+ * 末尾**禁令提醒**（用户 2026-11-04 的提案，也是本轮的正解）。
+ *
+ * 用户的观察很准：prompt 最后一行永远是 `User: …` / `[Tool Result …]` ——**紧挨着**
+ * 模型要吐字的位置。格式要求原本只写在最前面的固定头里（几万字符之外），越到后面越容易失效
+ * （表现为退回网页端原生标记）。这条提醒就是"把禁令搬到它鼻子底下再说一遍"。
+ *
+ * 措辞原则（三条都踩过坑）：
+ *  - **短**：这是近因位，太长就稀释了；
+ *  - **不写标记字面量**：写样例等于教它怎么写（`check-bundle` 的
+ *    「host 提示词不再写出私有标记字面量」守着这条）；
+ *  - **先说要什么，再说不要什么**：模型对"该写什么"的遵守率高于"别写什么"。
+ */
 const PRIME_TEXTS: Record<ProtocolPrime, string> = {
-  lidow: 'LIDOW:',
+  reminder:
+    '[Tool protocol] A tool call is exactly one line: LIDOW:{"name":"…","arguments":{…}}. ' +
+    'Do not emit DSML (the web model\'s delimiter-wrapped tag dialect), XML or HTML tags — they are not executed and render as garbage. ' +
+    'No tool needed ⇒ do not write that line.',
   dsml: '<｜｜DSML｜｜calls>',
   off: '',
 }
@@ -360,9 +376,8 @@ const PRIME_TEXTS: Record<ProtocolPrime, string> = {
 export function currentProtocolPrime(): ProtocolPrime {
   const raw = String(process.env.DSH_WEB_LOGIN_PROTOCOL_PRIME ?? '').trim().toLowerCase()
   if (raw === 'off' || raw === 'dsml') return raw
-  // `do` 是 2.1.0 的旧名字，保留兼容
-  if (raw === 'lidow' || raw === 'do') return 'lidow'
-  return 'lidow'
+  // 兼容旧名字：`lidow` / `do` 都是"只在末尾写前缀"的老行为，现在统一成禁令提醒
+  return 'reminder'
 }
 
 /** 只给**真的要模型产出工具调用**的请求加预填（内部请求没有 entries）。 */

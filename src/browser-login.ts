@@ -735,6 +735,36 @@ export async function browserLogin(options: BrowserLoginOptions = {}): Promise<B
 }
 
 /** 清掉浏览器登录用的独立 profile（退出账号时调用：连浏览器端的登录态一起清）。 */
+/**
+ * 用**插件自己的浏览器 profile** 打开网页版（用户 2026-11-04 的需求）。
+ *
+ * 为什么不用系统默认浏览器：那个会话跟插件里这个账号**不是同一个号** ⇒ 打开也看不到
+ * 插件建的这些对话。用 `browser-profile`（登录时捕获凭证用的那个分区）打开，才是同一个会话，
+ * 网页端能看到插件产生的聊天记录。
+ *
+ * ⚠️ 与传输层用的 `transport-profile` 是**两个目录**（见 browser-transport 的 PROFILE_DIR）⇒
+ * 这里开有头窗口不会和后台那个无头实例抢锁。
+ */
+export function openWebWindow(options: { profileDir?: string; url?: string } = {}): {
+  ok: boolean
+  error?: string
+  browser?: string
+} {
+  const browser = findSystemBrowser()
+  if (!browser) return { ok: false, error: '没找到系统浏览器（Edge/Chrome）' }
+  const profileDir = options.profileDir ?? DEFAULT_PROFILE_DIR
+  try {
+    const child = spawn(browser.path, buildBrowserArgs(profileDir, options.url ?? `${DS_BASE}/`), {
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+    return { ok: true, browser: browser.path }
+  } catch (error: any) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
+}
+
 export function clearBrowserLoginProfile(profileDir = DEFAULT_PROFILE_DIR): boolean {
   try {
     rmSync(profileDir, { recursive: true, force: true })

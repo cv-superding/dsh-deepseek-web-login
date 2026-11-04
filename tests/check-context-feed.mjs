@@ -959,7 +959,7 @@ test('★ 诊断留痕的路径必须跟着 DSH_HOME 走（否则跑批会污染
   )
 })
 
-test('★ 末尾预填：prime=true 时 prompt 末尾是 LIDOW:，且**不进链**', () => {
+test('★ 末尾禁令提醒：prime=true 时 prompt 末尾多一段协议提醒，且**不进链**', () => {
   // 预填是"发送时的装饰"：只影响这一次发出去的 prompt。
   // 一旦进了 entries，下一轮那条变成中间条目、内容与链里存的不一致 ⇒ 前缀断裂 ⇒ 每轮全量重发。
   const decision = decideFeed({
@@ -972,7 +972,12 @@ test('★ 末尾预填：prime=true 时 prompt 末尾是 LIDOW:，且**不进链
     reused: false,
     prime: true,
   })
-  assert.ok(decision.prompt.endsWith('LIDOW:'), `prompt 末尾没有预填：${JSON.stringify(decision.prompt.slice(-40))}`)
+  const tail = decision.prompt.slice(-260)
+  assert.ok(tail.includes('[Tool protocol]'), `prompt 末尾没有协议提醒：${JSON.stringify(tail)}`)
+  // 提醒里必须点明"该写什么"，并且**不写 DSML 标记字面量**（写样例等于教它怎么写）
+  assert.ok(tail.includes('LIDOW:{"name"'), '提醒里必须给出要写的形态')
+  assert.ok(/Do not emit DSML/.test(tail), '提醒里必须点名禁止 DSML')
+  assert.ok(!tail.includes('DSML|>'), '提醒里不许出现 DSML 标记字面量')
   assert.ok(
     decision.next && !decision.next.entries.some((entry) => entry.includes('LIDOW:')),
     '预填不许写进链（entries）',
@@ -987,7 +992,7 @@ test('★ 末尾预填：prime=true 时 prompt 末尾是 LIDOW:，且**不进链
     accountKey: 'a1',
     reused: false,
   })
-  assert.ok(!plain.prompt.endsWith('LIDOW:'), '默认不该预填')
+  assert.ok(!plain.prompt.includes('[Tool protocol]'), '默认不该加提醒')
 })
 
 console.log(failed === 0 ? `\n通过 ${passed} 项，全部通过 ✅` : `\n通过 ${passed} 项，失败 ${failed} 项 ❌`)

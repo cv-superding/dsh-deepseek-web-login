@@ -744,6 +744,30 @@ export async function shutdownBrowserTransport(): Promise<void> {
  * 🔴 只走本机 CDP，**不发任何网络请求** —— 保活心跳绝不能自己造出"对站点的固定周期流量"。
  * 没有会话、或探测失败，一律返回 `null`（调用方按"不可用"处理）。
  */
+/**
+ * 页面里当前的 `userToken`（本地 CDP 读，不发任何网络请求）。
+ *
+ * 🔴 为什么需要它：站点在页面启动/重载后会**刷新** `localStorage.userToken` ——
+ * 我们手里那一份立刻变成"旧 token"，服务端会回 `Authorization Failed (invalid token)`。
+ * 实测（2026-11-04）：探活 11:28:31 通过，重启后 1 分钟内就变成 invalid token。
+ */
+export async function readPageUserToken(timeoutMs = 1_500): Promise<string> {
+  /**
+   * 🔴 **必须带硬超时**：CDP 的 `Runtime.evaluate` 在没有响应时会一直挂着 ——
+   * 页面被关掉/卡住时我们就会永远 await，界面上表现为"一直在思考、没有任何报错"
+   * （用户 2026-11-04 实测）。这里超时就当"读不到"，走原来的 `auth.token` 路径。
+   */
+  const state = await Promise.race([
+    readTransportPageState().catch(() => null),
+    new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs)
+      // 别把定时器留住（Node 里 unref 让它不阻塞退出）
+      ;(timer as any).unref?.()
+    }),
+  ])
+  return state?.userToken ?? ''
+}
+
 export async function readTransportPageState(): Promise<PageObservation | null> {
   const session = activeSession
   if (!session) return null

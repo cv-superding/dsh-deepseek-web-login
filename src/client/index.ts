@@ -1107,6 +1107,29 @@ function Panel(): any {
 
       // 文案叫「备注」而不是「重命名」：它写的是 `label`（备注名），**不是**改显示名 ——
       // 原来的名字让人以为是重命名账号本身，结果 7 个账号的 label 一直是空的（功能没人发现）。
+      if (item.isActive) {
+        /**
+         * 「网页版」：用这个账号的登录态打开 chat.deepseek.com，直接看网页端聊天记录。
+         * 只给**当前账号**显示 —— 窗口用的是登录时那个 profile 分区，别的号切不过去（会撒谎）。
+         */
+        const webBtn = el('button', 'dsw-btn ghost dsw-preset', '网页版') as HTMLButtonElement
+        webBtn.title = '用当前账号的登录态打开 chat.deepseek.com（看网页端的聊天记录）'
+        webBtn.addEventListener('click', () => {
+          void (async () => {
+            webBtn.disabled = true
+            try {
+              const result = await api('/open-web', { method: 'POST', body: '{}' })
+              if (result?.ok) paintRowMsg(item.id, '✅ 已用该账号的登录态打开网页版', 'ok')
+              else paintRowMsg(item.id, `❌ 打不开：${result?.error ?? '未知原因'}`, 'err')
+            } catch (error: any) {
+              paintRowMsg(item.id, `❌ 打不开：${error?.message ?? error}`, 'err')
+            } finally {
+              webBtn.disabled = false
+            }
+          })()
+        })
+        actions.append(webBtn)
+      }
       const renameBtn = el('button', 'dsw-btn ghost dsw-preset', '备注') as HTMLButtonElement
       let editing = false
       renameBtn.addEventListener('click', () => {

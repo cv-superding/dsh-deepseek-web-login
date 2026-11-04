@@ -2,6 +2,46 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.3.0 — 未发布（等用户口令）
+
+### 1. 末尾禁令提醒（`context-feed.applyPrime`）
+prompt 最后一行（`User: …` / `[Tool Result …]`）后面自动补一段**协议提醒**：
+
+```
+[Tool protocol] A tool call is exactly one line: LIDOW:{"name":"…","arguments":{…}}.
+Do not emit DSML (the web model's delimiter-wrapped tag dialect), XML or HTML tags …
+```
+
+动机：格式要求原本只在**几万字符之外**的固定头里，模型越到后面越容易漂；把它搬到**近因位**再说一遍。
+- 只在 `FeedInput.prime=true` 时生效（webapi 对带 `promptParts` 的 chat 打开）；纯函数默认不加。
+- **不进链**（`entries` 不含它），否则下一轮变中间条目 ⇒ 前缀断裂 ⇒ 每轮全量重发。
+- `DSH_WEB_LOGIN_PROTOCOL_PRIME = reminder（默认）| dsml | off`。
+
+### 2. 账号库「网页版」按钮
+当前账号那一行新增**网页版**：用**插件自己的浏览器分区**打开 `chat.deepseek.com`，与插件同一会话，
+能直接看到插件产生的对话（系统默认浏览器是另一个登录态，看不到）。
+实现：`browser-login.openWebWindow()` + `POST /open-web`；传输层用的是另一个目录（`transport-profile`），不抢锁。
+
+### 3. 40303 CHALLENGE_REQUIRED 给可执行文案
+判据：PoW 算不出来会先抛 `TRANSPORT`，走到业务码说明**请求已经带着 `x-ds-pow-response`** ⇒
+这是站点追加的人机验证。文案给出三步（浏览器窗口登录过验证 / 停 10~30 分钟 / 换号），
+**保持不可自动重试**（机器过不去，硬重试加深标记）。
+
+### 4. token 跟随页面刷新（修「重启 2~5 秒就掉号」）
+实测：`lastVerifiedAt` 11:28:31 通过，同一份 token 一分钟后就 `Authorization Failed (invalid token)`。
+机制：传输层页面启动/重载时站点自己刷新 `localStorage.userToken`，我们快照里那份作废。
+- `webapi.withLiveToken()`：请求前用**纯本地 CDP**（`browser-transport.readPageUserToken`）读页面里的
+  token；≥32 字符且不同就**采纳并落盘**，30s 缓存；读不到原样返回（测试/无页面行为不变）。
+
+### 5. 别再"深度求索中"干等
+- `readPageUserToken()` 加 **1.5s 硬超时**：CDP 的 `Runtime.evaluate` 在页面被关/卡住时会永不返回。
+- 请求前快速失败：若 `lastVerifyError` **新鲜（<2 分钟）** 且是授权类，直接抛 AUTH 并给可执行文案，
+  不再走建会话/PoW/SSE。（新鲜度门控是为了不复活"一次误判锁死账号"那个老坑。）
+
+### 用例
+- 新增 `check-call-prefix`（原 `check-do-protocol`，10 项）、`check-context-feed` 的 prime 用例、
+  `check-fetch-injection` 的 40303 用例；`check-context-chain` / `check-resume-after-restart` 显式关预填。
+
 ## 2.2.0 — 2026-11-04（前缀改 `LIDOW:` + 末尾预填）
 
 ### 1. 主前缀 `DO:` → `LIDOW:`

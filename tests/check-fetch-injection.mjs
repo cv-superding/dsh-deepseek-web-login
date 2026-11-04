@@ -155,6 +155,21 @@ await run('晚替换的桩件真的被拿来回放（分类与重试间隔都来
   assert.equal(retryAfter, 5_000, '并发生成是短暂状态，重试间隔应该短')
 })
 
+await run('40303 CHALLENGE_REQUIRED 要给出可执行指引，且不自动重试', async () => {
+  // 用户实测 2026-11-04：PoW 已过、站点仍要求第二道挑战（人机验证）。
+  // 旧文案只有一串英文（CHALLENGE_REQUIRED），等于没说；自动重试也没用（验证得人来过）。
+  const envelope = () =>
+    new Response(`{"code":0,"msg":"","data":{"biz_code":40303,"biz_msg":"CHALLENGE_REQUIRED"}}`, {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  const { thrown } = await withGlobalFetch(async () => envelope(), () => complete())
+  assert.equal(thrown?.code, 'PROVIDER_ERROR', `实际 ${thrown?.code}（人机验证不该自动重试）`)
+  const message = String(thrown?.message ?? '')
+  assert.ok(message.includes('人机验证'), `文案要点明是人机验证：${message}`)
+  assert.ok(message.includes('浏览器窗口登录'), `文案要给出第一步动作：${message}`)
+})
+
 console.log()
 console.log(`通过 ${passed} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过 OK'}`)
 for (const failure of failures) console.log('  ' + failure)
