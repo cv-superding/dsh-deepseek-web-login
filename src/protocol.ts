@@ -1965,7 +1965,22 @@ export function parseToolCallJson(json: string): ToolCallRequest[] | null {
     if (!entry || typeof entry !== 'object') continue
     const name = typeof entry.name === 'string' ? entry.name : typeof entry.tool === 'string' ? entry.tool : ''
     if (!name) continue
-    let args = entry.arguments ?? entry.parameters ?? entry.args ?? {}
+    /**
+     * 🔴 2026-11-04（分享链接实证）：模型按协议写的是**扁平**形态 ——
+     *   LIDOW:{"name":"write","file_path":"…","content":"…"}
+     * 参数**没有**包在 `arguments` 里。旧逻辑只认 `arguments/parameters/args` ⇒
+     * 拿到 `{}` ⇒ `write` 被执行、立刻报 missing required property（假失败 + 什么都没干）。
+     * 这里补一条：没有那个包装键时，**把除 name/tool 之外的键当参数**（这正是模型的写法）。
+     */
+    let args = entry.arguments ?? entry.parameters ?? entry.args
+    if (args === undefined) {
+      const extra: Record<string, unknown> = { ...entry }
+      delete extra.name
+      delete extra.tool
+      delete extra.id
+      delete extra.type
+      args = Object.keys(extra).length > 0 ? extra : {}
+    }
     // 模型偶尔把 arguments 写成**数组**（实测 2026-09-11：arguments:[{…}]，规范是对象）。
     // 只有一个对象元素时取该元素 —— 否则参数会被序列化成 "[{…}]"，工具拿到的是垃圾。
     if (Array.isArray(args) && args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
@@ -2241,13 +2256,22 @@ function cutDsmlMarkup(text: string): string {
       stack.push(tag)
       continue
     }
+    let matchedOpen = false
     for (let i = stack.length - 1; i >= 0; i -= 1) {
       if (canonical(stack[i].name) === canonical(tag.name)) {
         removals.push([stack[i].start, tag.end])
         stack.length = i // 同名开标签及其内部未闭合的都算被这一段吞掉
+        matchedOpen = true
         break
       }
     }
+    /**
+     * 🔴 2026-11-04（用户截图）：模型在 `LIDOW:{…}` 之后又粘了三个**闭合标签**
+     * （`</…parameter>` / `</…invoke>` / `</…calls>`），而块里根本没有对应的开标签。
+     * 旧逻辑对"没配对上的闭标签"什么都不做 ⇒ 三行闭标签原样留在正文里。
+     * 它们没有任何语义（协议里不存在孤立的闭标签），直接当残留删掉。
+     */
+    if (!matchedOpen) removals.push([tag.start, tag.end])
   }
   /**
    * 剩下的开标签分两类，处理方式**不同**：

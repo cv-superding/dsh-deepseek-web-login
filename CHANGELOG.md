@@ -2,6 +2,31 @@
 
 本项目大致遵循语义化版本；日期为本地时间。
 
+## 2.3.1 — 2026-11-04（分享链接实证的三处解析缺陷）
+
+用户在分享页（`chat.deepseek.com/share/vlzpg…`）里看到：模型**确实按 `LIDOW:` 写了调用**，但
+① 行尾粘了三个 DSML 闭标签；② 参数是**扁平**写法；③ 那次 `write` 被执行却报
+`missing required property "file_path"; "content"`。三处都修了：
+
+### 1. **扁平参数形态**（最关键）
+模型写的是 `LIDOW:{"name":"write","file_path":"…","content":"…"}` —— 参数**不包在 `arguments` 里**。
+旧解析只认 `arguments/parameters/args` ⇒ 拿到 `{}` ⇒ 工具被执行、立刻报缺参数（"什么都没干"的假失败）。
+现在没有包装键时，**除 `name/tool/id/type` 之外的键全部当参数**。
+
+### 2. 孤立 DSML **闭**标签
+`</…parameter>` / `</…invoke>` / `</…calls>` 没有对应开标签时，旧逻辑什么都不做 ⇒ 三行原样上屏。
+协议里不存在孤立闭标签 ⇒ 一律当残留删掉。
+
+### 3. 无名 DSML 残片
+`</｜｜DSML｜｜`（没有标签名）不满足 `cutDsmlMarkup` 的 `[A-Za-z_]+` ⇒ 从前漏到正文。
+新增 `stripNamelessDsmlFragments`（围栏感知）。
+
+### 4. 坏块不许当 `{}` 执行
+块里有 `parameter` 开标签、却一个参数都没解析出来 ⇒ 这是解析失败，不是"无参数工具" ⇒ 该调用丢弃
+（宁可不执行，也不要执行一次必然报错的空调用）。
+
+**用例**：`check-call-prefix` 13 项（新增三条，逐条对应上面的现场）。
+
 ## 2.3.0 — 2026-11-04
 
 ### 1. 末尾禁令提醒（`context-feed.applyPrime`）

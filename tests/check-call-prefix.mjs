@@ -18,7 +18,15 @@ import { join } from 'node:path'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-do-protocol-'))
 
-const { ToolCallStreamFilter, parseToolCallJson, stripDoCalls, serializePrompt, TOOL_PROTOCOL_INSTRUCTIONS } =
+const {
+  ToolCallStreamFilter,
+  parseToolCallJson,
+  parseXmlToolCalls,
+  stripResidualDsml,
+  stripDoCalls,
+  serializePrompt,
+  TOOL_PROTOCOL_INSTRUCTIONS,
+} =
   await import('../src/protocol.ts')
 
 let passed = 0
@@ -130,6 +138,39 @@ await test('预填续写形态：行首裸 {"name":…} 也算调用（不带 LI
   assert.equal(calls.length, 1, '预填之后模型只续写 JSON，必须认')
   assert.equal(calls[0].name, 'read')
   assert.equal(text, '说明\n', `正文里出现了调用对象：${JSON.stringify(text)}`)
+})
+
+await test('★ 扁平参数形态：{"name":"write","file_path":…} 直接当参数（分享链接实证）', () => {
+  // 模型按协议写的就是扁平形态 —— 参数不包在 arguments 里。
+  // 旧解析只认 arguments/parameters/args ⇒ 拿到 {} ⇒ write 被执行并报 missing property（假失败）。
+  const calls = parseToolCallJson(
+    JSON.stringify({ name: 'write', file_path: 'F:////a////b.html', content: '<html></html>' }),
+  )
+  assert.equal(calls?.length, 1)
+  const args = JSON.parse(calls[0].arguments)
+  assert.equal(args.file_path, 'F:////a////b.html')
+  assert.equal(args.content, '<html></html>')
+  assert.ok(!('name' in args), 'name 不该混进参数里')
+})
+
+await test('★ 孤立 DSML 闭标签（没有开标签）也要剥掉', () => {
+  const text = '正文</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+  const out = stripResidualDsml(text)
+  assert.ok(!/DSML/.test(out), `闭标签还在：${JSON.stringify(out)}`)
+  assert.ok(out.startsWith('正文'), '正文被吃了')
+})
+
+await test('★ 坏掉的 DSML 块（有 parameter 标签但解析不出参数）不许当 {} 执行', () => {
+  const bad =
+    '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="write">' +
+    '<｜｜DSML｜｜parameter>内容</｜｜DSML｜｜parameter>' +
+    '</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>'
+  const calls = parseXmlToolCalls(bad)
+  const write = calls?.find((call) => call.name === 'write')
+  assert.ok(
+    !write || JSON.parse(write.arguments ?? '{}').file_path !== undefined || Object.keys(JSON.parse(write.arguments ?? '{}')).length > 0,
+    '不该用空参数执行 —— 这次会报 missing required property',
+  )
 })
 
 if (failures.length) {
