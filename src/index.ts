@@ -86,6 +86,7 @@ import { checkForUpdate, RELEASE_REPO } from './update-check.ts'
 import { pluginVersion } from './version.ts'
 import { webLoginDir } from './paths.ts'
 import { anyCredential, clearCredential, hasSavedCredential, loadCredential, saveCredential as saveLoginCredential } from './credentials.ts'
+import { canAttemptLogin, loginGuardStatus, recordLoginFailure, recordLoginSuccess } from './login-guard.ts'
 import { removeJournalEntry, runStartupSweep, upsertJournalEntry } from './session-journal.ts'
 import {
   accountsDir,
@@ -1618,6 +1619,7 @@ export function apply(ctx: any, config: Config = {}): void {
                 provider: PROVIDER,
                 // 面板据此决定「重登」是"一键"还是"要填表"（只报布尔，不吐任何凭据内容）
                 hasSavedCredential: hasSavedCredential(activeAccountId()),
+                loginGuard: loginGuardStatus(),
                 registeredProviders,
                 electron: canOpenElectronWindow(),
                 loginWindowOpen: isLoginWindowOpen(),
@@ -1873,6 +1875,18 @@ export function apply(ctx: any, config: Config = {}): void {
                *  - 都没有 ⇒ 退回原来的"窗口里手动登录"。
                * 登录本身仍在**页面上下文**里做（见 browserLogin 的 credentials 注释），Node 侧不发密码。
                */
+              /**
+               * 🔴 登录熔断（2026-11-04）：站点已经对这台机器/这个网络做了限制时
+               * （页面提示"由于违规次数过多，你的账户已被临时停用"），用户会一直点登录 ——
+               * 每点一次都是一次新的失败，判定只会更重。冷却期内直接拒绝，并把原因说清楚。
+               */
+              {
+                const guard = canAttemptLogin()
+                if (!guard.allowed) {
+                  sendJson(res, 200, { started: false, reason: guard.message ?? '登录冷却中', cooldownMinutes: guard.waitMinutes })
+                  return
+                }
+              }
               const credInput = freshBody?.credentials
               const explicit =
                 credInput && typeof credInput.email === 'string' && typeof credInput.password === 'string' && credInput.password
@@ -1886,6 +1900,8 @@ export function apply(ctx: any, config: Config = {}): void {
                 onProgress: (message) => logger?.info?.(`deepseek-web login(browser): ${message}`),
                 signal: undefined,
               })
+              if (outcome.ok) recordLoginSuccess()
+              else recordLoginFailure(String(outcome.reason ?? 'login-failed'))
               if (outcome.ok && credentials && freshBody?.remember === true) {
                 const key = activeAccountId() ?? credentials.email
                 try {

@@ -1226,11 +1226,24 @@ const checks = {
   //   （"为什么不是一句 rmSync(…)"），不剥的话这条永远红。`check-bundle` 读的是源码，
   //   注释会一并读进来。
   '清 transport profile 走「先改名再删」（EPERM 不再卡死启动）':
-    /await prepareTransportProfile\(PROFILE_DIR/.test(srcBrowserTransport) &&
-    /renameSync\(profileDir, retired\)/.test(srcBrowserTransport) &&
-    !/rmSync\(PROFILE_DIR, \{ recursive: true, force: true \}\)/.test(
-      srcBrowserTransport.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''),
-    ),
+    // 意图：清 profile 时**不能**用一句 rmSync 直接删（EPERM 会卡死启动），必须先 rename 再删。
+    // ⚠️ 2026-11-15：变量名从 `PROFILE_DIR` 改成了按账号算出 `profileDir`（device_id 稳定化），
+    //    旧断言把变量名一起断死了 ⇒ 实现没退化却变红。改成断**同一段逻辑**：
+    //    ① `prepareTransportProfile` 里仍在 rename；②旧的"一句 rmSync"确实不在（剥注释后）。
+    //    另加 ③：**默认不清**（`reset = false`）—— 否则又会每次启动换一台"新设备"。
+    (() => {
+      const stripped = srcBrowserTransport
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+      const start = stripped.indexOf('async function prepareTransportProfile')
+      if (start < 0) return false
+      const seg = stripped.slice(start, start + 1600)
+      return (
+        /renameSync\(profileDir, retired\)/.test(seg) &&
+        !/rmSync\(PROFILE_DIR, \{\s*recursive: true,\s*force: true\s*\}\)/.test(stripped) &&
+        /reset = false/.test(seg)
+      )
+    })(),
 
   'Windows 上收浏览器进程树（taskkill /T，否则孤儿子进程锁住 profile）':
     /execFile\('taskkill', \['\/PID', String\(pid\), '\/T', '\/F'\]/.test(srcBrowserTransport) &&

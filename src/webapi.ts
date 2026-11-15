@@ -34,7 +34,13 @@ import {
 // 上下文投喂方式（全量 / 链式增量）——决策是纯函数，见 context-feed.ts 的模块注释。
 import { currentContextMode, decideFeed, effectiveReuseLimit, firstDifference, needsFreshSession, type ChainState, type FeedDecision, type FeedReason } from './context-feed.ts'
 // 🔴 0.6.42：PoW 改在浏览器页面内求解（见 `solvePow`）。
-import { readPageUserToken, solvePowInPage, systemBrowserAvailable, transportPageLoggedOut } from './browser-transport.ts'
+import {
+  readPageUserToken,
+  requestTransportProfileReset,
+  solvePowInPage,
+  systemBrowserAvailable,
+  transportPageLoggedOut,
+} from './browser-transport.ts'
 import { listAccounts, updateAccount } from './accounts.ts'
 
 export const DS_BASE = 'https://chat.deepseek.com'
@@ -163,6 +169,40 @@ export function isMutedError(biz: { code?: number; msg?: string } | undefined): 
   return biz?.code === 5 || /user\s+is\s+muted|account\s+is\s+muted/i.test(String(biz?.msg ?? ''))
 }
 
+/**
+ * 账号被**永久封禁**：`biz_code=10` / `USER_IS_BANNED`。
+ *
+ * 与 `muted`（5，带 `mute_until`、几周后自己会好）的区别只在「会不会自己恢复」；
+ * 处理路径相同（换号能接着干），但**文案必须分开** —— 用户看到「临时禁言」和
+ * 「永久封禁」该做的事完全不同。
+ *
+ * 实测文案族（2026-11）：
+ *   - 「由于违规次数过多，你的账户已被临时停用」
+ *   - `Due to violation of user policies, your account has been suspended until …`
+ *
+ * ⚠️ 别把这两条的**字面**当判据写死：上游话术会改。码优先，文案只作兜底。
+ */
+export function isBannedError(biz: { code?: number; msg?: string } | undefined): boolean {
+  if (biz?.code === 10) return true
+  const msg = String(biz?.msg ?? '')
+  return /USER_IS_BANNED|violation\s+of\s+user\s+polic|账户已被(?:临时)?停用|账号已被(?:临时)?停用/i.test(msg)
+}
+
+/**
+ * **设备**被判风控：`biz_code=11` / `RISK_DEVICE_DETECTED`。
+ *
+ * 🔴 这是**设备级**而不是账号级判定 —— 换账号没有用：新号会立刻继承同一台「可疑设备」
+ * 的判定（这正是「换任何账号都报违规停用」的机制）。唯一有效的是换一台设备
+ * （重建浏览器 profile ⇒ 新的数美 `device_id`，见 `requestTransportProfileReset`）。
+ *
+ * 依据 `NIyueeE/ds-free-api` 的错误码表与 `device_id` 说明：该值由数美 SDK 生成、
+ * 不可伪造、必须来自真实浏览器、**一账号一值**。
+ */
+export function isRiskDeviceError(biz: { code?: number; msg?: string } | undefined): boolean {
+  if (biz?.code === 11) return true
+  return /RISK_DEVICE_DETECTED|risky?\s+device/i.test(String(biz?.msg ?? ''))
+}
+
 /** 从响应信封里读出解除限制的时间（ms）；读不到返回 undefined。 */
 export function muteUntilMs(json: any): number | undefined {
   const raw = (json as any)?.data?.biz_data?.mute_until
@@ -181,6 +221,25 @@ export function muteUntilMs(json: any): number | undefined {
  * 导出是为了让 `adapter.ts` 声明重试策略时拿它当 `initialDelayMs`（单一来源）。
  */
 export const FAILOVER_RETRY_MS = 2_000
+/**
+ * 「设备被判风控」后重建 profile、再重试一次的退避。
+ *
+ * 为什么是 8 秒：重建 profile 目录 + 冷启动浏览器 + 等调试端口 + 建 CDP 连接，
+ * 实测落在 5~15 秒。8 秒让重试落在"多半已经起好了"的窗口里；即使没起好，
+ * `launchBrowserTransport` 内部是串行的（`launchPromise`），重试会等它而不是并发起第二个浏览器。
+ * 它比 `FAILOVER_RETRY_MS` 长是**故意的** —— 这条路上没有"换个号立刻就能过"的成分。
+ */
+export const RISK_DEVICE_RETRY_MS = 8_000
+/**
+ * 永久封禁（`USER_IS_BANNED`）后把这个账号**按住**多久 —— 写进 `limit.untilMs`。
+ *
+ * 为什么必须写：`index.ts` 的账号退场判据只看 `mutedUntilMs`（⇒ `limit`）。封禁不给
+ * 解除时间时如果不补一个，这个号在账号库里会一直是"健康"的 ⇒ 下一轮照用 ⇒ 每发一次
+ * 都在加重上游的判定，而用户看到的是"换个号也马上被封"。
+ *
+ * 为什么是 7 天而不是"永久"：它不是真的永久锁 —— 上游万一提前解了，时间到了还能自己回来。
+ */
+export const BANNED_HOLD_MS = 7 * 24 * 3_600_000
 /**
  * 限流但**没得换号**时的退避（HTTP 路径用的定值）。
  *
@@ -208,6 +267,33 @@ function mutedMessage(untilMs: number | undefined): string {
   const when = new Date(untilMs).toLocaleString('zh-CN', { hour12: false })
   const minutes = Math.max(1, Math.round((untilMs - Date.now()) / 60_000))
   return `DeepSeek 网页端已封禁本账号，${when} 解除（约 ${minutes} 分钟）`
+}
+
+/**
+ * 永久封禁（`USER_IS_BANNED`）的文案。
+ *
+ * 为什么要和 `mutedMessage` 分开：两者都写 `limit`、都走换号，但**用户该做的事不同** ——
+ * 「临时禁言」等就行，「永久封禁」这个号已经没了。而且如果用户发现"换几个号都很快被封"，
+ * 那已经不是账号问题，得往设备/网络环境那条线查。
+ */
+function bannedMessage(): string {
+  return (
+    'DeepSeek 已永久封禁本账号（USER_IS_BANNED），这个状态不会自己恢复 —— 换号可继续。' +
+    '如果换几个号都在短时间内被封，说明是设备/网络环境维度的判定，不是账号本身。'
+  )
+}
+
+/**
+ * 设备被判定可疑（`RISK_DEVICE_DETECTED`）的文案。
+ *
+ * 必须说清「换号没用」：用户的第一反应一定是换个账号再试，而那条路在这里是死的
+ * （新号会继承同一台设备的判定），只会把备用号一起送掉。
+ */
+function riskDeviceMessage(): string {
+  return (
+    'DeepSeek 判定本机浏览器设备可疑（RISK_DEVICE_DETECTED）。这是设备级判定，换账号无效 —— ' +
+    '插件会重建设备身份后自动重试一次；若仍失败，请稍后再试或换网络环境。'
+  )
 }
 
 /**
@@ -3275,41 +3361,70 @@ async function openCompletion(
       parsed = JSON.parse(text)
     } catch {}
     const biz = envelopeError(parsed)
-    const muted = isMutedError(biz)
-    const busy = !muted && !!biz && isBusyGenerating(biz.msg)
+    const banned = isBannedError(biz)
+    const riskDevice = isRiskDeviceError(biz)
+    // `banned` 与 `muted` 同族（换号能接着干），区别只在文案与会不会自己好；
+    // `riskDevice` 是**设备级**，必须另走一条 —— 把它并进 muted，正是
+    // 「换任何账号都报同一个错」的放大器（新号继承同一台设备的判定）。
+    const muted = !riskDevice && (isMutedError(biz) || banned)
+    const busy = !muted && !riskDevice && !!biz && isBusyGenerating(biz.msg)
     // 账号级节流有**两个来源**，合到一个判据里：
     //   ① 码：40029（cuckoo-code 0.6.1 实测的「操作过于频繁」业务码）
     //   ② 文案族：isThrottled（「过于频繁 / 操作频繁 / 稍后重试 / 限流」…，话术变了也不会漏）
     // ⚠️ 必须合并 —— 分开写时我第一版就是「只给文案那条加了 20s 退避」，
     // 结果认了码却没带 providerRetryAfterMs（用例当场抓住）。两条来源的后续处理完全一样。
-    const throttled = !muted && !busy && !!biz && (biz.code === 40029 || isThrottled(biz.msg))
+    const throttled = !muted && !riskDevice && !busy && !!biz && (biz.code === 40029 || isThrottled(biz.msg))
     const untilMs = muteUntilMs(parsed)
     // 失败码先算出来 —— 下面 AUTH 那一档要用它判断"这次到底是不是授权失效"
     // （信封里的 40003/40001，HTTP 可能仍是 200）。0.6.8：AUTH 的退避改为条件式。
     const failureCode = !biz
       ? 'MALFORMED_RESPONSE'
-      : muted || busy || throttled
-        ? 'RATE_LIMIT'
-        : isInvalidSessionError(biz)
-          ? 'TRANSPORT'
-          : isInvalidRefFileError(biz)
-            ? 'INVALID_REF_FILE'
-            : bizErrorCode(biz.code)
+      : riskDevice
+        ? 'PROVIDER_ERROR'
+        : muted || busy || throttled
+          ? 'RATE_LIMIT'
+          : isInvalidSessionError(biz)
+            ? 'TRANSPORT'
+            : isInvalidRefFileError(biz)
+              ? 'INVALID_REF_FILE'
+              : bizErrorCode(biz.code)
+    // 设备被判风控 ⇒ 安排重建 profile（换 device_id）。必须在这里做，而不是等用户
+    // 手动清目录：那次重试要能用上新设备才算自愈。
+    if (riskDevice) {
+      requestTransportProfileReset(`上游返回 RISK_DEVICE_DETECTED（biz_code=${biz?.code}）`)
+    }
     const failure = biz
       ? new AdapterLlmError(
-          muted
-            ? mutedMessage(untilMs)
-            : busy
-              ? '网页版限流：同一账号同时只能生成一条消息，稍后自动重试'
-              : throttled
-                ? '网页版限流：发得太频繁，稍后自动重试'
-                : bizErrorMessage(biz.code, biz.msg),
+          riskDevice
+            ? riskDeviceMessage()
+            : banned
+              ? bannedMessage()
+              : muted
+                ? mutedMessage(untilMs)
+                : busy
+                  ? '网页版限流：同一账号同时只能生成一条消息，稍后自动重试'
+                  : throttled
+                    ? '网页版限流：发得太频繁，稍后自动重试'
+                    : bizErrorMessage(biz.code, biz.msg),
           failureCode,
           {
             status: resp.status,
             // 解除时间远大于重试策略的上限 → dsh-llm-retry 会直接放弃重试（而不是空转打请求）
             // ⚠️ 但如果**能换号**（宿主开了自动换号且还有可用候选），就不要放弃 —— 给短退避，
             // 让重试立刻发生；重发时自动换号的检查点会换上可用账号，整轮任务自己就能接下去。
+            // 设备级判定：给一次**短**退避，让「重建 profile 之后的那次重试」真的发生
+            // （重建 + 起浏览器约 5-15s，8s 够启动流程在内部等完）。
+            // 🔴 刻意**不调** `canFailover`：这里换号是死路 —— 新号会继承同一台设备的判定，
+            //    唯一有效的是换设备（见 requestTransportProfileReset）。
+            ...(riskDevice ? { providerRetryAfterMs: RISK_DEVICE_RETRY_MS } : {}),
+            // 永久封禁：账号已经废了，**必须让它退场**（写 mutedUntilMs ⇒ 宿主落 `limit`），
+            // 否则下一轮还会拿它发请求，每一次都在加重判定。
+            ...(banned ? { mutedUntilMs: untilMs ?? Date.now() + BANNED_HOLD_MS } : {}),
+            // 退避：能换号就短退避让重试立刻发生；不能就给一个超过重试上限的值，
+            // 让 dsh-llm-retry 直接放弃 —— 同一个被封的号隔几秒再撞一次，只会让判定更重。
+            ...(banned
+              ? { providerRetryAfterMs: canFailover('muted') ? FAILOVER_RETRY_MS : AUTH_GIVEUP_RETRY_MS }
+              : {}),
             ...(muted && untilMs !== undefined
               ? {
                   providerRetryAfterMs: canFailover('muted') ? FAILOVER_RETRY_MS : Math.max(0, untilMs - Date.now()),
@@ -3338,7 +3453,7 @@ async function openCompletion(
     // `AUTH`＝令牌失效）跟**这个会话**毫无关系 —— 换一个新会话账号照样被限，唯一的后果是把用户的
     // 对话丢掉。所以这里**保住**它，等用户重新登录/限流解除后接着聊。
     // 只有业务码明说"这个会话废了"（`invalid chat session id`）才退役。
-    const accountLevel = !!biz && (muted || busy || throttled || failureCode === 'AUTH')
+    const accountLevel = !!biz && (muted || busy || throttled || riskDevice || failureCode === 'AUTH')
     const ruined = !!biz && isInvalidSessionError(biz)
     if (accountLevel) {
       keepIds?.add(sessionId)

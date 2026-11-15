@@ -34,7 +34,38 @@ import type { PageObservation } from './transport-heartbeat.ts'
 export const findSystemBrowser = findSystemBrowserImpl
 
 const BINDING_NAME = '__dshBrowserTransportCallback'
-const PROFILE_DIR = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'web-login', 'transport-profile')
+/** 传输层 profile 的**根**目录；真正的 profile 在它下面按账号分。 */
+const PROFILE_ROOT = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'web-login', 'transport-profile')
+
+/**
+ * 传输层浏览器 profile 目录：**按账号分，且跨启动保留**。
+ *
+ * ## 为什么以前是错的（2026-11-15 改）
+ *
+ * 以前只有一个固定目录 `transport-profile`，而且每次启动都 `rename` 成
+ * `.stale-<ts>` 再 `rm -rf`、重建空目录 ⇒ **每重启一次 DSH 就换一台"新设备"**。
+ *
+ * 真实浏览器不是这样的：**一个 profile 对应一个稳定的数美 `device_id`**，几个月都不变。
+ * 频繁"换设备"本身就是最容易被识别的特征之一 —— 它比换 IP 更可疑，因为正常用户没有理由
+ * 每天换电脑。`NIyueeE/ds-free-api` 为此专门写了「一个浏览器 profile = 一个 device_id，
+ * 不要把同一个值复用到多个账号」。
+ *
+ * ## 为什么按账号分
+ *
+ * 同一个 profile 被多个账号轮换使用 ⇒ 上游把这几个账号关联成"同一台设备上的农场"。
+ * 按账号分目录后，每个账号各自有一台"固定的设备"，与「一账号一 device_id」对齐。
+ * 切换账号本来就会 `restart`（见 MEMORY「换号必然 restart」），所以换目录不会额外打断什么。
+ *
+ * ⚠️ 目录名要 sanitize：账号 ID 可能来自邮箱，带 `@` `/` 之类会把目录写到别处去。
+ */
+export function transportProfileDir(accountId?: string): string {
+  const raw = String(accountId ?? '').trim()
+  const safe = raw
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[._]+/, '_')
+    .slice(0, 80)
+  return join(PROFILE_ROOT, safe || '_anonymous')
+}
 
 /**
  * 传输层页面应该站在的 origin。**故意不 import `webapi.ts` 的 `DS_BASE`**：
@@ -156,6 +187,12 @@ let activeSession: BrowserTransportSession | undefined
 let launchPromise: Promise<BrowserTransportSession> | undefined
 const requests = new Map<string, TransportRequestState>()
 
+/** 下一次启动是否要重建 profile（见 `requestTransportProfileReset`）。 */
+let profileResetRequested = false
+/** 本进程已重建过几次 —— 连续换设备本身也是一种模式，所以有上限。 */
+let profileResetDone = 0
+const PROFILE_RESET_MAX = 2
+
 /**
  * 上一个 transport 浏览器是否真的退出了。
  *
@@ -227,7 +264,7 @@ function killTransportTree(pid: number | undefined): void {
 /**
  * 清空 transport profile 并重建。
  *
- * 🔴 为什么不是一句 `rmSync(PROFILE_DIR, { recursive: true, force: true })`：
+ * 🔴 为什么不是一句 `rmSync(profileDir, { recursive: true, force: true })`：
  *   Windows 上删除目录要求**目录本身和目录里每一个文件**都能被删除。只要上一次的
  *   浏览器还活着（哪怕只是残留的 GPU 进程），`rmSync` 就会抛 `EPERM`，而它的
  *   `force: true` 只吞"文件不存在"，不吞 `EPERM`。插件因此**每次启动都失败**，
@@ -241,11 +278,19 @@ function killTransportTree(pid: number | undefined): void {
  * 已有的 user-data-dir，虽然带上了上一次的残渣，但比"整个传输层起不来"好得多 ——
  * 后者会让所有依赖它的请求一起失败。
  */
+/**
+ * 准备传输层 profile 目录。
+ *
+ * 🔴 `reset` **默认 false** —— 正常路径上**保留**既有 profile，让 `device_id` 跨启动稳定
+ * （见 `transportProfileDir` 的说明）。只有「保留的 profile 起不来」或「设备已被风控标记」
+ * 时才传 true 清空重建，那是自愈，不是常规路径。
+ */
 async function prepareTransportProfile(
   profileDir: string,
   waitForReclaim: () => Promise<void>,
+  reset = false,
 ): Promise<void> {
-  if (existsSync(profileDir)) {
+  if (reset && existsSync(profileDir)) {
     // 先收掉仍占着这个目录的旧浏览器，否则改名也会失败（Windows 上"
     // 目录里有打开的文件"时 rename 同样被拒）。
     await waitForReclaim()
@@ -405,7 +450,7 @@ function handleBindingEvent(payload: string): void {
  *
  * ## 为什么这件事是必须的（2026-10-14）
  *
- * 2026-10-14 之前传输层启动在 **`about:blank`**（`buildBrowserArgs(PROFILE_DIR, 'about:blank')`），
+ * 2026-10-14 之前传输层启动在 **`about:blank`**（`buildBrowserArgs(profileDir, 'about:blank')`），
  * 于是每个请求都是"从 `about:blank` 发出、打到 chat.deepseek.com 的跨源请求"：
  *  - `Origin` 不是站点 origin（`Origin` 是**禁止头**，脚本补不了，只能靠页面自己在那个 origin 上）；
  *  - `Referer` 缺失；
@@ -609,44 +654,81 @@ export async function launchBrowserTransport(): Promise<BrowserTransportSession>
     const browser = findSystemBrowser()
     if (!browser) throw new Error('未找到 Edge/Chrome，无法启动浏览器代理传输层')
 
-    await prepareTransportProfile(PROFILE_DIR, waitForPreviousTransportExit)
+    // 🔴 profile 按账号持久化（见 transportProfileDir）：device_id 跨启动稳定。
+    const profileDir = transportProfileDir(activeAccountId())
+    const userAgent = transportPageUserAgent()
 
-    const child = spawn(
-      browser.path,
-      transportBrowserArgs(PROFILE_DIR, transportPageUserAgent()),
-      {
+    /**
+     * 起一次浏览器并等到可用的页面。
+     *
+     * `reset` 只用于**自愈**（第一次带保留 profile 起不来时清空再来一遍）——
+     * 代价是这个账号会换一个 device_id，所以常规路径上必须是 false。
+     */
+    const startOnce = async (reset: boolean): Promise<{ child: ChildProcess; page: any }> => {
+      await prepareTransportProfile(profileDir, waitForPreviousTransportExit, reset)
+
+      const child = spawn(browser.path, transportBrowserArgs(profileDir, userAgent), {
         stdio: 'ignore',
         detached: false,
-      },
-    )
+      })
 
-    let spawnError: Error | undefined
-    child.on('error', (err) => {
-      spawnError = err
-    })
-    await new Promise((r) => setTimeout(r, 300))
-    // 启动失败的三条出口也要收整棵进程树：半死的浏览器同样占着 profile。
+      let spawnError: Error | undefined
+      child.on('error', (err) => {
+        spawnError = err
+      })
+      await new Promise((r) => setTimeout(r, 300))
+      // 启动失败的三条出口也要收整棵进程树：半死的浏览器同样占着 profile。
+      const abortLaunch = (): void => {
+        killTransportTree(child.pid)
+        try {
+          child.kill()
+        } catch {}
+      }
+      if (spawnError) {
+        abortLaunch()
+        throw new Error(`启动浏览器失败：${spawnError.message}`)
+      }
+
+      const port = await waitForTransportDebugPort(profileDir, child)
+      if (!port) {
+        abortLaunch()
+        throw new Error('浏览器调试端口未就绪')
+      }
+
+      const page = await findPageTarget(port)
+      if (!page) {
+        abortLaunch()
+        throw new Error('浏览器里没有可用页面')
+      }
+      return { child, page }
+    }
+
+    // 上游明确判了「设备可疑」（RISK_DEVICE_DETECTED）时，那一次请求会请求重建；
+    // 这是唯一会**主动**换 device_id 的路径。
+    const forceReset = consumeProfileReset()
+    let started: { child: ChildProcess; page: any }
+    try {
+      started = await startOnce(forceReset)
+    } catch (firstError: any) {
+      // 已经按请求重置过还是起不来 ⇒ 问题不在 profile，再清一次只是白换一台设备。
+      if (forceReset) throw firstError
+      // ⚠️ 必须把原因说出来：清空 profile 意味着这个账号换了一台「新设备」，
+      // 是个有代价的动作，不能静默发生。
+      console.warn(
+        `[deepseek-web] 保留的浏览器 profile 起不来（${firstError?.message ?? firstError}），` +
+          '清空后重建一次 —— 这个账号会换一个 device_id',
+      )
+      started = await startOnce(true)
+    }
+    const { child, page } = started
+
+    // `startOnce` 内部的同名函数只管那一次尝试的 child；这里这个管**最终选中的**那个
+    // （CDP 连接失败时要用它收掉，否则会留一个半死的浏览器占着 profile）。
     const abortLaunch = (): void => {
       killTransportTree(child.pid)
       try {
         child.kill()
       } catch {}
-    }
-    if (spawnError) {
-      abortLaunch()
-      throw new Error(`启动浏览器失败：${spawnError.message}`)
-    }
-
-    const port = await waitForTransportDebugPort(PROFILE_DIR, child)
-    if (!port) {
-      abortLaunch()
-      throw new Error('浏览器调试端口未就绪')
-    }
-
-    const page = await findPageTarget(port)
-    if (!page) {
-      abortLaunch()
-      throw new Error('浏览器里没有可用页面')
     }
 
     const cdp = new CdpClient(page.webSocketDebuggerUrl)
@@ -732,6 +814,39 @@ export function invalidateTransportSession(): void {
   activeSession?.cleanup()
   activeSession = undefined
   launchPromise = undefined
+}
+
+/**
+ * 请求**下次启动传输层时重建 profile**（= 换一个数美 `device_id`）。
+ *
+ * 只有一个正当用途：上游明确回了 `RISK_DEVICE_DETECTED`（biz_code=11）——
+ * 那是**设备级**判定，换账号没有意义（新号会立刻继承同一台"可疑设备"），
+ * 唯一有效的是换一台设备。
+ *
+ * 🔴 为什么不自动反复重建：连续换设备同样是一种模式（正常用户不会一天换十台电脑）。
+ * 所以有次数上限，超了就只记日志、不再自动重建。
+ */
+export function requestTransportProfileReset(reason: string): boolean {
+  if (profileResetDone >= PROFILE_RESET_MAX) {
+    console.warn(
+      `[deepseek-web] 本进程已重建过 ${PROFILE_RESET_MAX} 次浏览器 profile，不再自动重建（原因：${reason}）`,
+    )
+    return false
+  }
+  if (profileResetRequested) return true
+  profileResetRequested = true
+  console.warn(`[deepseek-web] 下次启动传输层时会重建浏览器 profile（设备身份重置）—— 原因：${reason}`)
+  // 立刻收掉当前会话：否则下一次请求会直接复用仍然带旧 device_id 的那个浏览器。
+  invalidateTransportSession()
+  return true
+}
+
+/** 取出并清除"重建 profile"的请求（自愈计数在这里增加）。 */
+function consumeProfileReset(): boolean {
+  if (!profileResetRequested) return false
+  profileResetRequested = false
+  profileResetDone++
+  return true
 }
 
 export async function shutdownBrowserTransport(): Promise<void> {
@@ -935,6 +1050,48 @@ async function bodyToPageInit(body: BodyInit | null | undefined): Promise<string
   )
 }
 
+/**
+ * 生成「用页面里最新的 `x-hif-leim` 覆盖请求头」的页面脚本（**纯函数产物**）。
+ *
+ * ## 为什么必须这么做
+ *
+ * `x-hif-leim` 是**短期令牌**：真实客户端从 `hif-leim.deepseek.com/query` 取，
+ * 按响应头 `x-hif-ttl`（默认 **600 秒**）续取；取不到就不带这个头。
+ * 而登录流程抓到的是**那一刻的快照** —— 登录 10 分钟之后它就是过期值，而且永远不换。
+ * 带着「一个过期、且从不刷新」的风控令牌，比不带更像非官方客户端。
+ *
+ * ## 为什么不自己轮询
+ *
+ * 页面里的站点 JS 本来就在按 TTL 刷新 `localStorage.hif_leim_cached`（`page-session.ts`
+ * 把 `userToken` 写回页面的初衷就是让站点应用真的跑起来）。直接读它 = **复用官方的轮询
+ * 结果**：零额外请求、零额外往返，也不需要自己造一个「每 N 秒一次」的定时器
+ * —— 固定周期本身就是一个可识别的模式（见 MEMORY「别自己造模式」）。
+ *
+ * ## 约定
+ *
+ * - 只改 `headersVar` 里已有的同名键（大小写不敏感）；没有就新增一个小写键。
+ * - 读不到 / 解析失败 / 页面里是空串 ⇒ **一个字节都不改**（沿用调用方给的值）。
+ *   真实客户端轮询失败时同样只是不带新值，不会把旧值换成另一个旧值。
+ * - 整体包在 IIFE + try 里：这段脚本**不许**让请求本身失败。
+ * - ⚠️ 产物里**不能有反引号**：它会被嵌进 `createBrowserFetch` 的模板字符串。
+ */
+export function buildFreshHifScript(headersVar: string): string {
+  const h = headersVar
+  return (
+    '(function(){try{' +
+    'var raw=localStorage.getItem("hif_leim_cached");' +
+    'if(!raw)return;' +
+    'var fresh=raw.charAt(0)===\'"\'?JSON.parse(raw):raw;' +
+    'if(!fresh)return;' +
+    'var hit=false;' +
+    'for(var k in ' + h + '){' +
+    'if(k.toLowerCase()==="x-hif-leim"){' + h + '[k]=fresh;hit=true;}' +
+    '}' +
+    'if(!hit)' + h + '["x-hif-leim"]=fresh;' +
+    '}catch(e){}})()'
+  )
+}
+
 const POW_BINDING = '__dshPowSolveResult'
 
 /**
@@ -1130,9 +1287,12 @@ export function createBrowserFetch(): typeof fetch {
         ${PAGE_HELPERS}
         const requestId = ${JSON.stringify(requestId)};
         try {
+          const hdr = ${JSON.stringify(headers)};
+          // 🔴 见 buildFreshHifScript 的说明：别用登录快照当 hif 令牌。
+          ${buildFreshHifScript('hdr')}
           const init = {
             method: ${JSON.stringify(method)},
-            headers: ${JSON.stringify(headers)},
+            headers: hdr,
             // 🔴 cookie 已经由 CDP 的 Network.setCookie 装进这个 profile 了；
             // same-origin 是同源默认值，生产里页面就在站点 origin 上、本来就会带上。
             // 显式写 include 是为了不让"页面 origin 变了"这类改动悄悄把 cookie 弄丢。

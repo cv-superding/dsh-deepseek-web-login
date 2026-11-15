@@ -797,6 +797,18 @@ function Panel(): any {
     const syncSavedState = async (): Promise<void> => {
       try {
         const light = await api('/status?light=1')
+        // 登录熔断：站点已限制这台机器时，别让用户继续点（每点一次都在加重判定）
+        const cooling = Boolean(light?.loginGuard?.cooling)
+        for (const btn of [browserBtn, externalBtn, autoLoginBtn, useSavedBtn]) btn.disabled = cooling
+        if (cooling) {
+          const until = Number(light?.loginGuard?.blockedUntil ?? 0)
+          const minutes = until > Date.now() ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 0
+          credMsg.textContent =
+            `登录冷却中（${minutes} 分钟）—— 站点可能已限制这台机器/这个网络` +
+            `（常见提示："由于违规次数过多，你的账户已被临时停用"）。` +
+            `冷却期内继续尝试只会加重判定：换网络（手机热点/另一条宽带）或等冷却结束。`
+          return
+        }
         const saved = Boolean(light?.hasSavedCredential)
         useSavedBtn.disabled = !saved
         useSavedBtn.title = saved
